@@ -14,6 +14,7 @@ import { execFile } from 'node:child_process';
 import { homedir } from 'node:os';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { MAX_RATE, MIN_RATE } from '@zhidedeng/shared';
 import type { CatalogImportPost, CatalogImportRequest, CatalogImportResponse, CatalogImportStation } from '@zhidedeng/shared';
 
 export interface RawRecord {
@@ -151,8 +152,12 @@ function parseOffers(raw: unknown, models: Map<string, string>, report: (message
       continue;
     }
     const rate = /^\d+(\.\d+)?\s*[xX倍]?$/.test(parts[2]) ? Number.parseFloat(parts[2]) : Number.NaN;
-    if (!Number.isFinite(rate) || rate <= 0) {
+    if (!Number.isFinite(rate)) {
       report(`倍率必须是大于 0 的数字，已跳过：${line}`);
+      continue;
+    }
+    if (rate < MIN_RATE || rate > MAX_RATE) {
+      report(`倍率超出 ${MIN_RATE}~${MAX_RATE} 范围，已跳过`);
       continue;
     }
     offers.set(modelSlug, rate);

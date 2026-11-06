@@ -12,7 +12,7 @@ let server: ReturnType<typeof createApp>;
 beforeEach(() => {
   server = createApp({ dbPath: ':memory:', now: () => new Date('2026-11-05T01:00:00Z') });
   server.db.prepare('INSERT INTO entities (kind,id,data) VALUES (?,?,?)').run('station', unmeasured.slug, JSON.stringify(unmeasured));
-  server.db.prepare('INSERT INTO offers (stationSlug,modelSlug,rate) VALUES (?,?,?)').run(unmeasured.slug, 'gpt-4-1', 0.01);
+  server.db.prepare('INSERT INTO offers (stationSlug,modelSlug,rate) VALUES (?,?,?)').run(unmeasured.slug, 'gpt-4-1', 0.05);
 });
 afterEach(() => server.db.close());
 
@@ -21,7 +21,7 @@ const stations = async (sort: string) => (await (await server.app.request(`/api/
 describe('没有测量数据的站点', () => {
   it('详情如实返回 null，综合得分也是 null 而不是 0', async () => {
     const detail = await (await server.app.request(`/api/stations/${unmeasured.slug}`)).json() as StationDetail;
-    expect(detail).toMatchObject({ uptime: null, firstTokenLatencyMs: null, foundedAt: null, status: null, rechargeThreshold: null, score: null, lowestRate: 0.01 });
+    expect(detail).toMatchObject({ uptime: null, firstTokenLatencyMs: null, foundedAt: null, status: null, rechargeThreshold: null, score: null, lowestRate: 0.05 });
   });
 
   it('按综合和可用率排序时排在有数据的站点之后', async () => {
@@ -33,8 +33,9 @@ describe('没有测量数据的站点', () => {
     }
   });
 
-  it('按倍率排序仍用它的真实报价', async () => {
-    expect((await stations('rate')).items[0].slug).toBe(unmeasured.slug);
+  it('按倍率排序仍返回真实报价，但不足三个报价的站点排在最后', async () => {
+    const { items } = await stations('rate');
+    expect(items.at(-1)).toMatchObject({ slug: unmeasured.slug, lowestRate: 0.05 });
   });
 
   it('种子站点标明是演示来源，用户投稿标明是本人来源', async () => {
