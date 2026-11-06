@@ -1,6 +1,9 @@
 import { z, ZodError } from 'zod';
 import { MAX_RATE, MIN_RATE } from '@zhidedeng/shared';
-import type { CatalogImportRequest, CatalogImportResponse } from '@zhidedeng/shared';
+import type {
+  AdminCreateModelRequest, AdminCreateVendorRequest, AdminDeleteModelResponse,
+  CatalogImportRequest, CatalogImportResponse, Model, Vendor,
+} from '@zhidedeng/shared';
 import type { Store } from './database.ts';
 import { ApiError } from './errors.ts';
 
@@ -23,6 +26,7 @@ const httpUrl = z.string().max(300).refine(value => {
   }
 });
 const importSchema: z.ZodType<CatalogImportRequest> = z.strictObject({
+  allowNewModels: z.boolean().optional(),
   stations: z.array(z.strictObject({
     slug: z.string().regex(/^sub-[a-z0-9-]{1,120}$/),
     name: singleLine(60),
@@ -61,10 +65,17 @@ function importCatalog(store: Store, input: CatalogImportRequest): CatalogImport
   return store.transaction(() => {
     const models = new Set(store.all('model').map(model => model.slug));
     const offers = input.stations.flatMap(({ slug, offers }) => offers.map(offer => ({ stationSlug: slug, ...offer })));
-    const unknown = offers.find(offer => !models.has(offer.modelSlug));
-    if (unknown) throw new ApiError(400, 'INVALID_INPUT', `未知模型：${unknown.modelSlug}`);
+    const unknown = [...new Set(offers.map(offer => offer.modelSlug).filter(slug => !models.has(slug)))];
+    if (unknown.length && !input.allowNewModels) throw new ApiError(400, 'INVALID_INPUT', `未知模型：${unknown[0]}`);
 
     const before = submissionFingerprint(store);
+    // 自动创建的占位模型统一挂在 unknown 厂商下，等管理员补全或改建正式厂商。
+    if (unknown.length) {
+      if (!store.get('vendor', 'unknown')) store.put('vendor', 'unknown', { slug: 'unknown', name: '未知厂商', iconKey: 'unknown' });
+      for (const slug of unknown) {
+        store.put('model', slug, { slug, vendor: 'unknown', name: slug, description: '群友/Agent 提交时自动创建，待补全', tags: [] });
+      }
+    }
     store.db.prepare(`DELETE FROM offers WHERE stationSlug IN ${SUBMITTED_STATIONS}`).run();
     store.db.prepare(`DELETE FROM entities WHERE ${IS_SUBMISSION}`).run();
     for (const { offers: _offers, ...station } of input.stations) {
@@ -77,7 +88,7 @@ function importCatalog(store: Store, input: CatalogImportRequest): CatalogImport
       const id = `feishu-${recordId}`;
       store.put('post', id, { ...post, id, kind: 'review', authorHandle: 'feishu-submission', authorNickname: authorName, modelSlug: null, cover: null, source: 'submission', status: 'approved' });
     }
-    return { changed: submissionFingerprint(store) !== before, stations: input.stations.length, offers: offers.length, posts: input.posts.length };
+    return { changed: unknown.length > 0 || submissionFingerprint(store) !== before, stations: input.stations.length, offers: offers.length, posts: input.posts.length, createdModels: unknown.sort() };
   });
 }
 
@@ -100,6 +111,46 @@ export function importResponse(store: Store, rawBody: string) {
 
 /** 管理接口密钥的最短长度，短于它视为未配置。 */
 export const MIN_SYNC_TOKEN_LENGTH = 32;
+
+// 模型和厂商的 slug 共用同一套规则：小写字母、数字和连字符，最长 64。
+const slugPattern = /^[a-z0-9][a-z0-9-]{0,63}$/;
+export const adminSlug = z.string().trim().regex(slugPattern);
+
+export function createVendor(store: Store, input: AdminCreateVendorRequest): Vendor {
+  return store.transaction(() => {
+    if (store.get('vendor', input.slug)) throw new ApiError(409, 'VENDOR_EXISTS', `厂商已存在：${input.slug}`);
+    const vendor: Vendor = { slug: input.slug, name: input.name, iconKey: input.iconKey ?? input.slug };
+    store.put('vendor', vendor.slug, vendor);
+    return vendor;
+  });
+}
+
+export function createModel(store: Store, input: AdminCreateModelRequest): Model {
+  return store.transaction(() => {
+    if (store.get('model', input.slug)) throw new ApiError(409, 'MODEL_EXISTS', `模型已存在：${input.slug}`);
+    if (!store.get('vendor', input.vendor)) throw new ApiError(400, 'INVALID_INPUT', `厂商不存在：${input.vendor}`);
+    const model: Model = { slug: input.slug, vendor: input.vendor, name: input.name, description: input.description, tags: [] };
+    store.put('model', model.slug, model);
+    return model;
+  });
+}
+
+export function deleteModel(store: Store, slug: string): AdminDeleteModelResponse {
+  return store.transaction(() => {
+    if (!store.get('model', slug)) throw new ApiError(404, 'NOT_FOUND', `模型不存在：${slug}`);
+    const offers = store.db.prepare('SELECT COUNT(DISTINCT stationSlug) AS count FROM offers WHERE modelSlug = ?').get(slug)!;
+    const stationCount = Number(offers.count);
+    // 文章也会关联模型，直接删会留下指向不存在模型的引用。
+    const posts = store.db.prepare("SELECT COUNT(*) AS count FROM entities WHERE kind = 'post' AND json_extract(data,'$.modelSlug') = ?").get(slug)!;
+    const postCount = Number(posts.count);
+    if (stationCount + postCount > 0) {
+      const used = [stationCount && `${stationCount} 个站点的报价`, postCount && `${postCount} 篇文章`].filter(Boolean).join('和');
+      throw new ApiError(409, 'MODEL_IN_USE', `模型仍被${used}引用`, { stationCount, postCount });
+    }
+    store.db.prepare('DELETE FROM entities WHERE kind = ? AND id = ?').run('model', slug);
+    return { slug, deleted: true };
+  });
+}
 
 /** 先取摘要再逐字节比较，耗时与 token 内容和长度都无关。 */
 async function constantTimeEqual(left: string, right: string) {
