@@ -1,4 +1,5 @@
 import { z, ZodError } from 'zod';
+import { MAX_RATE, MIN_RATE } from '@zhidedeng/shared';
 import type { CatalogImportRequest, CatalogImportResponse } from '@zhidedeng/shared';
 import type { Store } from './database.ts';
 import { ApiError } from './errors.ts';
@@ -9,6 +10,9 @@ const IS_SUBMISSION = "json_extract(data,'$.source') = 'submission'";
 const SUBMITTED_STATIONS = `(SELECT id FROM entities WHERE kind = 'station' AND ${IS_SUBMISSION})`;
 
 const singleLine = (max: number) => z.string().min(1).max(max);
+const offerRate = z.number().refine(rate => rate >= MIN_RATE && rate <= MAX_RATE, {
+  error: issue => ({ message: `倍率 ${String(issue.input)} 超出 ${MIN_RATE}~${MAX_RATE} 范围` }),
+});
 const httpUrl = z.string().max(300).refine(value => {
   if (value.includes('?') || value.includes('#')) return false;
   try {
@@ -26,7 +30,7 @@ const importSchema: z.ZodType<CatalogImportRequest> = z.strictObject({
     url: httpUrl,
     rechargeThreshold: z.number().min(0).nullable(),
     paymentMethods: z.array(singleLine(20)).max(10),
-    offers: z.array(z.strictObject({ modelSlug: singleLine(200), rate: z.number().positive() })).max(100),
+    offers: z.array(z.strictObject({ modelSlug: singleLine(200), rate: offerRate })).max(100),
   })),
   posts: z.array(z.strictObject({
     recordId: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/),
@@ -84,7 +88,11 @@ export function importResponse(store: Store, rawBody: string) {
   try {
     return respond(importCatalog(store, importSchema.parse(JSON.parse(rawBody))), 200);
   } catch (error) {
-    if (error instanceof ZodError || error instanceof SyntaxError) return refuse(400, 'INVALID_INPUT', '导入内容无效');
+    if (error instanceof ZodError) {
+      const rateIssue = error.issues.find(issue => issue.code === 'custom' && issue.message.startsWith('倍率 '));
+      return refuse(400, 'INVALID_INPUT', rateIssue?.message ?? '导入内容无效');
+    }
+    if (error instanceof SyntaxError) return refuse(400, 'INVALID_INPUT', '导入内容无效');
     if (error instanceof ApiError) return refuse(error.status, error.code, error.message);
     throw error;
   }

@@ -28,7 +28,7 @@ const submission: CatalogImportRequest = {
 
 async function runImport(store: ReturnType<typeof newStore>, input: unknown) {
   const response = importResponse(store, JSON.stringify(input));
-  return { status: response.status, body: await response.json() as { changed: boolean; error?: { code: string } } };
+  return { status: response.status, body: await response.json() as { changed: boolean; error?: { code: string; message: string } } };
 }
 
 describe('全量导入', () => {
@@ -62,11 +62,20 @@ describe('全量导入', () => {
     expect(store.all('post')).toHaveLength(48);
   });
 
+  it.each([0.05, 20])('接受倍率边界 %s', async rate => {
+    const store = newStore();
+    const input = { ...submission, stations: [{ ...submission.stations[0], offers: [{ modelSlug: 'o3', rate }] }] };
+    expect(await runImport(store, input)).toMatchObject({ status: 200, body: { changed: true } });
+  });
+
   it.each([
     ['非 http(s) 网址', { ...submission, stations: [{ ...submission.stations[0], url: 'javascript:alert(1)' }] }],
     ['带 query 的网址', { ...submission, stations: [{ ...submission.stations[0], url: 'https://a.com/?aff=1' }] }],
     ['带 fragment 的网址', { ...submission, stations: [{ ...submission.stations[0], url: 'https://a.com/#aff' }] }],
+    ['倍率低于范围', { ...submission, stations: [{ ...submission.stations[0], offers: [{ modelSlug: 'o3', rate: 0.04 }] }] }],
     ['倍率为 0', { ...submission, stations: [{ ...submission.stations[0], offers: [{ modelSlug: 'o3', rate: 0 }] }] }],
+    ['倍率为负数', { ...submission, stations: [{ ...submission.stations[0], offers: [{ modelSlug: 'o3', rate: -1 }] }] }],
+    ['倍率高于范围', { ...submission, stations: [{ ...submission.stations[0], offers: [{ modelSlug: 'o3', rate: 20.01 }] }] }],
     ['未知模型', { ...submission, stations: [{ ...submission.stations[0], offers: [{ modelSlug: 'nope', rate: 1 }] }] }],
     ['关联了不存在的站点', { ...submission, posts: [{ ...submission.posts[0], stationSlug: 'sub-nope' }] }],
     ['重复的站点', { ...submission, stations: [submission.stations[0], submission.stations[0]] }],
@@ -78,6 +87,9 @@ describe('全量导入', () => {
     const result = await runImport(store, input);
     expect(result.status).toBe(400);
     expect(result.body.error?.code).toBe('INVALID_INPUT');
+    if (typeof input !== 'string' && ['倍率低于范围', '倍率高于范围', '倍率为 0', '倍率为负数'].includes(_name)) {
+      expect(result.body.error?.message).toContain(String(input.stations[0].offers[0].rate));
+    }
     expect(store.all('station')).toHaveLength(12);
   });
 });

@@ -108,10 +108,20 @@ describe('buildImport', () => {
 
   it('坏倍率行和未知模型只跳过那一行并报告', () => {
     const notes = result().notes.join('\n');
-    for (const line of ['未知模型X', 'o3', 'gemini-pro', 'deepseek-chat', 'glm', 'kimi', '没有等号的行']) expect(notes).toContain(line);
+    for (const line of ['未知模型X', 'o3', 'gemini-pro', 'glm', 'kimi', '没有等号的行']) expect(notes).toContain(line);
+    expect(notes).toContain('倍率超出 0.05~20 范围，已跳过');
     expect(notes).toMatch(/recA1/);
     expect(notes).toMatch(/recD1.*最低充值/);
     expect(notes).toMatch(/recD1.*推荐指数/);
+  });
+
+  it('只保留 0.05 到 20 的倍率并按范围提示跳过越界值', () => {
+    const { payload, notes } = buildImport([{ recordId: 'rate-bounds', fields: {
+      中转站名称: '倍率边界站', 网址: 'https://rates.example/', 提交类型: '推荐新站',
+      模型与倍率: 'GPT-4.1=0.05\nClaude Sonnet=20\no3=0.04\ngemini-pro=20.01', 审核状态: '通过', 提交时间: '2026-01-01',
+    } }], MODELS);
+    expect(payload.stations[0].offers).toEqual([{ modelSlug: 'claude-sonnet', rate: 20 }, { modelSlug: 'gpt-4-1', rate: 0.05 }]);
+    expect(notes.filter(note => note.includes('倍率超出 0.05~20 范围，已跳过'))).toHaveLength(2);
   });
 
   it('没写报价的新记录不覆盖旧报价；更新记录带报价时整组替换', () => {

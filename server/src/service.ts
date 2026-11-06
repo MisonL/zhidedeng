@@ -27,6 +27,7 @@ const COMMENT_VISIBLE = 'hidden = 0 AND (parentId IS NULL OR parentId NOT IN (SE
 const COMMENTS_PER_MINUTE = 5;
 const POSTS_PER_HOUR = 10;
 const MAX_PENDING_POSTS = 20;
+const MIN_OFFERS_FOR_RATE = 3;
 const POST_AUTHOR = "kind = 'post' AND json_extract(data,'$.authorHandle') = ?";
 
 const descendingNullsLast = (a: number | null, b: number | null) => (b ?? -Infinity) - (a ?? -Infinity) || 0;
@@ -70,7 +71,7 @@ export class Service {
   private station(record: StationRecord): Station {
     const interaction = this.interaction({ targetType: 'station', targetId: record.slug });
     const offers = this.offers().filter(offer => offer.stationSlug === record.slug);
-    const lowestRate = offers.length ? Math.min(...offers.map(o => o.rate)) : null;
+    const lowestRate = offers.length ? Math.min(...offers.map(offer => offer.rate)) : null;
     const score = record.uptime === null ? null : Number((record.uptime * 0.6 + (interaction.votes.total ? interaction.votes.upRatio : 0.5) * 30 + (1 / (lowestRate ?? 1)) * 3).toFixed(2));
     return { ...record, ...interaction, lowestRate, score };
   }
@@ -85,6 +86,10 @@ export class Service {
   private cachedOffers?: StationOffer[];
   private offers(): StationOffer[] {
     return this.cachedOffers ??= this.store.db.prepare('SELECT stationSlug, modelSlug, rate FROM offers').all() as unknown as StationOffer[];
+  }
+
+  private hasEnoughOffersForRate(offers: StationOffer[]): boolean {
+    return offers.length >= MIN_OFFERS_FOR_RATE;
   }
 
   /** 公开内容；作者本人的待审和被拒投稿只出现在我的分享和详情页。 */
@@ -177,9 +182,21 @@ export class Service {
 
   getStations(query: GetStationsRequest) {
     const vendorModels = new Set(this.store.all('model').filter(m => m.vendor === query.vendor).map(m => m.slug));
-    const vendorStations = new Set(this.offers().filter(o => vendorModels.has(o.modelSlug)).map(o => o.stationSlug));
+    const offers = this.offers();
+    const vendorStations = new Set(offers.filter(o => vendorModels.has(o.modelSlug)).map(o => o.stationSlug));
     const items = this.store.all('station').filter(s => (!query.vendor || vendorStations.has(s.slug)) && matches(query.q, s.name, s.slug, s.description)).map(s => this.station(s));
-    items.sort((a, b) => query.sort === 'rate' ? (a.lowestRate ?? Infinity) - (b.lowestRate ?? Infinity) : query.sort === 'uptime' ? descendingNullsLast(a.uptime, b.uptime) : descendingNullsLast(a.score, b.score));
+    if (query.sort === 'rate') {
+      const offersByStation = new Map<string, StationOffer[]>();
+      for (const offer of offers) offersByStation.set(offer.stationSlug, [...(offersByStation.get(offer.stationSlug) ?? []), offer]);
+      items.sort((a, b) => {
+        const aOffers = offersByStation.get(a.slug) ?? [];
+        const bOffers = offersByStation.get(b.slug) ?? [];
+        return Number(this.hasEnoughOffersForRate(bOffers)) - Number(this.hasEnoughOffersForRate(aOffers))
+          || (a.lowestRate ?? Infinity) - (b.lowestRate ?? Infinity);
+      });
+    } else {
+      items.sort((a, b) => query.sort === 'uptime' ? descendingNullsLast(a.uptime, b.uptime) : descendingNullsLast(a.score, b.score));
+    }
     return paginate(items, query);
   }
 
@@ -277,11 +294,18 @@ export class Service {
       const offers = this.offers();
       const items = this.store.all('model').map(model => {
         const matching = offers.filter(o => o.modelSlug === model.slug);
-        return { rank: 0, model, lowestRate: matching.length ? Math.min(...matching.map(o => o.rate)) : null, stationCount: matching.length };
+        return {
+          rank: 0, model,
+          lowestRate: matching.length ? Math.min(...matching.map(offer => offer.rate)) : null,
+          stationCount: matching.length,
+          rateEligible: this.hasEnoughOffersForRate(matching),
+        };
       });
-      // 收录广度与最低倍率共同计分，避免单一低价站决定整个榜单。
-      items.sort((a, b) => (b.stationCount + 1 / (b.lowestRate ?? Infinity)) - (a.stationCount + 1 / (a.lowestRate ?? Infinity)));
-      return { tab: 'model', ...paginate(items.slice(0, 12).map((item, index) => ({ ...item, rank: index + 1 })), query) };
+      // 至少三个站点报价才启用低价加成，避免单条低价决定榜单。
+      const score = (item: typeof items[number]) => item.stationCount + (item.rateEligible && item.lowestRate !== null ? 1 / item.lowestRate : 0);
+      items.sort((a, b) => Number(b.rateEligible) - Number(a.rateEligible) || score(b) - score(a));
+      const ranked = items.slice(0, 12).map(({ rateEligible: _rateEligible, ...item }, index) => ({ ...item, rank: index + 1 }));
+      return { tab: 'model', ...paginate(ranked, query) };
     }
     if (query.tab === 'community') {
       const posts = this.approvedPosts().filter(p => p.kind === 'community').map(p => this.post(p));
