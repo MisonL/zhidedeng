@@ -1,0 +1,15 @@
+node_modules/
+dist/
+release/
+*.log
+.DS_Store
+*.db*
+.env
+.env.*
+!.env.example
+coverage/
+playwright-report/
+test-results/
+docs/ref/
+assets-src/
+.claude/

@@ -1,0 +1,87 @@
+# nginx 站点模板。替换占位符后放到 /etc/nginx/sites-available/ 并启用，同时删掉发行版自带的 default 站点
+# （两个 default_server 会冲突）：
+#   __SERVER_NAME__  域名
+#   __TLS_CERT__     证书路径
+#   __TLS_KEY__      私钥路径
+#   __APP_PORT__     服务端口，与环境文件里的 PORT 一致
+#
+# Node 只监听 127.0.0.1。这里用 $remote_addr 覆盖 X-Forwarded-For，客户端伪造的值不会传进去，
+# 服务端限流按它识别 IP。只监听 IPv4：服务器不用 IPv6，也避开 limit_req 按单个地址计数被 /64 绕过。
+
+# key 为空的请求不计入对应的限速区。读写分开计数。
+map $request_method $zhidedeng_read_key {
+  default "";
+  GET     $binary_remote_addr;
+  HEAD    $binary_remote_addr;
+}
+map $request_method $zhidedeng_write_key {
+  default "";
+  POST    $binary_remote_addr;
+  PUT     $binary_remote_addr;
+  PATCH   $binary_remote_addr;
+  DELETE  $binary_remote_addr;
+}
+limit_req_zone $zhidedeng_read_key zone=zhidedeng_api_read:10m rate=30r/s;
+limit_req_zone $zhidedeng_write_key zone=zhidedeng_api_write:10m rate=2r/s;
+
+# 兜底：Host 不是本站的请求直接断开。444 是 nginx 的「不响应直接关连接」。
+server {
+  listen 80 default_server;
+  server_name _;
+  return 444;
+}
+server {
+  listen 443 ssl default_server;
+  server_name _;
+  ssl_certificate __TLS_CERT__;
+  ssl_certificate_key __TLS_KEY__;
+  return 444;
+}
+
+server {
+  listen 80;
+  server_name __SERVER_NAME__;
+  return 301 https://__SERVER_NAME__$request_uri;
+}
+
+server {
+  listen 443 ssl http2;
+  server_name __SERVER_NAME__;
+
+  ssl_certificate __TLS_CERT__;
+  ssl_certificate_key __TLS_KEY__;
+
+  # 投稿正文上限对应的请求体。
+  client_max_body_size 1m;
+
+  # 下面的 location 都不写 add_header，否则这些响应头不会被继承。
+  add_header Strict-Transport-Security "max-age=31536000" always;
+  add_header X-Content-Type-Options "nosniff" always;
+  add_header X-Frame-Options "DENY" always;
+  add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+  add_header Content-Security-Policy "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'" always;
+
+  gzip on;
+  gzip_types text/css application/javascript application/json image/svg+xml;
+
+  proxy_set_header Host $host;
+  proxy_set_header X-Forwarded-For $remote_addr;
+  proxy_set_header X-Forwarded-Proto $scheme;
+
+  # 管理接口不对公网开放（含导入），一律从服务器本机直连 127.0.0.1。前缀比 /api/ 长，优先匹配。
+  location /api/admin/ {
+    return 404;
+  }
+
+  # 首页一次会并发十几个 API 请求，读请求的 burst 给足，防的是持续抓取。
+  location /api/ {
+    limit_req zone=zhidedeng_api_read burst=60 nodelay;
+    limit_req zone=zhidedeng_api_write burst=20 nodelay;
+    limit_req_status 429;
+    proxy_pass http://127.0.0.1:__APP_PORT__;
+  }
+
+  location / {
+    proxy_pass http://127.0.0.1:__APP_PORT__;
+  }
+}

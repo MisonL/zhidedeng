@@ -1,0 +1,13 @@
+{
+  "name": "zhidedeng",
+  "private": true,
+  "packageManager": "pnpm@12.0.0",
+  "engines": { "node": "22.x" },
+  "scripts": {
+    "dev": "pnpm -r --if-present dev",
+    "build": "pnpm -r --if-present build && rm -rf release && mkdir -p release && cp server/dist/server.mjs deploy/backup-sqlite.sh release/ && cp -R web/dist release/web",
+    "test": "pnpm -r --if-present test",
+    "typecheck": "pnpm -r --if-present typecheck",
+    "sync:feishu": "node scripts/sync-feishu.ts"
+  }
+}

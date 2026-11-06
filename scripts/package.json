@@ -1,0 +1,16 @@
+{
+  "name": "@zhidedeng/scripts",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@zhidedeng/shared": "workspace:*",
+    "typescript": "^5.9.3",
+    "vitest": "^4.0.0"
+  }
+}

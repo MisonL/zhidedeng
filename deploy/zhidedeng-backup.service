@@ -1,0 +1,18 @@
+# 由 zhidedeng-backup.timer 每天触发一次。需要服务器装 sqlite3。
+[Unit]
+Description=zhidedeng SQLite backup
+
+[Service]
+Type=oneshot
+User=zhidedeng
+Group=zhidedeng
+EnvironmentFile=/etc/zhidedeng/zhidedeng.env
+ExecStart=/opt/zhidedeng/backup-sqlite.sh
+UMask=0077
+StateDirectory=zhidedeng
+StateDirectoryMode=0700
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/zhidedeng
+ProtectHome=true
+PrivateTmp=true

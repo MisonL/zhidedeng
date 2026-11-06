@@ -1,0 +1,23 @@
+{
+  "ok": true,
+  "identity": "bot",
+  "data": {
+    "fields": ["中转站名称", "网址", "提交类型", "模型与倍率", "最低充值（元）", "支付方式", "推荐指数", "使用体验", "展示昵称", "审核状态", "审核备注", "提交时间"],
+    "record_id_list": ["recA4", "recB1", "recB2", "recB3", "recB4", "recB5", "recC1", "recC2", "recC3", "recC4", "recC5", "recC6"],
+    "data": [
+      ["示例站pro", null, ["避坑反馈"], null, null, null, "2", "晚高峰经常超时", "群友乙", ["通过"], null, "2026-11-04 09:30:00"],
+      ["待审核站", "https://pending.example/", ["推荐新站"], "GPT-4.1=0.1", null, null, null, "待审内容-秘密C", "甲", ["待审核"], "内部备注-秘密D", "2026-11-05 10:00:00"],
+      ["被拒站", "https://rejected.example/", ["推荐新站"], "GPT-4.1=0.1", null, null, null, null, "甲", ["拒绝"], "内部备注-秘密E", "2026-11-05 10:00:00"],
+      ["空状态站", "https://blank.example/", ["推荐新站"], "GPT-4.1=0.1", null, null, null, null, "甲", null, null, "2026-11-05 10:00:00"],
+      ["带空格状态站", "https://space.example/", ["推荐新站"], "GPT-4.1=0.1", null, null, null, null, "甲", " 通过", null, "2026-11-05 10:00:00"],
+      ["多选状态站", "https://multi.example/", ["推荐新站"], "GPT-4.1=0.1", null, null, null, null, "甲", ["通过", "拒绝"], null, "2026-11-05 10:00:00"],
+      ["脚本站", "javascript:alert(1)", ["推荐新站"], "GPT-4.1=0.1", null, null, null, null, "甲", ["通过"], null, "2026-11-05 10:00:00"],
+      [null, "https://noname.example/", ["推荐新站"], null, null, null, null, null, "甲", ["通过"], null, "2026-11-05 10:00:00"],
+      ["FTP站", "ftp://ftp.example/", ["推荐新站"], null, null, null, null, null, "甲", ["通过"], null, "2026-11-05 10:00:00"],
+      ["坏时间站", "https://badtime.example/", ["推荐新站"], null, null, null, null, null, "甲", ["通过"], null, "昨天下午"],
+      ["坏类型站", "https://badtype.example/", ["随便写写"], null, null, null, null, null, "甲", ["通过"], null, "2026-11-05 10:00:00"],
+      ["无网址且无同名站", null, ["使用评价"], null, null, null, null, "写了内容", "甲", ["通过"], null, "2026-11-05 10:00:00"]
+    ],
+    "has_more": false
+  }
+}

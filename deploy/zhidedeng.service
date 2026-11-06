@@ -1,0 +1,38 @@
+# 安装：复制到 /etc/systemd/system/，按实际情况改路径。
+# 环境变量写在 /etc/zhidedeng/zhidedeng.env（权限 640，属主 root、属组 zhidedeng），见仓库根目录 .env.example。
+# 数据目录 /var/lib/zhidedeng 由 StateDirectory 自动创建，属主是运行用户，权限 0700。DB_PATH 要放在它下面。
+[Unit]
+Description=zhidedeng web service
+After=network.target
+
+[Service]
+Type=simple
+User=zhidedeng
+Group=zhidedeng
+WorkingDirectory=/opt/zhidedeng
+# 兜底：环境文件漏写时也按生产环境运行，Cookie 带 Secure。环境文件里的同名变量优先。
+Environment=NODE_ENV=production
+EnvironmentFile=/etc/zhidedeng/zhidedeng.env
+ExecStart=/usr/bin/node /opt/zhidedeng/server.mjs
+Restart=on-failure
+RestartSec=3
+
+UMask=0077
+StateDirectory=zhidedeng
+StateDirectoryMode=0700
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/zhidedeng
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target

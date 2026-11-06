@@ -1,0 +1,123 @@
+/* 顶部 */
+.site-header { background: var(--surface); }
+.site-header-inner { display: flex; align-items: flex-start; min-height: 110px; padding-top: 20px; }
+.brand { display: flex; align-items: center; gap: 10px; flex: none; width: 278px; }
+.brand-seal { flex: none; transition: transform 320ms var(--ease); }
+.brand:hover .brand-seal { transform: rotate(-8deg); }
+.brand-text { display: grid; gap: 3px; }
+.brand-name { color: var(--ink); font: 900 32px/1.15 var(--font-serif); letter-spacing: 0.01em; }
+.brand-slogan { color: #4a4641; font-size: 11px; letter-spacing: 0.3em; white-space: nowrap; }
+.site-search { flex: 0 1 600px; min-width: 0; }
+.search-form { display: flex; height: 40px; border: 2px solid var(--red); border-radius: var(--radius-small); overflow: hidden; background: var(--surface); transition: box-shadow 180ms var(--ease); }
+.search-form input { flex: 1; min-width: 0; padding: 0 14px; border: 0; outline: 0; background: none; font-size: 14px; }
+.search-form input::placeholder { color: var(--text-3); }
+.search-form:focus-within { box-shadow: 0 0 0 3px rgb(230 40 40 / 14%); }
+.search-form button {
+  flex: none; width: 100px; border: 0; background: var(--red-gradient); color: #fff;
+  font-size: 20px; font-weight: 500; letter-spacing: 0.2em; text-indent: 0.2em;
+  transition: filter 180ms var(--ease);
+}
+.search-form button:hover { filter: brightness(1.07); }
+.search-form button:active { filter: brightness(0.95); }
+.search-form button:focus-visible { outline-color: #fff; outline-offset: -5px; }
+.hot-searches { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 20px; min-height: 24px; margin-top: 7px; color: var(--text-2); font-size: 13px; }
+.hot-label { margin-right: -6px; color: var(--text-2); }
+.hot-searches a { transition: color 180ms var(--ease); }
+.hot-searches a:hover { color: var(--red); }
+
+/* 导航 */
+.site-nav {
+  position: sticky; top: 0; z-index: var(--z-nav);
+  background: rgb(255 255 255 / 94%); backdrop-filter: saturate(1.5) blur(12px);
+  box-shadow: 0 1px 0 var(--line), 0 8px 16px -14px rgb(74 52 30 / 40%);
+}
+.site-nav-inner { display: flex; align-items: stretch; justify-content: space-between; gap: 24px; height: 50px; }
+.nav-group { display: flex; align-items: stretch; gap: 44px; }
+.nav-right { gap: 32px; }
+.nav-link {
+  position: relative; display: inline-flex; align-items: center; gap: 3px; padding: 0;
+  border: 0; background: none; color: var(--ink); font-size: 16px; white-space: nowrap;
+  transition: color 180ms var(--ease);
+}
+.nav-right .nav-link { color: var(--text); font-size: 15px; }
+.nav-link:hover { color: var(--red); }
+.nav-link.is-active, .nav-right .nav-link.is-active { color: var(--red); font-weight: 700; }
+/* 当前项的红线压在导航下沿上，和模块里的 tab 是同一种写法。 */
+.nav-group:not(.nav-right) .nav-link::after {
+  content: ''; position: absolute; left: 0; right: 0; bottom: 0; height: 3px; border-radius: 3px 3px 0 0;
+  background: var(--red); transform: scaleX(0); transition: transform 240ms var(--ease);
+}
+.nav-group:not(.nav-right) .nav-link.is-active::after { transform: scaleX(1); }
+.nav-link .icon { transition: transform 200ms var(--ease); }
+.share-menu.is-open .nav-link .icon { transform: rotate(180deg); }
+
+.share-menu { position: relative; display: flex; }
+.share-popup {
+  position: absolute; top: calc(100% + 4px); left: 50%; display: none; width: 120px; padding: 6px;
+  border: 1px solid var(--line); border-radius: 8px; background: var(--surface); box-shadow: var(--shadow-raised);
+  transform: translateX(-50%);
+}
+/* 弹层和按钮之间留了 4px 缝，用透明桥接住悬停。 */
+.share-popup::before { content: ''; position: absolute; inset: -6px 0 100%; }
+.share-menu.is-open .share-popup { display: block; animation: toast-in 180ms var(--ease); }
+@media (hover: hover) {
+  .share-menu:hover .share-popup { display: block; animation: toast-in 180ms var(--ease); }
+  .share-menu:hover .nav-link .icon { transform: rotate(180deg); }
+}
+.share-popup a { display: block; padding: 8px 12px; border-radius: 6px; text-align: center; transition: background-color 180ms var(--ease), color 180ms var(--ease); }
+.share-popup a:hover { background: var(--red-soft); color: var(--red-deep); }
+.share-popup button { display: block; width: 100%; padding: 8px 12px; border: 0; border-radius: 6px; background: none; color: inherit; font: inherit; text-align: center; transition: background-color 180ms var(--ease), color 180ms var(--ease); }
+.share-popup button:hover { background: var(--red-soft); color: var(--red-deep); }
+.nav-me-menu { min-width: 0; max-width: 180px; }
+.nav-me-menu .nav-link { display: flex; align-items: center; min-width: 0; max-width: 100%; }
+.nav-me-menu .icon { flex: none; }
+.nav-menu-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.nav-auth { display: flex; align-items: center; gap: 8px; color: var(--text-3); white-space: nowrap; }
+
+/* 主体与页脚 */
+.site-main { display: grid; gap: 10px; padding-block: 10px; }
+.site-main > * { min-width: 0; }
+.site-footer { margin-top: 20px; padding-block: 26px 30px; background: var(--surface); border-top: 1px solid var(--line); color: var(--text-2); text-align: center; }
+.site-footer .container { display: grid; justify-items: center; gap: 10px; }
+.footer-notice { padding: 6px 16px; border-radius: 999px; background: var(--red-wash); color: var(--red-deep); font-weight: 500; }
+.footer-links { display: flex; flex-wrap: wrap; justify-content: center; gap: 4px 24px; }
+.footer-links a { transition: color 180ms var(--ease); }
+.footer-links a:hover { color: var(--red); }
+
+@media (max-width: 1040px) {
+  .nav-group { gap: 24px; }
+  .nav-right { gap: 18px; }
+  .brand { width: 240px; }
+}
+
+@media (max-width: 760px) {
+  .site-header-inner { display: grid; gap: 8px; min-height: 0; padding-block: 10px 2px; }
+  .brand { width: auto; gap: 8px; }
+  .brand-seal { width: 38px; height: 38px; }
+  .brand-text { display: flex; align-items: baseline; gap: 10px; }
+  .brand-name { font-size: 22px; }
+  .brand-slogan { letter-spacing: 0.14em; }
+  .search-form input { font-size: 16px; }
+  .search-form button { width: 72px; font-size: 16px; }
+  /* 热搜单行横滑，不再折行占高度。 */
+  .hot-searches {
+    flex-wrap: nowrap; gap: 0 16px; margin: 2px calc(-1 * var(--gutter)) 0; padding-inline: var(--gutter);
+    overflow-x: auto; scrollbar-width: none; white-space: nowrap;
+  }
+  .hot-searches::-webkit-scrollbar { display: none; }
+  .hot-searches > * { flex: none; }
+  .hot-label { margin-right: -8px; }
+  .hot-searches a { padding-block: 6px; }
+
+  /* 导航收成一行：次要入口在页脚里还有。 */
+  .site-nav-inner { gap: 8px; height: 46px; }
+  .nav-group { gap: 18px; }
+  .nav-right { gap: 12px; min-width: 0; }
+  .nav-link { font-size: 15px; }
+  .nav-right .nav-link { font-size: 14px; }
+  .nav-secondary { display: none; }
+  .nav-me-menu { flex: 0 1 96px; }
+  .nav-me { line-height: 46px; }
+  .share-popup { left: auto; right: -8px; transform: none; }
+  .footer-notice { border-radius: 10px; }
+}

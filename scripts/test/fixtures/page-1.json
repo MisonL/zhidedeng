@@ -1,0 +1,15 @@
+{
+  "ok": true,
+  "identity": "bot",
+  "data": {
+    "fields": ["中转站名称", "网址", "提交类型", "模型与倍率", "最低充值（元）", "支付方式", "推荐指数", "使用体验", "展示昵称", "审核状态", "审核备注", "提交时间"],
+    "record_id_list": ["recA1", "recA2", "recA3", "recD1"],
+    "data": [
+      ["示例站", "https://API.Example.com/path/?aff=INVITE#frag", ["推荐新站"], "GPT-4.1=0.5\nClaude Sonnet = 0.8\n未知模型X=0.3\no3=abc\ngemini-pro=-1\ndeepseek-chat=0\nglm=Infinity\nkimi=1e3\n没有等号的行", 10, ["支付宝", "微信支付"], 5, "老站，很好用", "群友甲", ["通过"], "内部备注-秘密A", "2026-11-01 10:00:00"],
+      ["示例站Pro", [{ "text": "官网", "link": "https://www.api.example.com/?x=1" }], "更新信息", "GPT-4.1=0.4x\nkimi＝0.6倍", 20, ["USDT"], null, "更新了价格", "群友甲", "通过", null, "2026-11-03 10:00:00"],
+      ["示例站Pro", "[官网](https://api.example.com/)", ["使用评价"], null, null, null, 4, "<script>alert(1)</script> 不错\n[点我](https://evil.example)", null, ["通过"], "内部备注-秘密B", 1793750400000],
+      ["另一站", "http://other.example/", "推荐新站", null, "不是数字", null, 9, null, "群友丙", ["通过"], null, "2026-11-02"]
+    ],
+    "has_more": true
+  }
+}
