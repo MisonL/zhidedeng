@@ -1,7 +1,7 @@
 import type {
   Banner, CheckIn, Comment, CommentReply, CommunityRanking, CurrentUser,
   ExpertRanking, FavoriteItem, Model, ModelDetail, ModelRanking, Post, PostKind,
-  RankingTab, Station, StationDetail, Target, VendorWithModels, VoteSummary, VoteValue,
+  RankingTab, Station, StationDetail, Target, Vendor, VendorWithModels, VoteSummary, VoteValue,
 } from './domain.js';
 
 export interface PaginationQuery {
@@ -163,6 +163,8 @@ export interface CatalogImportPost {
   publishedAt: string;
 }
 export interface CatalogImportRequest {
+  // 为 true 时，offers 里未收录的 modelSlug 会自动建成待补全的占位模型；默认 false 时仍报错。
+  allowNewModels?: boolean;
   stations: CatalogImportStation[];
   posts: CatalogImportPost[];
 }
@@ -172,7 +174,38 @@ export interface CatalogImportResponse {
   stations: number;
   offers: number;
   posts: number;
+  // 本次自动创建的占位模型 slug，已收录的模型不会重复列出。
+  createdModels: string[];
 }
+
+// POST /api/admin/models。管理接口，同样不进 ApiContracts。
+export interface AdminCreateModelRequest {
+  slug: string;
+  vendor: string;
+  name: string;
+  description: string;
+}
+export type AdminCreateModelResponse = Model;
+
+// DELETE /api/admin/models/:slug，要求显式确认，避免误删。
+export interface AdminDeleteModelRequest { confirm: true }
+export interface AdminDeleteModelResponse {
+  slug: string;
+  deleted: true;
+}
+// 模型仍被站点报价或文章引用时返回 409，stationCount / postCount 分别是引用它的站点数和文章数。
+export interface AdminDeleteModelInUseResponse {
+  error: { code: 'MODEL_IN_USE'; message: string; stationCount: number; postCount: number };
+}
+
+// POST /api/admin/vendors。管理接口，同样不进 ApiContracts。
+export interface AdminCreateVendorRequest {
+  slug: string;
+  name: string;
+  // 缺省等于 slug；前端遇到不认识的图标会降级显示站内图标。
+  iconKey?: string;
+}
+export type AdminCreateVendorResponse = Vendor;
 
 // POST /api/admin/users/:handle/disable。管理接口，同样不进 ApiContracts。
 export interface AdminDisableUserRequest { disabled: boolean }

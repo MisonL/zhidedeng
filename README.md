@@ -99,7 +99,18 @@ curl -X POST -H "Authorization: Bearer $SYNC_TOKEN" -H 'Content-Type: applicatio
 # 禁用或恢复账号。禁用后所有会话失效、不能登录，公开内容保留；需要时配合隐藏评论。恢复后要重新登录
 curl -X POST -H "Authorization: Bearer $SYNC_TOKEN" -H 'Content-Type: application/json' \
   -d '{"disabled":true}' "$ADMIN/api/admin/users/<用户名>/disable"
+# 新增模型。vendor 必须已存在；slug 只能用小写字母、数字和连字符，最长 64
+curl -X POST -H "Authorization: Bearer $SYNC_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"slug":"claude-sonnet-4-5-20250929","vendor":"anthropic","name":"Claude Sonnet 4.5","description":"中转站常见的完整模型 ID"}' "$ADMIN/api/admin/models"
+# 删除模型。仍被站点报价引用时返回 409 MODEL_IN_USE 和引用它的站点数，不会删除
+curl -X DELETE -H "Authorization: Bearer $SYNC_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"confirm":true}' "$ADMIN/api/admin/models/<slug>"
+# 新增厂商。iconKey 缺省等于 slug；没有内置图标的厂商在前端降级显示站内图标
+curl -X POST -H "Authorization: Bearer $SYNC_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"slug":"stepfun","name":"阶跃星辰"}' "$ADMIN/api/admin/vendors"
 ```
+
+导入接口默认拒绝未收录的模型。后续给 Agent/群友队列接入时可以带 `"allowNewModels": true`，未知模型会自动建成 vendor 为 `unknown` 的占位模型（名称即 slug，描述标记待补全），响应里的 `createdModels` 列出本次新建的 slug。
 
 ## 同步飞书收集表
 
