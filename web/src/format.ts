@@ -1,4 +1,4 @@
-import type { PostKind, StationStatus } from '@zhidedeng/shared';
+import type { ContentSource, PostKind, StationStatus } from '@zhidedeng/shared';
 
 export const KIND_LABEL: Record<PostKind, string> = {
   deal: '爆料', review: '评测', community: '社区', guide: '指南',
@@ -6,7 +6,14 @@ export const KIND_LABEL: Record<PostKind, string> = {
 
 export const DISCLAIMER = '当前为演示数据，不构成消费建议';
 export const SUBMISSION_LABEL = '群友提交，未经平台核实';
+export const AGENT_LABEL = 'AI 采集，未经平台核实';
 export const SITE_NOTICE = '带「虚构」字样的站点与内容是演示数据；标注「群友提交」的内容来自群友表单，未经平台核实。两者均不构成消费建议';
+
+export function sourceLabel(source: ContentSource | 'user' | undefined): string | null {
+  if (source === 'submission') return SUBMISSION_LABEL;
+  if (source === 'agent') return AGENT_LABEL;
+  return null;
+}
 
 /** 回跳地址按浏览器的规则解析（它会吃掉制表符、把反斜杠当斜杠），同源才放行，防止登录页被用来跳转到外站。 */
 export function safeNext(next: string | null) {

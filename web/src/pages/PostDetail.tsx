@@ -6,7 +6,7 @@ import FavoriteButton from '../components/FavoriteButton';
 import Markdown from '../components/Markdown';
 import { Avatar } from '../components/visuals';
 import VoteButtons from '../components/VoteButtons';
-import { formatDate, formatRate, KIND_LABEL, SUBMISSION_LABEL } from '../format';
+import { formatDate, formatRate, KIND_LABEL, sourceLabel } from '../format';
 import { useAsync } from '../hooks';
 import { useCatalog } from '../state';
 
@@ -14,11 +14,12 @@ export default function PostDetail() {
   const { id = '' } = useParams();
   const state = useAsync((signal) => api.getPost(id, signal), [id]);
   const { stationBySlug, modelBySlug } = useCatalog();
+  const label = sourceLabel(state.data?.source);
 
   return (
     <>
       <title>{`${state.data?.title ?? '文章'} · 什么值得蹬`}</title>
-      {state.data?.source === 'submission' && <p className="demo-notice" role="note">{SUBMISSION_LABEL}，不构成消费建议</p>}
+      {label && <p className="demo-notice" role="note">{label}，不构成消费建议</p>}
       {state.data?.status === 'pending' && <p className="demo-notice" role="note">审核中，目前只有你自己看得到</p>}
       {state.data?.status === 'rejected' && <p className="demo-notice" role="note">未通过审核，目前只有你自己看得到</p>}
       <article className="module page article">
@@ -40,7 +41,7 @@ export default function PostDetail() {
                   </p>
                 </header>
                 <p className="article-summary">{post.summary}</p>
-                {post.source === 'submission'
+                {sourceLabel(post.source)
                   ? <p className="article-plain">{post.body}</p>
                   : <Markdown>{post.body}</Markdown>}
                 <footer className="article-foot">

@@ -10,6 +10,7 @@ import type { Store } from './database.ts';
 import { Service } from './service.ts';
 import { ApiError } from './errors.ts';
 import { listPosts, reviewPost, setAccountDisabled, setCommentHidden } from './moderation.ts';
+import { listSubmissions, reviewSubmission, submissionQuerySchema, submissionReviewSchema } from './submissions.ts';
 
 const pagination = {
   page: z.coerce.number().int().min(1).max(1_000_000).optional(),
@@ -131,6 +132,27 @@ export function buildApp(store: Store, now: () => Date, options: AppOptions = {}
       iconKey: adminSlug.optional(),
     }).parse(await c.req.json());
     return c.json(createVendor(store, input));
+  });
+  app.get('/api/admin/submissions', c => {
+    const query = submissionQuerySchema.parse({ ...c.req.query(), status: c.req.query('status') ?? 'pending' });
+    return c.json(listSubmissions(store, query));
+  });
+  app.post('/api/admin/submissions/:id/review', async c => {
+    const decision = submissionReviewSchema.parse(await c.req.json());
+    return c.json(reviewSubmission(store, now(), c.req.param('id'), decision));
+  });
+  app.post('/api/admin/submissions/batch-review', async c => {
+    const { ids, ...decision } = submissionReviewSchema.extend({ ids: z.array(identifier).min(1) }).parse(await c.req.json());
+    const results = ids.map(id => {
+      try {
+        return { id, submission: reviewSubmission(store, now(), id, decision) };
+      } catch (error) {
+        if (error instanceof ApiError) return { id, error: { status: error.status, code: error.code, message: error.message, ...error.details } };
+        console.error(error);
+        return { id, error: { status: 500, code: 'INTERNAL_ERROR', message: '服务暂时不可用' } };
+      }
+    });
+    return c.json({ results });
   });
   app.get('/api/admin/posts', c => c.json(listPosts(store, postStatus.parse(c.req.query('status')))));
   app.post('/api/admin/posts/:id/review', async c => {

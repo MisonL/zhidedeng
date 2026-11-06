@@ -6,7 +6,7 @@ export type StationRecord = Omit<Station, 'votes' | 'currentUserVote' | 'favorit
 export type PostRecord = Omit<Post, 'votes' | 'currentUserVote' | 'favorited' | 'favoriteCount' | 'commentCount' | 'author' | 'source'> & {
   authorHandle: string;
   authorNickname?: string;
-  source?: ContentSource;
+  source?: ContentSource | 'user';
 };
 export interface Entities {
   vendor: Vendor;
@@ -56,6 +56,23 @@ export const SCHEMA = `
   CREATE INDEX IF NOT EXISTS favorites_target ON favorites(targetType, targetId);
   CREATE INDEX IF NOT EXISTS comments_target ON comments(targetType, targetId, createdAt);
   CREATE INDEX IF NOT EXISTS offers_model ON offers(modelSlug, rate);
+  CREATE TABLE IF NOT EXISTS submissions (
+    id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL CHECK(kind IN ('station','model','post')),
+    channel TEXT NOT NULL CHECK(channel IN ('feishu','agent','web')),
+    originKey TEXT NOT NULL,
+    payload TEXT NOT NULL CHECK(json_valid(payload)),
+    payloadHash TEXT NOT NULL,
+    actorHandle TEXT,
+    ip TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('pending','approved','rejected','superseded')),
+    reason TEXT,
+    reviewedAt TEXT,
+    createdAt TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS submissions_status ON submissions(status, kind, createdAt);
+  CREATE INDEX IF NOT EXISTS submissions_origin ON submissions(kind, originKey, status);
+  CREATE INDEX IF NOT EXISTS submissions_actor ON submissions(actorHandle, createdAt);
 `;
 
 /** 存储层用到的 node:sqlite 最小接口。 */
