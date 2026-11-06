@@ -16,6 +16,23 @@ export interface PaginatedResponse<T> {
   pageSize: number;
 }
 
+export type SubmissionKind = 'station' | 'model' | 'post';
+export type SubmissionChannel = 'feishu' | 'agent' | 'web';
+export type SubmissionStatus = 'pending' | 'approved' | 'rejected' | 'superseded';
+
+export interface SubmissionRecord {
+  id: string;
+  kind: SubmissionKind;
+  channel: SubmissionChannel;
+  originKey: string;
+  payload: unknown;
+  actorHandle: string | null;
+  status: SubmissionStatus;
+  reason: string | null;
+  createdAt: string;
+  reviewedAt: string | null;
+}
+
 export interface ApiErrorResponse {
   error: { code: string; message: string };
 }

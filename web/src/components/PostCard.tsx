@@ -1,6 +1,6 @@
 import { Link } from 'react-router';
 import type { Post } from '@zhidedeng/shared';
-import { formatDate, formatRate, formatUptime, KIND_LABEL, SUBMISSION_LABEL } from '../format';
+import { formatDate, formatRate, formatUptime, KIND_LABEL, sourceLabel } from '../format';
 import { useCatalog } from '../state';
 import FavoriteButton from './FavoriteButton';
 import Icon from './Icon';
@@ -12,6 +12,7 @@ export default function PostCard({ post }: { post: Post }) {
   const station = post.stationSlug ? stationBySlug.get(post.stationSlug) : undefined;
   const model = post.modelSlug ? modelBySlug.get(post.modelSlug) : undefined;
   const postPath = `/posts/${post.id}`;
+  const label = sourceLabel(post.source);
 
   return (
     <article className="post-card">
@@ -25,7 +26,7 @@ export default function PostCard({ post }: { post: Post }) {
         )}
         <div className="tags">
           <span className={`tag tag-${post.kind}`}>{KIND_LABEL[post.kind]}</span>
-          {post.source === 'submission' && <span className="tag tag-warn">{SUBMISSION_LABEL}</span>}
+          {label && <span className="tag tag-warn">{label}</span>}
           {post.status === 'pending' && <span className="tag tag-warn">审核中</span>}
           {post.status === 'rejected' && <span className="tag tag-warn">未通过</span>}
           {station && <span className="tag">可用率 {formatUptime(station.uptime)}</span>}

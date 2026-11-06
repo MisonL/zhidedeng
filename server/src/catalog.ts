@@ -13,10 +13,10 @@ const IS_SUBMISSION = "json_extract(data,'$.source') = 'submission'";
 const SUBMITTED_STATIONS = `(SELECT id FROM entities WHERE kind = 'station' AND ${IS_SUBMISSION})`;
 
 const singleLine = (max: number) => z.string().min(1).max(max);
-const offerRate = z.number().refine(rate => rate >= MIN_RATE && rate <= MAX_RATE, {
+export const offerRate = z.number().refine(rate => rate >= MIN_RATE && rate <= MAX_RATE, {
   error: issue => ({ message: `倍率 ${String(issue.input)} 超出 ${MIN_RATE}~${MAX_RATE} 范围` }),
 });
-const httpUrl = z.string().max(300).refine(value => {
+export const httpUrl = z.string().max(300).refine(value => {
   if (value.includes('?') || value.includes('#')) return false;
   try {
     const url = new URL(value);
