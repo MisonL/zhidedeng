@@ -5,7 +5,7 @@ import { z, ZodError } from 'zod';
 import { API_ROUTES } from '@zhidedeng/shared';
 import type { ApiContracts, ApiRouteName, ChangePasswordRequest, LoginRequest, RegisterRequest } from '@zhidedeng/shared';
 import { AttemptLimiter, burnPasswordCheck, clearedSessionCookie, createSession, deleteOtherSessions, deleteSession, hashPassword, INITIAL_TOKENS, isWeakPassword, sessionCookie, sessionHandle, USERNAME, verifyPassword } from './auth.ts';
-import { authorizeAdmin, importResponse } from './catalog.ts';
+import { authorizeAdmin, adminSlug, createModel, createVendor, deleteModel, importResponse } from './catalog.ts';
 import type { Store } from './database.ts';
 import { Service } from './service.ts';
 import { ApiError } from './errors.ts';
@@ -80,7 +80,7 @@ export function buildApp(store: Store, now: () => Date, options: AppOptions = {}
   const app = new Hono<{ Bindings: Bindings }>();
   app.notFound(c => c.json({ error: { code: 'NOT_FOUND', message: '资源不存在' } }, 404));
   app.onError((error, c) => {
-    if (error instanceof ApiError) return c.json({ error: { code: error.code, message: error.message } }, error.status);
+    if (error instanceof ApiError) return c.json({ error: { code: error.code, message: error.message, ...error.details } }, error.status);
     if (error instanceof ZodError || error instanceof SyntaxError) return c.json({ error: { code: 'INVALID_INPUT', message: '请求参数或 JSON 正文无效' } }, 400);
     console.error(error);
     return c.json({ error: { code: 'INTERNAL_ERROR', message: '服务暂时不可用' } }, 500);
@@ -111,6 +111,27 @@ export function buildApp(store: Store, now: () => Date, options: AppOptions = {}
     await next();
   });
   app.post(IMPORT_PATH, async c => importResponse(store, await c.req.text()));
+  app.post('/api/admin/models', async c => {
+    const input = z.strictObject({
+      slug: adminSlug,
+      vendor: z.string().trim().min(1).max(64),
+      name: z.string().trim().min(1).max(60),
+      description: z.string().trim().min(1).max(200),
+    }).parse(await c.req.json());
+    return c.json(createModel(store, input));
+  });
+  app.delete('/api/admin/models/:slug', async c => {
+    z.strictObject({ confirm: z.literal(true) }).parse(await c.req.json());
+    return c.json(deleteModel(store, c.req.param('slug')));
+  });
+  app.post('/api/admin/vendors', async c => {
+    const input = z.strictObject({
+      slug: adminSlug,
+      name: z.string().trim().min(1).max(60),
+      iconKey: adminSlug.optional(),
+    }).parse(await c.req.json());
+    return c.json(createVendor(store, input));
+  });
   app.get('/api/admin/posts', c => c.json(listPosts(store, postStatus.parse(c.req.query('status')))));
   app.post('/api/admin/posts/:id/review', async c => {
     const { status } = z.strictObject({ status: postStatus }).parse(await c.req.json());
