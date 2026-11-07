@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import type { SubmissionChannel, SubmissionKind, SubmissionRecord, SubmissionStatus } from '@zhidedeng/shared';
+import { STATION_SLUG_MAX, stationSlugBase, stationSlugSuffix } from '@zhidedeng/shared';
 import { adminSlug, httpUrl, offerRate } from './catalog.ts';
 import type { SqlRow, SqlValue, Store } from './database.ts';
 import { ApiError } from './errors.ts';
@@ -156,6 +157,7 @@ function hostnameOf(url: string | null): string | null {
  * 否则两个不同站点会写到同一条记录上，后审的覆盖先审的。
  * 身份一律取 url 的 hostname（不是 originKey），这样飞书用记录 ID 做 originKey 时，
  * 同一站点的重复提交仍然落在同一条记录上。
+ * 派生规则来自 shared/slug.ts，飞书同步脚本用的是同一份，两边算出的 slug 必须一致。
  */
 function stationSlug(store: Store, url: string | null, originKey: string): string {
   const hostname = hostnameOf(url);
@@ -165,13 +167,13 @@ function stationSlug(store: Store, url: string | null, originKey: string): strin
   const mine = hostname === null ? undefined : store.all('station').find(station => hostnameOf(station.url) === hostname);
   if (mine) return mine.slug;
 
-  const base = `sub-${identity}`.replace(/[^a-z0-9]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
-  if (base.length <= 100 && !store.get('station', base)) return base;
+  const base = stationSlugBase(identity);
+  if (base.length <= STATION_SLUG_MAX && !store.get('station', base)) return base;
   // 撞车或超长：可读前缀加哈希。哈希本身也可能撞上别的站点（例如某个 hostname
-  // 恰好等于 "<别的域名>-<这 10 位>"），所以继续加盐直到找到空位。
-  const digest = (salt: number) => createHash('sha256').update(salt === 0 ? identity : `${identity}#${salt}`).digest('hex').slice(0, 10);
+  // 恰好等于 "<别的域名>-<这几位>"），所以继续加盐直到找到空位。
   for (let salt = 0; salt < 100; salt += 1) {
-    const candidate = `${base.slice(0, 89)}-${digest(salt)}`;
+    const suffix = stationSlugSuffix(identity, salt);
+    const candidate = `${base.slice(0, STATION_SLUG_MAX - suffix.length - 1)}-${suffix}`;
     if (!store.get('station', candidate)) return candidate;
   }
   throw new ApiError(409, 'SLUG_CONFLICT', '无法为这个站点分配唯一的地址');
