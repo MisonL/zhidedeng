@@ -124,18 +124,21 @@ function hostnameOf(url: string | null): string | null {
 }
 
 /**
- * 站点 slug：`sub-` 加 hostname 清洗后的可读形式。
+ * 站点 slug：`sub-` 加归一化 hostname 的可读形式。
  * hostname 超过长度上限、或清洗后与另一个站点撞车时，改用哈希后缀保证唯一——
  * 否则两个不同站点会写到同一条记录上，后审的覆盖先审的。
+ * 身份一律取 url 的 hostname（不是 originKey），这样飞书用记录 ID 做 originKey 时，
+ * 同一站点的重复提交仍然落在同一条记录上。
  */
-function stationSlug(store: Store, originKey: string): string {
-  const hostname = originKey.toLowerCase();
-  const base = `sub-${hostname}`.replace(/[^a-z0-9]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
-  const digest = createHash('sha256').update(hostname).digest('hex').slice(0, 10);
+function stationSlug(store: Store, url: string | null, originKey: string): string {
+  const hostname = hostnameOf(url);
+  const identity = hostname ?? originKey.trim().toLowerCase();
+  const base = `sub-${identity}`.replace(/[^a-z0-9]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
+  const digest = createHash('sha256').update(identity).digest('hex').slice(0, 10);
   const hashed = () => `${base.slice(0, 89)}-${digest}`;
   if (base.length > 100) return hashed();
   const existing = store.get('station', base);
-  // 已有的同名 slug 若指向别的 hostname，说明是清洗后撞车，不能用它。
+  // 已有站点指向同一个 hostname 说明是在更新它；指向别的 hostname 才是清洗后撞车。
   return existing && hostnameOf(existing.url) !== hostname ? hashed() : base;
 }
 
@@ -163,7 +166,7 @@ export function reviewSubmission(store: Store, now: Date, id: string, decision: 
         for (const offer of offers) {
           if (!store.get('model', offer.modelSlug)) throw new ApiError(400, 'INVALID_INPUT', `未知模型：${offer.modelSlug}`);
         }
-        const slug = stationSlug(store, submission.originKey);
+        const slug = stationSlug(store, payload.url, submission.originKey);
         const previous = store.get('station', slug);
         // 更新已有 slug 时保留最初来源，不能把飞书站点改标成 AI 采集。
         store.put('station', slug, {
