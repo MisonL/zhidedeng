@@ -63,7 +63,7 @@ export interface AdminBatchSubmitResponse {
 
 // GET /api/admin/submissions/state。只供同步脚本比较已上线的队列站点。
 export interface AdminSubmissionStateResponse {
-  stations: { slug: string; originKey: string; url: string | null; name: string }[];
+  stations: { slug: string; submissionId: string; originKey: string; url: string | null; name: string }[];
 }
 
 export interface ApiErrorResponse {
