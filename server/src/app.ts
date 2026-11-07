@@ -10,7 +10,7 @@ import type { Store } from './database.ts';
 import { Service } from './service.ts';
 import { ApiError } from './errors.ts';
 import { listPosts, reviewPost, setAccountDisabled, setCommentHidden } from './moderation.ts';
-import { autoApproveEnabled, enqueueSubmission, listSubmissions, reviewSubmission, setAutoApprove, submissionQuerySchema, submissionReviewSchema } from './submissions.ts';
+import { autoApproveEnabled, enqueueBatch, enqueueSubmission, listSubmissions, reviewSubmission, setAutoApprove, submissionBatchReviewSchema, submissionBatchSchema, submissionQuerySchema, submissionReviewSchema, submissionState } from './submissions.ts';
 
 const pagination = {
   page: z.coerce.number().int().min(1).max(1_000_000).optional(),
@@ -36,6 +36,7 @@ const PERSONAL_READS = new Set<ApiRouteName>(['getMe', 'getMyFavorites', 'getMyP
 const API_BODY_BYTES = 512 * 1024;
 const IMPORT_BODY_BYTES = 8 * 1024 * 1024;
 const IMPORT_PATH = '/api/admin/import';
+const SUBMISSION_BATCH_PATH = '/api/admin/submissions/batch';
 const postStatus = z.enum(['pending', 'approved', 'rejected']);
 
 export interface AppOptions {
@@ -98,7 +99,7 @@ export function buildApp(store: Store, now: () => Date, options: AppOptions = {}
   const tooLarge = () => { throw new ApiError(413, 'PAYLOAD_TOO_LARGE', '请求体过大'); };
   const apiBodyLimit = bodyLimit({ maxSize: API_BODY_BYTES, onError: tooLarge });
   const importBodyLimit = bodyLimit({ maxSize: IMPORT_BODY_BYTES, onError: tooLarge });
-  app.use('/api/*', (c, next) => (c.req.path === IMPORT_PATH ? importBodyLimit : apiBodyLimit)(c, next));
+  app.use('/api/*', (c, next) => ([IMPORT_PATH, SUBMISSION_BATCH_PATH].includes(c.req.path) ? importBodyLimit : apiBodyLimit)(c, next));
 
   app.get('/api/health', c => {
     store.db.prepare('SELECT 1').get();
@@ -142,16 +143,23 @@ export function buildApp(store: Store, now: () => Date, options: AppOptions = {}
     return c.json(createVendor(store, input));
   });
   app.post('/api/admin/submissions', async c => {
-    // 运维和同步脚本的入队入口。各渠道自己的接口（飞书同步、Agent 提交）后续接在这个函数上。
+    // 运维的单条入队入口，沿用与批次相同的审核和物化规则。
     const input = z.object({
       kind: z.enum(['station', 'model', 'post']),
       channel: z.enum(['feishu', 'agent', 'web']),
       originKey: z.string().trim().min(1).max(253),
+      batchId: z.string().trim().min(1).max(200).nullish(),
+      action: z.enum(['upsert', 'remove']).optional(),
       payload: z.unknown(),
       actorHandle: z.string().trim().max(200).nullish(),
     }).parse(await c.req.json());
     return c.json(enqueueSubmission(store, { ...input, ip: clientIp(c), now: now() }));
   });
+  app.post(SUBMISSION_BATCH_PATH, async c => {
+    const input = submissionBatchSchema.parse(await c.req.json());
+    return c.json(enqueueBatch(store, { ...input, ip: clientIp(c), now: now() }));
+  });
+  app.get('/api/admin/submissions/state', c => c.json(submissionState(store)));
   app.get('/api/admin/settings', c => c.json({ autoApprove: autoApproveEnabled(store) }));
   app.post('/api/admin/settings', async c => {
     const { autoApprove } = z.strictObject({ autoApprove: z.boolean() }).parse(await c.req.json());
@@ -166,17 +174,25 @@ export function buildApp(store: Store, now: () => Date, options: AppOptions = {}
     return c.json(reviewSubmission(store, now(), c.req.param('id'), decision));
   });
   app.post('/api/admin/submissions/batch-review', async c => {
-    // 每条审核都是一个独立事务，限制批量规模避免一次请求长时间占用连接。
-    const { ids, ...decision } = submissionReviewSchema.extend({ ids: z.array(identifier).min(1).max(100) }).parse(await c.req.json());
-    const results = ids.map(id => {
+    // ids 保留最多 100 条；batchId 处理整批 pending。每条仍是独立事务。
+    const input = submissionBatchReviewSchema.parse(await c.req.json());
+    const decision = { status: input.status, reason: input.reason };
+    const ids = 'ids' in input ? input.ids : store.db.prepare("SELECT id FROM submissions WHERE batchId = ? AND status = 'pending' ORDER BY createdAt, rowid")
+      .all(input.batchId).map(row => row.id as string);
+    const results: ({ id: string; submission: ReturnType<typeof reviewSubmission> } | { id: string; error: { status: number; code: string; message: string } })[] = [];
+    for (const id of ids) {
+      // 同批次的其他版本可能刚被前一条审核替代，这些已经不是待审条目。
+      if ('batchId' in input && store.db.prepare('SELECT status FROM submissions WHERE id = ?').get(id)?.status !== 'pending') continue;
       try {
-        return { id, submission: reviewSubmission(store, now(), id, decision) };
+        results.push({ id, submission: reviewSubmission(store, now(), id, decision) });
       } catch (error) {
-        if (error instanceof ApiError) return { id, error: { status: error.status, code: error.code, message: error.message, ...error.details } };
-        console.error(error);
-        return { id, error: { status: 500, code: 'INTERNAL_ERROR', message: '服务暂时不可用' } };
+        if (error instanceof ApiError) results.push({ id, error: { status: error.status, code: error.code, message: error.message, ...error.details } });
+        else {
+          console.error(error);
+          results.push({ id, error: { status: 500, code: 'INTERNAL_ERROR', message: '服务暂时不可用' } });
+        }
       }
-    });
+    }
     return c.json({ results });
   });
   app.get('/api/admin/posts', c => c.json(listPosts(store, postStatus.parse(c.req.query('status')))));

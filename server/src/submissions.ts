@@ -1,19 +1,23 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
-import type { SubmissionChannel, SubmissionKind, SubmissionRecord, SubmissionStatus } from '@zhidedeng/shared';
-import { STATION_SLUG_MAX, stationSlugBase, stationSlugSuffix } from '@zhidedeng/shared';
+import type { AdminBatchSubmitRequest, AdminBatchSubmitResponse, AdminSubmissionStateResponse, SubmissionChannel, SubmissionKind, SubmissionRecord, SubmissionStatus } from '@zhidedeng/shared';
+import { feishuHostnameKey, STATION_SLUG_MAX, stationSlugBase, stationSlugSuffix } from '@zhidedeng/shared';
 import { adminSlug, httpUrl, offerRate } from './catalog.ts';
-import type { SqlRow, SqlValue, Store } from './database.ts';
+import type { SqlRow, SqlValue, StationRecord, Store } from './database.ts';
 import { ApiError } from './errors.ts';
 
 const submissionKind = z.enum(['station', 'model', 'post']);
+const submissionChannel = z.enum(['feishu', 'agent', 'web']);
+const submissionAction = z.enum(['upsert', 'remove']);
 const submissionStatus = z.enum(['pending', 'approved', 'rejected', 'superseded']);
 const text = (max: number) => z.string().min(1).max(max).refine(value => value.trim().length > 0, '内容不能为空');
 const sourceByChannel = { agent: 'agent', feishu: 'submission', web: 'user' } as const;
+const batchIdentifier = z.string().trim().min(1).max(200);
 
 export const submissionQuerySchema = z.strictObject({
   status: submissionStatus.optional(),
   kind: submissionKind.optional(),
+  batchId: batchIdentifier.optional(),
   page: z.coerce.number().int().min(1).max(1_000_000).default(1),
   pageSize: z.coerce.number().int().min(1).transform(size => Math.min(size, 50)).default(20),
 });
@@ -21,16 +25,30 @@ export const submissionReviewSchema = z.strictObject({
   status: z.enum(['approved', 'rejected']),
   reason: z.string().trim().max(1000).optional(),
 });
+export const submissionBatchReviewSchema = z.union([
+  submissionReviewSchema.extend({ ids: z.array(z.string().trim().min(1).max(200)).min(1).max(100) }),
+  submissionReviewSchema.extend({ batchId: batchIdentifier }),
+]);
 
-const enqueueSchema = z.object({
+const submissionFields = {
   kind: submissionKind,
-  channel: z.enum(['feishu', 'agent', 'web']),
   originKey: z.string().min(1).max(253),
   payload: z.unknown(),
   actorHandle: text(200).nullish(),
+  action: submissionAction.default('upsert'),
+};
+export const submissionBatchSchema = z.strictObject({
+  channel: submissionChannel,
+  batchId: batchIdentifier.optional(),
+  items: z.array(z.object(submissionFields)),
+});
+const enqueueSchema = z.object({
+  ...submissionFields,
+  channel: submissionChannel,
+  batchId: batchIdentifier.nullish(),
   ip: z.string().min(1).max(100),
   now: z.date(),
-});
+}).refine(input => input.action !== 'remove' || input.kind === 'station', '只有站点支持下架');
 const modelSchema = z.object({ slug: adminSlug, vendor: adminSlug, name: text(60), description: text(200) });
 const stationSchema = z.object({
   name: text(60),
@@ -44,6 +62,7 @@ const postSchema = z.object({
   title: text(100), summary: text(200), body: text(5000), authorName: text(30),
   authorHandle: text(200).nullish(), hostname: text(253).nullish(), publishedAt: z.iso.datetime().nullish(),
 });
+const removalSchema = z.object({ slug: z.string().min(1).max(200) });
 
 function parse<T>(schema: z.ZodType<T>, input: unknown): T {
   const result = schema.safeParse(input);
@@ -58,6 +77,7 @@ function submissionRecord(row: SqlRow): SubmissionRecord {
   return {
     id: row.id as string, kind: row.kind as SubmissionKind, channel: row.channel as SubmissionChannel,
     originKey: row.originKey as string, payload: JSON.parse(row.payload as string),
+    batchId: row.batchId as string | null, action: row.action as SubmissionRecord['action'],
     actorHandle: row.actorHandle as string | null, status: row.status as SubmissionStatus,
     reason: row.reason as string | null, createdAt: row.createdAt as string, reviewedAt: row.reviewedAt as string | null,
   };
@@ -71,9 +91,11 @@ export function autoApproveEnabled(store: Store): boolean {
 }
 
 export function setAutoApprove(store: Store, enabled: boolean, now: Date): boolean {
-  store.db.prepare('INSERT INTO settings (key, value, updatedAt) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updatedAt = excluded.updatedAt')
-    .run(AUTO_APPROVE_KEY, String(enabled), now.toISOString());
-  return enabled;
+  return store.transaction(() => {
+    store.db.prepare('INSERT INTO settings (key, value, updatedAt) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updatedAt = excluded.updatedAt')
+      .run(AUTO_APPROVE_KEY, String(enabled), now.toISOString());
+    return enabled;
+  });
 }
 
 /**
@@ -84,14 +106,14 @@ export function enqueueSubmission(store: Store, input: {
   kind: SubmissionKind;
   channel: SubmissionChannel;
   originKey: string;
+  batchId?: string | null;
+  action?: SubmissionRecord['action'];
   payload: unknown;
   actorHandle?: string | null;
   ip: string;
   now: Date;
 }): { submission: SubmissionRecord; deduplicated: boolean; autoApproved: boolean } {
   const validated = parse(enqueueSchema, input);
-  // 自动通过时先校验 payload 格式，避免把一条注定审核失败的记录写进队列。
-  if (autoApproveEnabled(store)) validatePayload(validated.kind, validated.payload);
   let payload: string | undefined;
   try {
     payload = JSON.stringify(validated.payload);
@@ -100,44 +122,80 @@ export function enqueueSubmission(store: Store, input: {
   }
   if (payload === undefined) throw new ApiError(400, 'INVALID_INPUT', '投稿内容不是有效 JSON');
   const serialized = payload;
+  const parsedPayload: unknown = JSON.parse(serialized);
   const payloadHash = createHash('sha256').update(serialized).digest('hex');
 
   // 查重、插入和（可选）自动物化一起锁定，避免并发下重复入队或半途失败留下脏记录。
-  const auto = autoApproveEnabled(store);
   return store.transaction(() => {
+    const auto = autoApproveEnabled(store);
+    if (auto || validated.action === 'remove') validatePayload(store, validated.kind, parsedPayload, validated.action);
     // 自动通过下相同内容已上站就不再重复物化；人工审核下仍只按 pending 去重。
+    // 幂等限定在同一批次内，避免新批次借用旧批次的 id，导致一键审核漏掉这些条目。
     const scope = auto ? "AND status IN ('pending','approved')" : "AND status = 'pending'";
-    const existing = store.db.prepare(`SELECT * FROM submissions WHERE kind = ? AND originKey = ? AND payloadHash = ? ${scope} ORDER BY createdAt, rowid LIMIT 1`)
-      .get(validated.kind, validated.originKey, payloadHash);
-    if (existing) return { submission: submissionRecord(existing), deduplicated: true, autoApproved: false };
+    const existing = store.db.prepare(`SELECT * FROM submissions WHERE kind = ? AND originKey = ? AND action = ? AND payloadHash = ? AND batchId IS ? ${scope} ORDER BY createdAt DESC, rowid DESC LIMIT 1`)
+      .get(validated.kind, validated.originKey, validated.action, payloadHash, validated.batchId ?? null);
     const reviewedAt = validated.now.toISOString();
+    const latest = auto && existing?.status === 'approved'
+      ? store.db.prepare("SELECT id FROM submissions WHERE kind = ? AND originKey = ? AND status = 'approved' ORDER BY reviewedAt DESC, rowid DESC LIMIT 1").get(validated.kind, validated.originKey)
+      : undefined;
+    // approved 只在仍是最新版本时去重，否则需要重新物化本次提交的内容。
+    if (existing && (existing.status === 'pending' || latest?.id === existing.id)) {
+      const submission = submissionRecord(existing);
+      if (auto && submission.status === 'pending') {
+        materialize(store, submission, reviewedAt);
+        store.db.prepare("UPDATE submissions SET status = 'approved', reason = '自动通过', reviewedAt = ? WHERE id = ?").run(reviewedAt, submission.id);
+        supersedePending(store, submission, reviewedAt);
+        return { submission: { ...submission, status: 'approved', reason: '自动通过', reviewedAt }, deduplicated: true, autoApproved: true };
+      }
+      return { submission, deduplicated: true, autoApproved: false };
+    }
     const submission: SubmissionRecord = {
       id: randomUUID(), kind: validated.kind, channel: validated.channel, originKey: validated.originKey,
-      payload: JSON.parse(serialized), actorHandle: validated.actorHandle ?? null,
+      batchId: validated.batchId ?? null, action: validated.action,
+      payload: parsedPayload, actorHandle: validated.actorHandle ?? null,
       status: auto ? 'approved' : 'pending', reason: auto ? '自动通过' : null,
       reviewedAt: auto ? reviewedAt : null, createdAt: reviewedAt,
     };
     // 物化失败时整条记录随事务回滚，不会留下 approved 但没上站的幽灵。
     if (auto) materialize(store, submission, reviewedAt);
-    store.db.prepare('INSERT INTO submissions (id, kind, channel, originKey, payload, payloadHash, actorHandle, ip, status, reason, reviewedAt, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
-      .run(submission.id, submission.kind, submission.channel, submission.originKey, serialized, payloadHash,
+    store.db.prepare('INSERT INTO submissions (id, kind, channel, originKey, batchId, action, payload, payloadHash, actorHandle, ip, status, reason, reviewedAt, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+      .run(submission.id, submission.kind, submission.channel, submission.originKey, submission.batchId, submission.action, serialized, payloadHash,
         submission.actorHandle, validated.ip, submission.status, submission.reason, submission.reviewedAt, submission.createdAt);
     if (auto) supersedePending(store, submission, reviewedAt);
     return { submission, deduplicated: false, autoApproved: auto };
   });
 }
 
+/** 每条单独校验、入队和提交事务，一条失败不会阻止同批次的其他条目。 */
+export function enqueueBatch(store: Store, input: AdminBatchSubmitRequest & { ip: string; now: Date }): AdminBatchSubmitResponse {
+  const batchId = input.batchId ?? randomUUID();
+  const results: AdminBatchSubmitResponse['results'] = input.items.map(item => {
+    try {
+      validatePayload(store, item.kind, item.payload, item.action ?? 'upsert');
+      const { submission, deduplicated, autoApproved } = enqueueSubmission(store, { ...item, batchId, channel: input.channel, ip: input.ip, now: input.now });
+      return { originKey: item.originKey, kind: item.kind, id: submission.id, status: submission.status, deduplicated, autoApproved };
+    } catch (error) {
+      if (error instanceof ApiError) return { originKey: item.originKey, kind: item.kind, error: { code: error.code, message: error.message } };
+      console.error(error);
+      return { originKey: item.originKey, kind: item.kind, error: { code: 'INTERNAL_ERROR', message: '服务暂时不可用' } };
+    }
+  });
+  return { batchId, results };
+}
+
 export function listSubmissions(store: Store, input: {
   status?: SubmissionStatus;
   kind?: SubmissionKind;
+  batchId?: string;
   page?: number;
   pageSize?: number;
 }) {
-  const { status, kind, page, pageSize } = parse(submissionQuerySchema, input);
+  const { status, kind, batchId, page, pageSize } = parse(submissionQuerySchema, input);
   const filters: string[] = [];
   const params: SqlValue[] = [];
   if (status) { filters.push('status = ?'); params.push(status); }
   if (kind) { filters.push('kind = ?'); params.push(kind); }
+  if (batchId) { filters.push('batchId = ?'); params.push(batchId); }
   const where = filters.length ? ` WHERE ${filters.join(' AND ')}` : '';
   const total = Number(store.db.prepare(`SELECT COUNT(*) AS total FROM submissions${where}`).get(...params)!.total);
   const rows = store.db.prepare(`SELECT * FROM submissions${where} ORDER BY createdAt, rowid LIMIT ? OFFSET ?`)
@@ -155,9 +213,9 @@ function hostnameOf(url: string | null): string | null {
  * 站点 slug：`sub-` 加归一化 hostname 的可读形式。
  * hostname 超过长度上限、或清洗后与另一个站点撞车时，改用哈希后缀保证唯一——
  * 否则两个不同站点会写到同一条记录上，后审的覆盖先审的。
- * 身份一律取 url 的 hostname（不是 originKey），这样飞书用记录 ID 做 originKey 时，
+ * 身份一律取 url 的 hostname（不是 originKey），兼容以记录 ID 作为 originKey 的历史投稿，
  * 同一站点的重复提交仍然落在同一条记录上。
- * 派生规则来自 shared/slug.ts，飞书同步脚本用的是同一份，两边算出的 slug 必须一致。
+ * 派生规则来自 shared/slug.ts，飞书只传 hostname，由这里统一分配 slug。
  */
 function stationSlug(store: Store, url: string | null, originKey: string): string {
   const hostname = hostnameOf(url);
@@ -179,27 +237,89 @@ function stationSlug(store: Store, url: string | null, originKey: string): strin
   throw new ApiError(409, 'SLUG_CONFLICT', '无法为这个站点分配唯一的地址');
 }
 
-/** 只校验 payload 的形状，不写入。自动通过时先跑一遍，避免把注定失败的记录塞进队列。 */
-function validatePayload(kind: SubmissionKind, payload: unknown): void {
-  if (kind === 'model') parse(modelSchema, payload);
-  else if (kind === 'station') parse(stationSchema, payload);
+function parseStationPayload(store: Store, input: unknown) {
+  const payload = parse(stationSchema, input);
+  for (const offer of payload.offers) {
+    if (!store.get('model', offer.modelSlug)) throw new ApiError(400, 'INVALID_INPUT', `未知模型：${offer.modelSlug}`);
+  }
+  return payload;
+}
+
+/** 入队校验与审核复用相同规则，批次中的无效内容逐条返回错误。 */
+function validatePayload(store: Store, kind: SubmissionKind, payload: unknown, action: SubmissionRecord['action']): void {
+  if (action === 'remove') {
+    if (kind !== 'station') throw new ApiError(400, 'INVALID_INPUT', '只有站点支持下架');
+    parse(removalSchema, payload);
+  } else if (kind === 'model') parse(modelSchema, payload);
+  else if (kind === 'station') parseStationPayload(store, payload);
   else parse(postSchema, payload);
+}
+
+/** 下架只允许群友来源，报价和实体共用调用方的审核事务，不另开事务。 */
+export function removeStation(store: Store, slug: string): string {
+  const station = store.get('station', slug);
+  if (!station) throw new ApiError(404, 'NOT_FOUND', `站点 ${slug} 不存在`);
+  if (station.source !== 'submission') throw new ApiError(409, 'STATION_SOURCE_CONFLICT', '只能下架群友提交的站点');
+  store.db.prepare('DELETE FROM offers WHERE stationSlug = ?').run(slug);
+  store.db.prepare("DELETE FROM entities WHERE kind = 'station' AND id = ?").run(slug);
+  return slug;
+}
+
+/** 只列出以 hostname 入队且仍在线的 approved 飞书站点，记录 ID 不参与下架比较。 */
+export function submissionState(store: Store): AdminSubmissionStateResponse {
+  const rows = store.db.prepare("SELECT * FROM submissions WHERE kind = 'station' AND channel = 'feishu' AND status = 'approved' ORDER BY reviewedAt DESC, rowid DESC").all();
+  const byHost = new Map<string, StationRecord>();
+  const byFeishuHost = new Map<string, StationRecord>();
+  // 与物化时的首次认领一致，不能把同网址的最后一个旧实体误当成审核目标。
+  for (const station of store.all('station')) {
+    const hostname = hostnameOf(station.url);
+    if (hostname === null) continue;
+    if (!byHost.has(hostname)) byHost.set(hostname, station);
+    const key = feishuHostnameKey(hostname);
+    if (!byFeishuHost.has(key)) byFeishuHost.set(key, station);
+  }
+  const seenOrigins = new Set<string>();
+  const seenSlugs = new Set<string>();
+  const stations: AdminSubmissionStateResponse['stations'] = [];
+  for (const row of rows) {
+    const origin = feishuHostnameKey(row.originKey as string);
+    if (seenOrigins.has(origin)) continue;
+    seenOrigins.add(origin);
+    const submission = submissionRecord(row);
+    if (submission.action === 'remove') continue;
+    const payload = parse(stationSchema, submission.payload);
+    const hostname = hostnameOf(payload.url);
+    if (hostname === null || origin !== feishuHostnameKey(hostname)) continue;
+    const station = submission.batchId === null ? byHost.get(hostname) : byFeishuHost.get(origin);
+    if (!station || station.source !== 'submission' || seenSlugs.has(station.slug)) continue;
+    seenSlugs.add(station.slug);
+    stations.push({ slug: station.slug, originKey: submission.originKey, url: payload.url, name: payload.name });
+  }
+  return { stations: stations.sort((a, b) => a.originKey.localeCompare(b.originKey)) };
 }
 
 /** 把一条投稿写进 entities。不自己开事务，由调用方决定边界。 */
 function materialize(store: Store, submission: SubmissionRecord, reviewedAt: string): void {
-  if (submission.kind === 'model') {
+  if (submission.action === 'remove') {
+    if (submission.kind !== 'station') throw new ApiError(400, 'INVALID_INPUT', '只有站点支持下架');
+    removeStation(store, parse(removalSchema, submission.payload).slug);
+  } else if (submission.kind === 'model') {
     const payload = parse(modelSchema, submission.payload);
     if (!store.get('vendor', payload.vendor)) throw new ApiError(400, 'INVALID_INPUT', `厂商 ${payload.vendor} 不存在，请先新增厂商`);
     // 已存在的模型直接覆盖会静默改写名称和厂商、并清空 tags，与新增接口的 409 不一致。
     if (store.get('model', payload.slug)) throw new ApiError(409, 'MODEL_EXISTS', `模型 ${payload.slug} 已存在，请拒绝这条投稿；如需改名请用 PATCH /api/admin/models/:slug`);
     store.put('model', payload.slug, { ...payload, tags: [] });
   } else if (submission.kind === 'station') {
-    const { offers, ...payload } = parse(stationSchema, submission.payload);
-    for (const offer of offers) {
-      if (!store.get('model', offer.modelSlug)) throw new ApiError(400, 'INVALID_INPUT', `未知模型：${offer.modelSlug}`);
-    }
-    const slug = stationSlug(store, payload.url, submission.originKey);
+    const { offers, ...payload } = parseStationPayload(store, submission.payload);
+    const hostname = hostnameOf(payload.url);
+    // 飞书批次沿用旧同步的 www 分组，认领原站点；新 slug 仍统一由 stationSlug 分配。
+    const key = submission.channel === 'feishu' && submission.batchId !== null && hostname !== null
+      && feishuHostnameKey(submission.originKey) === feishuHostnameKey(hostname) ? feishuHostnameKey(hostname) : null;
+    const mine = key === null ? undefined : store.all('station').find(station => {
+      const host = hostnameOf(station.url);
+      return host !== null && feishuHostnameKey(host) === key;
+    });
+    const slug = mine?.slug ?? stationSlug(store, payload.url, submission.originKey);
     const previous = store.get('station', slug);
     // 更新已有 slug 时保留最初来源，不能把飞书站点改标成 AI 采集。
     store.put('station', slug, {
@@ -215,7 +335,13 @@ function materialize(store: Store, submission: SubmissionRecord, reviewedAt: str
     const stationSlug = hostname
       ? store.all('station').find(station => station.url !== null && new URL(station.url).hostname === hostname)?.slug ?? null
       : null;
-    const postId = `sub-${submission.id}`;
+    // 飞书每次同步都会生成新批次，评价按原记录更新，不能每同步一次就多发一篇文章。
+    const first = submission.channel === 'feishu' && submission.batchId !== null
+      ? store.db.prepare("SELECT id FROM submissions WHERE kind = 'post' AND channel = 'feishu' AND originKey = ? AND status = 'approved' ORDER BY rowid LIMIT 1").get(submission.originKey)
+      : undefined;
+    const legacyId = `feishu-${submission.originKey}`;
+    const legacy = submission.channel === 'feishu' && submission.batchId !== null && store.get('post', legacyId)?.source === 'submission';
+    const postId = legacy ? legacyId : `sub-${first?.id ?? submission.id}`;
     store.put('post', postId, {
       id: postId, kind: 'review', title: payload.title, summary: payload.summary, body: payload.body,
       authorHandle: payload.authorHandle ?? 'anonymous-submission', authorNickname: payload.authorName,

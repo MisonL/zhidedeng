@@ -37,11 +37,7 @@ pnpm dev
 | 前端（Vite，`/api` 代理到后端） | http://localhost:5173 |
 | 后端 API | http://127.0.0.1:8787 |
 
-数据库默认在 `server/data/app.db`，空库自动写入演示数据。数据结构没有迁移工具，本地升级后如果报字段缺失，停掉服务删库重来：
-
-```sh
-rm -f server/data/app.db*
-```
+数据库默认在 `server/data/app.db`，空库自动写入演示数据。启动时会幂等补齐投稿表的 `batchId` 和 `action` 列，并建立批次索引，保留已有投稿和业务数据。
 
 ## 测试
 
@@ -90,7 +86,15 @@ ADMIN=http://127.0.0.1:8787   # PORT 与环境文件一致
 
 # 待审投稿
 curl -H "Authorization: Bearer $SYNC_TOKEN" "$ADMIN/api/admin/posts?status=pending"
-# 通过或拒绝投稿（status: approved | rejected）。群友提交的文章返回 409，要到飞书撤销「通过」后重新同步
+# 待审投稿队列，可按一次飞书同步返回的 batchId 筛选
+curl -H "Authorization: Bearer $SYNC_TOKEN" "$ADMIN/api/admin/submissions?batchId=<batchId>"
+# 审核整批 pending；已经单独审核的条目会跳过。下架请求也在这一批中
+curl -X POST -H "Authorization: Bearer $SYNC_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"batchId":"<batchId>","status":"approved"}' "$ADMIN/api/admin/submissions/batch-review"
+# 自动通过开关同时作用于飞书批次的上架、更新和下架
+curl -X POST -H "Authorization: Bearer $SYNC_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"autoApprove":true}' "$ADMIN/api/admin/settings"
+# 通过或拒绝用户文章（status: approved | rejected）。已上线的群友文章在此返回 409，待审飞书内容用投稿队列审核
 curl -X POST -H "Authorization: Bearer $SYNC_TOKEN" -H 'Content-Type: application/json' \
   -d '{"status":"approved"}' "$ADMIN/api/admin/posts/<id>/review"
 # 隐藏或恢复评论（回复随父评论一起隐藏）
@@ -110,25 +114,29 @@ curl -X POST -H "Authorization: Bearer $SYNC_TOKEN" -H 'Content-Type: applicatio
   -d '{"slug":"stepfun","name":"阶跃星辰"}' "$ADMIN/api/admin/vendors"
 ```
 
-导入接口默认拒绝未收录的模型。后续给 Agent/群友队列接入时可以带 `"allowNewModels": true`，未知模型会自动建成 vendor 为 `unknown` 的占位模型（名称即 slug，描述标记待补全），响应里的 `createdModels` 列出本次新建的 slug。
+通用导入接口 `/api/admin/import` 保留，完整处理输入中的站点并替换原报价，不再按原来源跳过。它默认拒绝未收录的模型；带 `"allowNewModels": true` 时，未知模型会建成 vendor 为 `unknown` 的占位模型，响应里的 `createdModels` 列出新建的 slug。投稿队列中的未知模型逐条报错，需要先在模型管理接口补录。
 
 ## 同步飞书收集表
 
-`scripts/sync-feishu.ts` 用 lark-cli 只读读取多维表格，把审核状态严格等于「通过」的记录全量发布到站点。撤销「通过」或删除的记录，下次同步后从站点消失。账号、投票、评论和用户投稿不受影响。导入接口不对公网开放，脚本要在服务器本机运行（服务器上要有仓库、Node 依赖和 lark-cli）。
+`scripts/sync-feishu.ts` 用 lark-cli 只读读取多维表格，把审核状态严格等于「通过」的记录聚合成一个投稿批次。同一 hostname 的信息合成一个站点，评价各自入队；响应返回 `batchId` 和逐条结果，管理员可以审核整批。默认待人工确认，开启自动通过后立即生效。
+
+同步会读取 `/api/admin/submissions/state`，只对比以 hostname 入队、已有 approved 飞书投稿且仍在线的群友站点。表格中已消失的站点生成同批次的下架请求，审核通过后删除站点与报价，已有评价保留；旧全量导入中没有对应 approved 飞书投稿的站点不参与下架检测。飞书原有的 www 与裸域名分组继续沿用，更新时保留旧站点 slug。管理接口不对公网开放，脚本要在服务器本机运行（服务器上要有仓库、Node 依赖和 lark-cli）。
 
 ```sh
 export LARKSUITE_CLI_CONFIG_DIR=...  # lark-cli 配置目录，必填，不回落到默认的 ~/.lark-cli
 export FEISHU_BASE_TOKEN=... FEISHU_TABLE_ID=...
 export SITE_URL=http://127.0.0.1:8787 # 服务器本机地址
-export SYNC_TOKEN=...                 # 与服务环境文件相同，--dry-run 不需要
+export SYNC_TOKEN=...                 # 与服务环境文件相同，完整 dry-run 计划也需要
 
-pnpm sync:feishu --dry-run           # 只打印将发布的内容和跳过原因
+pnpm sync:feishu --dry-run           # 只读 GET，打印入队计划、下架清单和跳过原因
 pnpm sync:feishu
 ```
 
+`--dry-run` 绝不发送 POST。未配置 `SYNC_TOKEN` 时仍成功退出，只预览上架/更新和评价，并明确打印 `跳过下架检测：未配置 SYNC_TOKEN`；配置 token 后打印完整下架计划。正式同步遇到逐条入队失败会列出失败条目并以非零退出码结束，成功条目保留在返回的批次中。
+
 表格字段：中转站名称、网址、提交类型（推荐新站 / 更新信息 / 使用评价 / 避坑反馈）、模型与倍率（多行，每行「模型名=倍率」）、最低充值（元）、支付方式、推荐指数（1-5）、使用体验、展示昵称、审核状态（待审核 / 通过 / 拒绝）、审核备注、提交时间。审核备注不会外传。
 
-读取失败、返回结构无法识别或关键字段被改名时，脚本中止且不发布，避免把站点清空。
+读取失败、返回结构无法识别或关键字段被改名时，脚本中止且不入队，避免生成错误的下架请求。
 
 ## 数据说明
 

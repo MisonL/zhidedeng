@@ -4,7 +4,7 @@ import { dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildApp } from './app.ts';
 import { MIN_SYNC_TOKEN_LENGTH } from './catalog.ts';
-import { SCHEMA, Store } from './database.ts';
+import { ensureSubmissionColumns, SCHEMA, Store } from './database.ts';
 import type { SqlDatabase } from './database.ts';
 import { seed } from './seed.ts';
 import { mountWeb } from './static.ts';
@@ -15,12 +15,18 @@ export const defaultDbPath = fileURLToPath(new URL('../data/app.db', import.meta
 export function openDatabase(path: string) {
   if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   const db = new DatabaseSync(path);
-  db.exec(`
-    PRAGMA foreign_keys = ON;
-    PRAGMA journal_mode = WAL;
-    PRAGMA busy_timeout = 5000;
-    ${SCHEMA}
-  `);
+  try {
+    db.exec(`
+      PRAGMA foreign_keys = ON;
+      PRAGMA journal_mode = WAL;
+      PRAGMA busy_timeout = 5000;
+      ${SCHEMA}
+    `);
+    ensureSubmissionColumns(openStore(db));
+  } catch (error) {
+    db.close();
+    throw error;
+  }
   return db;
 }
 

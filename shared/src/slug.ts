@@ -5,6 +5,11 @@
  * 这里只放纯函数，不碰数据库：调用方拿到候选后再自己查库判重。
  */
 
+/** 飞书一直将 www 和裸域名归为同组；入队后沿用这个身份，避免重复建站。 */
+export function feishuHostnameKey(hostname: string): string {
+  return hostname.toLowerCase().replace(/^www\./, '');
+}
+
 /** 把 hostname 归一成 slug 的正文部分：小写、非字母数字折成连字符、去首尾。 */
 export function slugifyHost(value: string): string {
   return value.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
