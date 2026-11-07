@@ -125,13 +125,15 @@ describe('审核物化', () => {
     expect(store.get('station', 'sub-api-example-com')?.name).toBe('投稿示例站');
   });
 
-  it('station slug 最多 100 个字符', () => {
+  it('超长 hostname 的 slug 不超过 100 字符，带哈希后缀以免截断后撞车', () => {
     const originKey = `${'a'.repeat(63)}.${'b'.repeat(63)}.com`;
     const submission = queue({ originKey, payload: { ...stationPayload, url: `https://${originKey}/` } }).submission;
     approve(submission.id);
-    const slug = `sub-${'a'.repeat(63)}-${'b'.repeat(32)}`;
-    expect(store.get('station', slug)?.slug).toBe(slug);
-    expect(slug).toHaveLength(100);
+    const station = store.all('station').find(item => item.name === stationPayload.name)!;
+    expect(station.slug.length).toBeLessThanOrEqual(100);
+    // 纯截断会让两个前缀相同的长域名共用 slug，所以尾部必须是由 hostname 派生的哈希
+    expect(station.slug).toMatch(/-[0-9a-f]{10}$/);
+    expect(station.slug.startsWith(`sub-${'a'.repeat(63)}`)).toBe(true);
   });
 
   it.each([0.05, 20])('沿用现有倍率校验，接受边界 %s', rate => {

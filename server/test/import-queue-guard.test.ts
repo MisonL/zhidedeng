@@ -81,3 +81,67 @@ describe('飞书全量导入不覆盖队列物化的站点', () => {
     expect(openStore(server.db).get('station', 'sub-other-example-com')!.name).toBe('另一站');
   });
 });
+
+describe('复核发现的边界问题', () => {
+  const enqueue = (payload: unknown, originKey: string) => enqueueSubmission(openStore(server.db), {
+    kind: 'station', channel: 'agent', originKey, payload, ip: '127.0.0.1', now: clock(),
+  });
+
+  it('长 hostname 截断后不会和另一个站点共用 slug', async () => {
+    const store = openStore(server.db);
+    const prefix = `${'a'.repeat(63)}.${'b'.repeat(40)}`;
+    const one = `${prefix}.one.example.com`;
+    const two = `${prefix}.two.example.com`;
+    expect(one.length).toBeLessThanOrEqual(253);
+
+    const first = enqueue({ ...stationPayload, url: `https://${one}/`, name: '站点一' }, one);
+    reviewSubmission(store, clock(), first.submission.id, { status: 'approved' });
+    const second = enqueue({ ...stationPayload, url: `https://${two}/`, name: '站点二' }, two);
+    reviewSubmission(store, clock(), second.submission.id, { status: 'approved' });
+
+    const names = store.all('station').map(station => station.name).filter(name => ['站点一', '站点二'].includes(name)).sort();
+    expect(names).toEqual(['站点一', '站点二']);
+  });
+
+  it('清洗后撞车的 hostname 也各自独立', async () => {
+    const store = openStore(server.db);
+    // a.b.com 与 a-b.com 清洗后都是 a-b-com
+    const first = enqueue({ ...stationPayload, url: 'https://a.b.com/', name: '点号站' }, 'a.b.com');
+    reviewSubmission(store, clock(), first.submission.id, { status: 'approved' });
+    const second = enqueue({ ...stationPayload, url: 'https://a-b.com/', name: '连字符站' }, 'a-b.com');
+    reviewSubmission(store, clock(), second.submission.id, { status: 'approved' });
+
+    const names = store.all('station').map(station => station.name).filter(name => ['点号站', '连字符站'].includes(name)).sort();
+    expect(names).toEqual(['点号站', '连字符站']);
+  });
+
+  it('审核已存在的模型返回 409，不静默覆盖名称和 tags', async () => {
+    const store = openStore(server.db);
+    const before = store.get('model', 'gpt-4-1')!;
+    const { submission } = enqueueSubmission(store, {
+      kind: 'model', channel: 'agent', originKey: 'gpt-4-1',
+      payload: { slug: 'gpt-4-1', vendor: 'openai', name: '被改掉的名字', description: '不应生效' },
+      ip: '127.0.0.1', now: clock(),
+    });
+    const response = await server.app.request(`/api/admin/submissions/${submission.id}/review`, {
+      method: 'POST', headers: admin, body: JSON.stringify({ status: 'approved' }),
+    });
+    expect(response.status).toBe(409);
+    expect(store.get('model', 'gpt-4-1')).toEqual(before);
+  });
+
+  it('allowNewModels 拒绝不符合 slug 规则的模型名，避免产生无法路由的条目', async () => {
+    const payload = {
+      allowNewModels: true,
+      stations: [{
+        slug: 'sub-weird-model-com', name: '怪模型站', description: '测试非法 slug',
+        url: 'https://weird-model.com/', rechargeThreshold: null, paymentMethods: [],
+        offers: [{ modelSlug: 'foo/bar', rate: 0.5 }],
+      }],
+      posts: [],
+    };
+    const response = await importCatalog(payload);
+    expect(response.status).toBe(400);
+    expect(openStore(server.db).get('model', 'foo/bar')).toBeUndefined();
+  });
+});
