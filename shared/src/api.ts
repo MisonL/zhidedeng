@@ -25,12 +25,45 @@ export interface SubmissionRecord {
   kind: SubmissionKind;
   channel: SubmissionChannel;
   originKey: string;
+  batchId: string | null;
+  action: 'upsert' | 'remove';
   payload: unknown;
   actorHandle: string | null;
   status: SubmissionStatus;
   reason: string | null;
   createdAt: string;
   reviewedAt: string | null;
+}
+
+// POST /api/admin/submissions/batch。管理接口，不进公开契约。
+export interface AdminBatchSubmitRequest {
+  channel: SubmissionChannel;
+  // 不传时由服务端生成。
+  batchId?: string;
+  items: {
+    kind: SubmissionKind;
+    originKey: string;
+    payload: unknown;
+    actorHandle?: string | null;
+    action?: 'upsert' | 'remove';
+  }[];
+}
+export interface AdminBatchSubmitResponse {
+  batchId: string;
+  results: {
+    originKey: string;
+    kind: SubmissionKind;
+    id?: string;
+    status?: SubmissionStatus;
+    deduplicated?: boolean;
+    autoApproved?: boolean;
+    error?: { code: string; message: string };
+  }[];
+}
+
+// GET /api/admin/submissions/state。只供同步脚本比较已上线的队列站点。
+export interface AdminSubmissionStateResponse {
+  stations: { slug: string; originKey: string; url: string | null; name: string }[];
 }
 
 export interface ApiErrorResponse {
@@ -159,7 +192,7 @@ export interface SearchResponse {
 export type GetHotSearchesRequest = PaginationQuery;
 export type GetHotSearchesResponse = PaginatedResponse<string>;
 
-// POST /api/admin/import 的全量导入内容（scripts/sync-feishu.ts → Worker）。
+// POST /api/admin/import 的通用全量导入内容。
 // 这是受保护的运维接口，不属于公开 API，所以不进 ApiContracts 和 API_ROUTES。
 export interface CatalogImportStation {
   slug: string;
@@ -193,9 +226,6 @@ export interface CatalogImportResponse {
   posts: number;
   // 本次自动创建的占位模型 slug，已收录的模型不会重复列出。
   createdModels: string[];
-  // 被跳过的站点及原因，例如该站点已由其他通道接管。跳过的站点不会被本接口覆盖。
-  // 可选：旧版服务端不返回这个字段，调用方需按缺省空数组处理。
-  skipped?: { slug: string; reason: string }[];
 }
 
 // POST /api/admin/models。管理接口，同样不进 ApiContracts。

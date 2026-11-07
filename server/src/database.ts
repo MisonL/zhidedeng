@@ -61,6 +61,8 @@ export const SCHEMA = `
     kind TEXT NOT NULL CHECK(kind IN ('station','model','post')),
     channel TEXT NOT NULL CHECK(channel IN ('feishu','agent','web')),
     originKey TEXT NOT NULL,
+    batchId TEXT,
+    action TEXT NOT NULL DEFAULT 'upsert' CHECK(action IN ('upsert','remove')),
     payload TEXT NOT NULL CHECK(json_valid(payload)),
     payloadHash TEXT NOT NULL,
     actorHandle TEXT,
@@ -115,4 +117,18 @@ export class Store {
     this.db.prepare('INSERT INTO entities (kind, id, data) VALUES (?, ?, ?) ON CONFLICT(kind,id) DO UPDATE SET data=excluded.data')
       .run(kind, id, JSON.stringify(value));
   }
+}
+
+function ensureColumn(db: SqlDatabase, column: 'batchId' | 'action', definition: string) {
+  const exists = db.prepare('PRAGMA table_info(submissions)').all().some(row => row.name === column);
+  if (!exists) db.prepare(`ALTER TABLE submissions ADD COLUMN ${column} ${definition}`).run();
+}
+
+/** 建表不会补旧表的列。先幂等补列，再建依赖新列的索引，保留全部旧投稿。 */
+export function ensureSubmissionColumns(store: Store) {
+  store.transaction(() => {
+    ensureColumn(store.db, 'batchId', 'TEXT');
+    ensureColumn(store.db, 'action', "TEXT NOT NULL DEFAULT 'upsert' CHECK(action IN ('upsert','remove'))");
+    store.db.prepare('CREATE INDEX IF NOT EXISTS submissions_batch ON submissions(batchId, status)').run();
+  });
 }

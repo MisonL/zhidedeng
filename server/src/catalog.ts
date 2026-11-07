@@ -7,7 +7,7 @@ import type {
 import type { Store } from './database.ts';
 import { ApiError } from './errors.ts';
 
-// 群友提交的全量导入。只替换 source=submission 的站点、报价和文章，种子和访客的数据都不动。
+// 通用全量导入。替换 source=submission 的集合并处理全部输入 slug，账号和互动保留。
 
 const IS_SUBMISSION = "json_extract(data,'$.source') = 'submission'";
 const SUBMITTED_STATIONS = `(SELECT id FROM entities WHERE kind = 'station' AND ${IS_SUBMISSION})`;
@@ -63,17 +63,9 @@ function submissionFingerprint(store: Store) {
 
 function importCatalog(store: Store, input: CatalogImportRequest): CatalogImportResponse {
   return store.transaction(() => {
-    // 已经有其他通道（投稿队列）物化过的站点，本接口不再覆盖：它下次同步又会覆盖回来，
-    // 而且 DELETE 只清 source='submission'，会留下 agent 站点的残留报价撞上唯一约束。
-    // PR4 把飞书接入队列后，这条过渡保护就可以删掉。
-    const managed = new Set(store.all('station').filter(station => station.source !== 'submission' && station.source !== 'demo').map(station => station.slug));
-    const skipped = input.stations.filter(station => managed.has(station.slug)).map(station => ({ slug: station.slug, reason: '该站点已由其他通道接管' }));
-    const accepted = input.stations.filter(station => !managed.has(station.slug));
-    const offers = accepted.flatMap(({ slug, offers: stationOffers }) => stationOffers.map(offer => ({ stationSlug: slug, ...offer })));
+    const offers = input.stations.flatMap(({ slug, offers: stationOffers }) => stationOffers.map(offer => ({ stationSlug: slug, ...offer })));
 
     const models = new Set(store.all('model').map(model => model.slug));
-    // 只从真正会被写入的报价里收集未知模型：被跳过的站点引用不到的模型不该建，
-    // 也不该让它把同批次的合法站点一起卡成 400。
     const unknown = [...new Set(offers.map(offer => offer.modelSlug).filter(slug => !models.has(slug)))];
     if (unknown.length && !input.allowNewModels) throw new ApiError(400, 'INVALID_INPUT', `未知模型：${unknown[0]}`);
 
@@ -95,7 +87,9 @@ function importCatalog(store: Store, input: CatalogImportRequest): CatalogImport
     }
     store.db.prepare(`DELETE FROM offers WHERE stationSlug IN ${SUBMITTED_STATIONS}`).run();
     store.db.prepare(`DELETE FROM entities WHERE ${IS_SUBMISSION}`).run();
-    for (const { offers: _offers, ...station } of accepted) {
+    for (const { offers: _offers, ...station } of input.stations) {
+      // 通用导入处理全部输入 slug，原来源的报价也要替换，避免残留或撞唯一约束。
+      store.db.prepare('DELETE FROM offers WHERE stationSlug = ?').run(station.slug);
       store.put('station', station.slug, { ...station, uptime: null, firstTokenLatencyMs: null, foundedAt: null, status: null, source: 'submission' });
     }
     for (const offer of offers) {
@@ -105,7 +99,7 @@ function importCatalog(store: Store, input: CatalogImportRequest): CatalogImport
       const id = `feishu-${recordId}`;
       store.put('post', id, { ...post, id, kind: 'review', authorHandle: 'feishu-submission', authorNickname: authorName, modelSlug: null, cover: null, source: 'submission', status: 'approved' });
     }
-    return { changed: unknown.length > 0 || submissionFingerprint(store) !== before, stations: accepted.length, offers: offers.length, posts: input.posts.length, createdModels: unknown.sort(), skipped };
+    return { changed: unknown.length > 0 || submissionFingerprint(store) !== before, stations: input.stations.length, offers: offers.length, posts: input.posts.length, createdModels: unknown.sort() };
   });
 }
 

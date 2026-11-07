@@ -1,21 +1,21 @@
 #!/usr/bin/env node
-// 把飞书收集表里审核通过的记录全量同步到站点 catalog。确定性脚本，不调用任何 LLM，对飞书只读。
+// 把飞书收集表里审核通过的记录提交到投稿队列。确定性脚本，不调用任何 LLM，对飞书只读。
 //
 //   LARKSUITE_CLI_CONFIG_DIR  lark-cli 配置目录。必填，不回落到默认的 ~/.lark-cli，防止读到其他组织的配置
 //   FEISHU_BASE_TOKEN         多维表格 token
 //   FEISHU_TABLE_ID           数据表 ID
-//   SITE_URL                  站点地址。导入接口不对公网开放，在服务器本机运行，用 http://127.0.0.1:PORT
-//   SYNC_TOKEN                导入接口密钥，至少 32 位（--dry-run 时不需要）
+//   SITE_URL                  站点地址。管理接口不对公网开放，在服务器本机运行，用 http://127.0.0.1:PORT
+//   SYNC_TOKEN                管理接口密钥，至少 32 位。dry-run 缺省时跳过下架检测
 //
 //   node scripts/sync-feishu.ts [--dry-run]
 //
-// 任何读取失败都中止且不发布：导入是全量覆盖，把读取失败当成空表会清空全部群友提交。
+// 任何读取失败都中止且不入队：把读取失败当成空表会生成错误的下架请求。
 import { execFile } from 'node:child_process';
 import { homedir } from 'node:os';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { MAX_RATE, MIN_RATE } from '@zhidedeng/shared';
-import type { CatalogImportPost, CatalogImportRequest, CatalogImportResponse, CatalogImportStation } from '@zhidedeng/shared';
+import { feishuHostnameKey, MAX_RATE, MIN_RATE } from '@zhidedeng/shared';
+import type { AdminBatchSubmitRequest, AdminBatchSubmitResponse, AdminSubmissionStateResponse, CatalogImportPost, CatalogImportStation } from '@zhidedeng/shared';
 
 export interface RawRecord {
   recordId: string;
@@ -121,7 +121,7 @@ export function normalizeUrl(raw: string): { url: string; host: string } | null 
   url.hash = '';
   url.username = '';
   url.password = '';
-  return { url: url.href, host: url.hostname.toLowerCase().replace(/^www\./, '') };
+  return { url: url.href, host: feishuHostnameKey(url.hostname) };
 }
 
 function parseSubmittedAt(value: unknown): number | null {
@@ -179,6 +179,15 @@ interface Submission {
   time: number;
 }
 
+type StationItem = {
+  kind: 'station'; originKey: string; action: 'upsert'; payload: Omit<CatalogImportStation, 'slug'>;
+};
+type PostItem = {
+  kind: 'post'; originKey: string;
+  payload: Omit<CatalogImportPost, 'recordId' | 'stationSlug'> & { hostname: string };
+};
+type RemovalItem = { kind: 'station'; originKey: string; action: 'remove'; payload: { slug: string } };
+
 function parseSubmission(record: RawRecord, models: Map<string, string>, notes: string[]): Submission | string {
   const { recordId, fields } = record;
   if (!/^[A-Za-z0-9_-]{1,64}$/.test(recordId)) return '记录 ID 不合法';
@@ -213,7 +222,7 @@ function parseSubmission(record: RawRecord, models: Map<string, string>, notes: 
  * 只接触审核状态严格等于「通过」的记录；其他记录连内容都不进日志。审核备注从不读取。
  * 同一站点（按主机名归并）的站点信息逐项取最新一条非空的值，所以一条没填报价的评价不会冲掉报价。
  */
-export function buildImport(records: RawRecord[], models: SiteModel[]) {
+export function buildBatch(records: RawRecord[], models: SiteModel[]) {
   const skipped: string[] = [];
   const notes: string[] = [];
   const modelIndex = new Map(models.flatMap(model => [[normalizeModelName(model.name), model.slug], [normalizeModelName(model.slug), model.slug]] as const));
@@ -243,18 +252,21 @@ export function buildImport(records: RawRecord[], models: SiteModel[]) {
     groups.set(host, [...(groups.get(host) ?? []), submission]);
   }
 
-  const stations: CatalogImportStation[] = [];
-  const posts: CatalogImportPost[] = [];
+  const stations: StationItem[] = [];
+  const posts: PostItem[] = [];
   for (const [host, group] of groups) {
-    const slug = clip(`sub-${host.replace(/[^a-z0-9]+/g, '-')}`, 124);
     const name = group[0].name;
+    const site = group.find(item => item.site)!.site!;
+    const hostname = new URL(site.url).hostname.toLowerCase();
     stations.push({
-      slug, name,
-      url: group.find(item => item.site)!.site!.url,
-      description: cleanText(group.find(item => !REVIEW_TYPES.has(item.type) && item.text)?.text ?? DEFAULT_DESCRIPTION, LIMITS.description),
-      rechargeThreshold: group.find(item => item.threshold !== null)?.threshold ?? null,
-      paymentMethods: group.find(item => item.payments.length)?.payments ?? [],
-      offers: group.find(item => item.offers.length)?.offers ?? [],
+      kind: 'station', originKey: host.toLowerCase(), action: 'upsert',
+      payload: {
+        name, url: site.url,
+        description: cleanText(group.find(item => !REVIEW_TYPES.has(item.type) && item.text)?.text ?? DEFAULT_DESCRIPTION, LIMITS.description),
+        rechargeThreshold: group.find(item => item.threshold !== null)?.threshold ?? null,
+        paymentMethods: group.find(item => item.payments.length)?.payments ?? [],
+        offers: group.find(item => item.offers.length)?.offers ?? [],
+      },
     });
     for (const item of group.filter(entry => REVIEW_TYPES.has(entry.type))) {
       if (!item.text) {
@@ -263,18 +275,36 @@ export function buildImport(records: RawRecord[], models: SiteModel[]) {
       }
       const excerpt = cleanLine(item.text, LIMITS.excerpt);
       posts.push({
-        recordId: item.recordId, stationSlug: slug, title: `${name} · ${item.type}`,
-        summary: item.score === null ? excerpt : `推荐指数 ${item.score}/5 · ${excerpt}`,
-        body: item.text, authorName: item.nickname || ANONYMOUS, publishedAt: new Date(item.time).toISOString(),
+        kind: 'post', originKey: item.recordId,
+        payload: {
+          hostname, title: `${name} · ${item.type}`,
+          summary: item.score === null ? excerpt : `推荐指数 ${item.score}/5 · ${excerpt}`,
+          body: item.text, authorName: item.nickname || ANONYMOUS, publishedAt: new Date(item.time).toISOString(),
+        },
       });
     }
   }
-  stations.sort((a, b) => a.slug.localeCompare(b.slug));
-  posts.sort((a, b) => a.recordId.localeCompare(b.recordId));
+  stations.sort((a, b) => a.originKey.localeCompare(b.originKey));
+  posts.sort((a, b) => a.originKey.localeCompare(b.originKey));
   skipped.sort();
   notes.sort();
-  const payload: CatalogImportRequest = { stations, posts };
+  const payload = { channel: 'feishu' as const, items: [...stations, ...posts] };
   return { payload, skipped, notes };
+}
+
+/** 按飞书分组的 hostname 比较，slug 只取服务端返回的值，不在脚本里派生。 */
+export function planBatch(batch: AdminBatchSubmitRequest, state: AdminSubmissionStateResponse | null) {
+  const upserts = batch.items.filter(item => item.kind === 'station' && (item.action ?? 'upsert') === 'upsert');
+  const incoming = new Set(upserts.map(item => feishuHostnameKey(item.originKey)));
+  const current = new Set(state?.stations.map(station => feishuHostnameKey(station.originKey)));
+  const removals: RemovalItem[] = state?.stations.filter(station => !incoming.has(feishuHostnameKey(station.originKey))).map(station => ({
+    kind: 'station', originKey: feishuHostnameKey(station.originKey), action: 'remove', payload: { slug: station.slug },
+  })) ?? [];
+  return {
+    payload: { ...batch, items: [...batch.items, ...removals] }, removals,
+    added: state === null ? null : upserts.filter(item => !current.has(feishuHostnameKey(item.originKey))).length,
+    updated: state === null ? null : upserts.filter(item => current.has(feishuHostnameKey(item.originKey))).length,
+  };
 }
 
 class UsageError extends Error {}
@@ -294,7 +324,7 @@ function readConfig(dryRun: boolean) {
     configDir, site,
     baseToken: requireEnv('FEISHU_BASE_TOKEN'),
     tableId: requireEnv('FEISHU_TABLE_ID'),
-    syncToken: dryRun ? '' : requireEnv('SYNC_TOKEN'),
+    syncToken: dryRun ? process.env.SYNC_TOKEN ?? '' : requireEnv('SYNC_TOKEN'),
   };
 }
 
@@ -319,7 +349,7 @@ async function readAllRecords(config: Config) {
     page.columns.forEach(column => columns.add(column));
     if (page.records.length === 0 || !(page.hasMore ?? page.records.length === PAGE_SIZE)) break;
   }
-  // 字段被改名时所有记录都会变成「未通过」，全量同步就会清空站点，所以这里中止。
+  // 字段被改名时所有记录都会变成「未通过」，会生成错误的下架请求，所以这里中止。
   const missing = REQUIRED_COLUMNS.filter(column => !columns.has(column));
   if (records.length > 0 && missing.length > 0) throw new Error(`表格缺少字段：${missing.join('、')}，中止同步`);
   return records;
@@ -336,27 +366,72 @@ async function readModels(site: URL) {
   }
 }
 
+async function readSubmissionState(config: Config): Promise<AdminSubmissionStateResponse> {
+  const response = await fetch(new URL('/api/admin/submissions/state', config.site), {
+    headers: { authorization: `Bearer ${config.syncToken}` }, signal: AbortSignal.timeout(30_000),
+  });
+  if (!response.ok) throw new Error(`读取投稿状态失败：HTTP ${response.status} ${await response.text()}`);
+  const body: unknown = await response.json();
+  if (!isObject(body) || !Array.isArray(body.stations) || !body.stations.every((station: unknown) => isObject(station)
+    && typeof station.slug === 'string' && station.slug.length > 0 && station.slug.length <= 200
+    && typeof station.originKey === 'string' && station.originKey.length > 0 && station.originKey.length <= 253
+    && typeof station.name === 'string' && (station.url === null || typeof station.url === 'string'))) {
+    throw new Error('线上投稿状态结构无法识别，中止同步');
+  }
+  return body as unknown as AdminSubmissionStateResponse;
+}
+
+function batchResult(body: unknown, items: AdminBatchSubmitRequest['items']): AdminBatchSubmitResponse {
+  if (!isObject(body) || typeof body.batchId !== 'string' || !body.batchId || !Array.isArray(body.results) || body.results.length !== items.length
+    || !body.results.every((result: unknown, index) => {
+      if (!isObject(result) || result.kind !== items[index].kind || result.originKey !== items[index].originKey) return false;
+      if (result.error !== undefined) return isObject(result.error) && typeof result.error.code === 'string' && typeof result.error.message === 'string';
+      return typeof result.id === 'string' && result.id.length > 0 && typeof result.status === 'string'
+        && ['pending', 'approved', 'rejected', 'superseded'].includes(result.status);
+    })) throw new Error('批次入队响应结构无法识别，请核对服务端批次结果');
+  return body as unknown as AdminBatchSubmitResponse;
+}
+
 async function main(dryRun: boolean, config: Config) {
   const records = await readAllRecords(config);
   const models = await readModels(config.site);
-  const { payload, skipped, notes } = buildImport(records, models);
-  console.log(`读取 ${records.length} 条记录，将发布 ${payload.stations.length} 个站点、${payload.posts.length} 篇评价，跳过 ${skipped.length} 条坏记录`);
+  const { payload: batch, skipped, notes } = buildBatch(records, models);
+  const stationCount = batch.items.filter(item => item.kind === 'station').length;
+  const postCount = batch.items.filter(item => item.kind === 'post').length;
+  console.log(`读取 ${records.length} 条记录，将入队 ${stationCount} 个站点、${postCount} 篇评价，跳过 ${skipped.length} 条坏记录`);
   for (const line of skipped) console.log(`[跳过] ${line}`);
   for (const line of notes) console.log(`[提示] ${line}`);
+  let state: AdminSubmissionStateResponse | null = null;
+  if (config.syncToken) state = await readSubmissionState(config);
+  else console.log('跳过下架检测：未配置 SYNC_TOKEN');
+  const { payload, removals, added, updated } = planBatch(batch, state);
+  console.log(state === null
+    ? `同步计划：上架/更新 ${stationCount}，评价 ${postCount}，下架未检测`
+    : `同步计划：新增 ${added}，更新 ${updated}，下架 ${removals.length}，评价 ${postCount}`);
+  for (const item of removals) console.log(`[下架] ${item.originKey}：${item.payload.slug}`);
   if (dryRun) {
     console.log(JSON.stringify(payload, null, 2));
     return;
   }
-  const response = await fetch(new URL('/api/admin/import', config.site), {
+  const response = await fetch(new URL('/api/admin/submissions/batch', config.site), {
     method: 'POST',
     headers: { 'content-type': 'application/json', authorization: `Bearer ${config.syncToken}` },
     body: JSON.stringify(payload),
+    signal: AbortSignal.timeout(30_000),
   });
-  if (!response.ok) throw new Error(`导入失败：HTTP ${response.status} ${await response.text()}`);
-  const result = await response.json() as CatalogImportResponse;
-  console.log(`导入完成：${result.changed ? '内容有变化' : '内容无变化'}，站点 ${result.stations}，报价 ${result.offers}，文章 ${result.posts}`);
-  // 旧版服务端的响应里没有 skipped，这里按可选处理，脚本可以先于服务端升级。
-  for (const line of result.skipped ?? []) console.log(`[跳过] ${line.slug}：${line.reason}`);
+  if (!response.ok) throw new Error(`批次入队失败：HTTP ${response.status} ${await response.text()}`);
+  const result = batchResult(await response.json(), payload.items);
+  const failed = result.results.filter(item => item.error);
+  const accepted = new Set(result.results.filter(item => !item.error).map(item => `${item.kind}:${item.originKey}`));
+  const current = new Set(state?.stations.map(station => feishuHostnameKey(station.originKey)));
+  const stations = batch.items.filter(item => item.kind === 'station' && accepted.has(`station:${item.originKey}`));
+  const newCount = stations.filter(item => !current.has(feishuHostnameKey(item.originKey))).length;
+  const updateCount = stations.length - newCount;
+  const removeCount = removals.filter(item => accepted.has(`station:${item.originKey}`)).length;
+  const reviewCount = batch.items.filter(item => item.kind === 'post' && accepted.has(`post:${item.originKey}`)).length;
+  console.log(`批次 ${result.batchId} 入队完成：新增 ${newCount}，更新 ${updateCount}，下架 ${removeCount}，评价 ${reviewCount}，失败 ${failed.length}`);
+  for (const item of failed) console.log(`[失败] ${item.kind} ${item.originKey}：${item.error!.code} ${item.error!.message}`);
+  if (failed.length > 0) throw new Error(`批次 ${result.batchId} 有 ${failed.length} 条入队失败`);
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
