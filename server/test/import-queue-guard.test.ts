@@ -144,4 +144,38 @@ describe('复核发现的边界问题', () => {
     expect(response.status).toBe(400);
     expect(openStore(server.db).get('model', 'foo/bar')).toBeUndefined();
   });
+
+  it('originKey 与 url hostname 不同时，重复提交仍更新同一条记录', () => {
+    const store = openStore(server.db);
+    // 飞书用记录 ID 作 originKey，和站点 url 的 hostname 无关
+    const submit = (name: string) => {
+      const { submission } = enqueue({ ...stationPayload, name }, 'rec-feishu-1');
+      reviewSubmission(store, clock(), submission.id, { status: 'approved' });
+      return submission;
+    };
+    submit('第一次');
+    submit('第二次');
+
+    const stations = store.all('station').filter(station => station.name.startsWith('第'));
+    expect(stations).toHaveLength(1);
+    expect(stations[0]).toMatchObject({ slug: 'sub-shared-example-com', name: '第二次' });
+  });
+
+  it('slug 撞车时两个站点各自独立，重复提交不新增第三条', () => {
+    const store = openStore(server.db);
+    const submit = (url: string, name: string) => {
+      const { submission } = enqueue({ ...stationPayload, url, name }, new URL(url).hostname);
+      reviewSubmission(store, clock(), submission.id, { status: 'approved' });
+    };
+    submit('https://a.b.com/', '点号站');
+    submit('https://a-b.com/', '连字符站');
+    // 两个撞车站点各再提交一次，应各自更新而非新增
+    submit('https://a.b.com/', '点号站2');
+    submit('https://a-b.com/', '连字符站2');
+
+    // 只看队列物化出来的站点（slug 前缀 sub-），避开种子数据
+    const mine = store.all('station').filter(station => station.slug.startsWith('sub-'));
+    expect(mine).toHaveLength(2);
+    expect(mine.map(station => station.name).sort()).toEqual(['点号站2', '连字符站2']);
+  });
 });
