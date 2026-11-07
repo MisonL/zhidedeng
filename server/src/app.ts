@@ -142,7 +142,8 @@ export function buildApp(store: Store, now: () => Date, options: AppOptions = {}
     return c.json(reviewSubmission(store, now(), c.req.param('id'), decision));
   });
   app.post('/api/admin/submissions/batch-review', async c => {
-    const { ids, ...decision } = submissionReviewSchema.extend({ ids: z.array(identifier).min(1) }).parse(await c.req.json());
+    // 每条审核都是一个独立事务，限制批量规模避免一次请求长时间占用连接。
+    const { ids, ...decision } = submissionReviewSchema.extend({ ids: z.array(identifier).min(1).max(100) }).parse(await c.req.json());
     const results = ids.map(id => {
       try {
         return { id, submission: reviewSubmission(store, now(), id, decision) };

@@ -14,8 +14,9 @@ export function listPosts(store: Store, status: PostStatus) {
 export function reviewPost(store: Store, id: string, status: PostStatus) {
   const post = store.get('post', id);
   if (!post) throw new ApiError(404, 'NOT_FOUND', '文章不存在');
-  // 这些文章由全量同步写入，这里改了下次同步又会恢复。
+  // 这两种来源的文章由同步或投稿队列物化，这里改了会被下次物化覆盖，也会绕开队列。
   if (post.source === 'submission') throw new ApiError(409, 'MANAGED_BY_SOURCE', '这是群友提交的内容，请到飞书表格撤销「通过」后重新同步');
+  if (post.source === 'agent') throw new ApiError(409, 'MANAGED_BY_SOURCE', '这是 Agent 采集的内容，请通过投稿队列处理');
   store.put('post', id, { ...post, status });
   return { id, status };
 }

@@ -68,6 +68,14 @@ function importCatalog(store: Store, input: CatalogImportRequest): CatalogImport
     const unknown = [...new Set(offers.map(offer => offer.modelSlug).filter(slug => !models.has(slug)))];
     if (unknown.length && !input.allowNewModels) throw new ApiError(400, 'INVALID_INPUT', `未知模型：${unknown[0]}`);
 
+    // 已经有其他通道（投稿队列）物化过的站点，本接口不再覆盖：它下次同步又会覆盖回来，
+    // 而且 DELETE 只清 source='submission'，会留下 agent 站点的残留报价撞上唯一约束。
+    // PR4 把飞书接入队列后，这条过渡保护就可以删掉。
+    const managed = new Set(store.all('station').filter(station => station.source !== 'submission' && station.source !== 'demo').map(station => station.slug));
+    const skipped = input.stations.filter(station => managed.has(station.slug)).map(station => ({ slug: station.slug, reason: '该站点已由其他通道接管' }));
+    const accepted = input.stations.filter(station => !managed.has(station.slug));
+    const acceptedOffers = offers.filter(offer => !managed.has(offer.stationSlug));
+
     const before = submissionFingerprint(store);
     // 自动创建的占位模型统一挂在 unknown 厂商下，等管理员补全或改建正式厂商。
     if (unknown.length) {
@@ -78,17 +86,17 @@ function importCatalog(store: Store, input: CatalogImportRequest): CatalogImport
     }
     store.db.prepare(`DELETE FROM offers WHERE stationSlug IN ${SUBMITTED_STATIONS}`).run();
     store.db.prepare(`DELETE FROM entities WHERE ${IS_SUBMISSION}`).run();
-    for (const { offers: _offers, ...station } of input.stations) {
+    for (const { offers: _offers, ...station } of accepted) {
       store.put('station', station.slug, { ...station, uptime: null, firstTokenLatencyMs: null, foundedAt: null, status: null, source: 'submission' });
     }
-    for (const offer of offers) {
+    for (const offer of acceptedOffers) {
       store.db.prepare('INSERT INTO offers (stationSlug, modelSlug, rate) VALUES (?, ?, ?)').run(offer.stationSlug, offer.modelSlug, offer.rate);
     }
     for (const { recordId, authorName, ...post } of input.posts) {
       const id = `feishu-${recordId}`;
       store.put('post', id, { ...post, id, kind: 'review', authorHandle: 'feishu-submission', authorNickname: authorName, modelSlug: null, cover: null, source: 'submission', status: 'approved' });
     }
-    return { changed: unknown.length > 0 || submissionFingerprint(store) !== before, stations: input.stations.length, offers: offers.length, posts: input.posts.length, createdModels: unknown.sort() };
+    return { changed: unknown.length > 0 || submissionFingerprint(store) !== before, stations: accepted.length, offers: acceptedOffers.length, posts: input.posts.length, createdModels: unknown.sort(), skipped };
   });
 }
 

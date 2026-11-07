@@ -355,6 +355,8 @@ async function main(dryRun: boolean, config: Config) {
   if (!response.ok) throw new Error(`导入失败：HTTP ${response.status} ${await response.text()}`);
   const result = await response.json() as CatalogImportResponse;
   console.log(`导入完成：${result.changed ? '内容有变化' : '内容无变化'}，站点 ${result.stations}，报价 ${result.offers}，文章 ${result.posts}`);
+  // 旧版服务端的响应里没有 skipped，这里按可选处理，脚本可以先于服务端升级。
+  for (const line of result.skipped ?? []) console.log(`[跳过] ${line.slug}：${line.reason}`);
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

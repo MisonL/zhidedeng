@@ -193,6 +193,9 @@ export interface CatalogImportResponse {
   posts: number;
   // 本次自动创建的占位模型 slug，已收录的模型不会重复列出。
   createdModels: string[];
+  // 被跳过的站点及原因，例如该站点已由其他通道接管。跳过的站点不会被本接口覆盖。
+  // 可选：旧版服务端不返回这个字段，调用方需按缺省空数组处理。
+  skipped?: { slug: string; reason: string }[];
 }
 
 // POST /api/admin/models。管理接口，同样不进 ApiContracts。
