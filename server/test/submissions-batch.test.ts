@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { AdminBatchSubmitRequest, AdminBatchSubmitResponse, AdminSubmissionStateResponse, SubmissionRecord } from '@zhidedeng/shared';
-import type { Store } from '../src/database.ts';
+import type { StationRecord, Store } from '../src/database.ts';
 import { createApp, openDatabase, openStore } from '../src/node-app.ts';
 import { enqueueSubmission, listSubmissions, reviewSubmission } from '../src/submissions.ts';
 import { buildBatch } from '../../scripts/sync-feishu.ts';
@@ -60,18 +60,22 @@ const approveStation = (host = 'batch.example.com', channel: 'feishu' | 'agent' 
   reviewSubmission(store, clock(), submission.id, { status: 'approved' });
   return store.all('station').find(station => station.url === `https://${host}/`)!;
 };
+const removalItem = (station: StationRecord, submissionId = listSubmissions(store, { kind: 'station', status: 'approved', pageSize: 50 }).items
+  .filter(item => item.originKey === new URL(station.url!).hostname).at(-1)!.id): Item => ({
+  kind: 'station', originKey: new URL(station.url!).hostname, action: 'remove', payload: { slug: station.slug, submissionId },
+});
 
 describe('批次入队与审核', () => {
   it('服务端生成统一 batchId，逐条返回结果并沿用 pending 幂等', async () => {
-    const result = await submit([stationItem(), stationItem(), postItem]);
+    const result = await submit([stationItem(), stationItem('other.example.com'), postItem]);
     expect(result.batchId).toBeTruthy();
     expect(result.results).toMatchObject([
       { originKey: 'batch.example.com', kind: 'station', status: 'pending', deduplicated: false, autoApproved: false },
-      { originKey: 'batch.example.com', kind: 'station', status: 'pending', deduplicated: true, autoApproved: false },
+      { originKey: 'other.example.com', kind: 'station', status: 'pending', deduplicated: false, autoApproved: false },
       { originKey: 'rec-review', kind: 'post', status: 'pending', deduplicated: false, autoApproved: false },
     ]);
-    expect(result.results[1].id).toBe(result.results[0].id);
-    expect(listSubmissions(store, {}).items).toHaveLength(2);
+    expect(result.results[1].id).not.toBe(result.results[0].id);
+    expect(listSubmissions(store, {}).items).toHaveLength(3);
     expect(listSubmissions(store, {}).items.every(item => item.batchId === result.batchId && item.action === 'upsert')).toBe(true);
     expect(store.all('station').find(station => station.name === 'batch.example.com')).toBeUndefined();
   });
@@ -130,7 +134,7 @@ describe('批次入队与审核', () => {
   });
 
   it('批内 payload 形状错误只拒绝该条，其他条目保持可审核', async () => {
-    const result = await submit([{ ...stationItem(), payload: {} }, stationItem('good.example.com')]);
+    const result = await submit([{ ...stationItem(), payload: { url: 'https://batch.example.com/' } }, stationItem('good.example.com')]);
     expect(result.results[0].error?.code).toBe('INVALID_INPUT');
     expect(result.results[1].status).toBe('pending');
     expect((await batchReview(result.batchId)).results[0].submission?.status).toBe('approved');
@@ -142,6 +146,102 @@ describe('批次入队与审核', () => {
     expect(result.results).toHaveLength(101);
     expect(result.results.every(item => item.submission?.status === 'approved')).toBe(true);
     expect(listSubmissions(store, { batchId: batch.batchId, status: 'pending' }).total).toBe(0);
+  });
+
+  // 600 条各自入队和审核，多文件并行时可能超过默认 5 秒。
+  it('同 batchId 的 500 与 100 条分块仍可一次审核完整 600 条', async () => {
+    const first = await submit(Array.from({ length: 500 }, (_, index) => stationItem(`chunk-${index}.example.com`)), 'chunked-batch');
+    const second = await submit(Array.from({ length: 100 }, (_, index) => stationItem(`chunk-${index + 500}.example.com`)), 'chunked-batch');
+    expect(second.batchId).toBe(first.batchId);
+    const result = await batchReview(first.batchId);
+    expect(result.results).toHaveLength(600);
+    expect(result.results.every(item => item.submission?.status === 'approved')).toBe(true);
+    expect(listSubmissions(store, { batchId: first.batchId, status: 'pending' }).total).toBe(0);
+  }, 15_000);
+
+  it('501 条批次整批返回 400，不入队任何条目', async () => {
+    const response = await send('/api/admin/submissions/batch', {
+      channel: 'feishu', items: Array.from({ length: 501 }, (_, index) => ({ ...postItem, originKey: `over-limit-${index}` })),
+    });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ error: { code: 'INVALID_INPUT' } });
+    expect(listSubmissions(store, {}).total).toBe(0);
+  });
+
+  it.each(['upsert/upsert', 'upsert/remove', 'remove/remove'])('同批 %s 规范化 hostname 冲突时整批 400，指出条目且不写入', async actions => {
+    const station = approveStation('conflict.example.com');
+    const upsert = { ...stationItem(), originKey: '客户端任意 key', payload: {
+      ...(stationItem().payload as object), url: 'https://WWW.CONFLICT.EXAMPLE.COM:443/',
+    } };
+    const removal = { ...removalItem(station), originKey: 'another-client-key' };
+    const conflicts = actions === 'upsert/upsert' ? [upsert, stationItem('conflict.example.com')]
+      : actions === 'upsert/remove' ? [upsert, removal] : [removal, { ...removal, originKey: 'yet-another-key' }];
+    const response = await send('/api/admin/submissions/batch', { channel: 'feishu', items: [postItem, ...conflicts] });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ error: {
+      code: 'INVALID_INPUT', message: expect.stringMatching(/第 2 条.*第 3 条.*conflict\.example\.com/),
+    } });
+    expect(listSubmissions(store, {}).total).toBe(1);
+    expect(store.get('station', station.slug)).toEqual(station);
+  });
+
+  it('不存在的下架目标也按 hostname 规范化检查同批冲突', async () => {
+    const response = await send('/api/admin/submissions/batch', { channel: 'feishu', items: [
+      { kind: 'station', originKey: 'BÜCHER.EXAMPLE:443', action: 'remove', payload: { slug: 'sub-missing-one', submissionId: 'missing-a' } },
+      { kind: 'station', originKey: 'xn--bcher-kva.example:8443', action: 'remove', payload: { slug: 'sub-missing-two', submissionId: 'missing-b' } },
+    ] });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ error: { code: 'INVALID_INPUT', message: expect.stringContaining('xn--bcher-kva.example') } });
+    expect(listSubmissions(store, {}).total).toBe(0);
+  });
+
+  it.each([
+    ['https://API.EXAMPLE.COM/', 'api.example.com'],
+    ['https://bücher.example/', 'xn--bcher-kva.example'],
+    ['https://port.example.com:8443/', 'port.example.com'],
+    ['https://WWW.EXAMPLE.COM/', 'www.example.com'],
+  ])('单条和批量 station 的 %s 覆盖客户端 originKey 为 %s', async (url, hostname) => {
+    const item = { ...stationItem(), originKey: 'IGNORED.EXAMPLE:1234', payload: { ...(stationItem().payload as object), url } };
+    const response = await send('/api/admin/submissions', { ...item, channel: 'feishu' });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ submission: { originKey: hostname } });
+    const batch = await submit([item]);
+    expect(batch.results[0].id).toBeTruthy();
+    expect(server.db.prepare('SELECT originKey FROM submissions ORDER BY rowid').all()).toEqual([{ originKey: hostname }, { originKey: hostname }]);
+  });
+
+  it.each([undefined, '不是网址', 'javascript:alert(1)'])('无效 station URL %s 在单条和批次入队前返回 400', async url => {
+    const item = { ...stationItem(), payload: { ...(stationItem().payload as object), url } };
+    expect((await send('/api/admin/submissions', { ...item, channel: 'feishu' })).status).toBe(400);
+    const response = await send('/api/admin/submissions/batch', { channel: 'feishu', items: [postItem, item] });
+    expect(response.status).toBe(400);
+    expect(listSubmissions(store, {}).total).toBe(0);
+  });
+
+  it.each(['pending', 'approved'])('已有 %s 批次不能被其他 channel 从单条或批量入口复用', async status => {
+    const first = await submit([stationItem()], 'owned-batch');
+    if (status === 'approved') await batchReview(first.batchId);
+    const item = stationItem('foreign.example.com');
+    for (const [path, body] of [
+      ['/api/admin/submissions', { ...item, channel: 'agent', batchId: first.batchId }],
+      ['/api/admin/submissions/batch', { channel: 'agent', batchId: first.batchId, items: [item, postItem] }],
+    ] as const) {
+      const response = await send(path, body);
+      expect(response.status).toBe(409);
+      expect(await response.json()).toMatchObject({ error: { code: 'BATCH_CHANNEL_MISMATCH' } });
+    }
+    expect(listSubmissions(store, { batchId: first.batchId }).total).toBe(1);
+    expect(store.get('station', 'sub-foreign-example-com')).toBeUndefined();
+  });
+
+  it('空批次不占有 channel，新 batchId 可入队，同渠道后续分块正常', async () => {
+    const empty = await submit([], 'initially-empty');
+    expect(empty.results).toEqual([]);
+    const first = await send('/api/admin/submissions/batch', { channel: 'agent', batchId: empty.batchId, items: [stationItem()] });
+    expect(first.status).toBe(200);
+    const second = await send('/api/admin/submissions/batch', { channel: 'agent', batchId: empty.batchId, items: [stationItem('next.example.com')] });
+    expect(second.status).toBe(200);
+    expect(listSubmissions(store, { batchId: empty.batchId }).total).toBe(2);
   });
 
   it('飞书批次沿用导入的 8 MiB 限制，可以超过普通接口的 512 KiB', async () => {
@@ -225,15 +325,61 @@ describe('批次入队与审核', () => {
       await batchReview(batch.batchId);
       expect(store.all('station').filter(station => station.name === '网址形态切换站')).toHaveLength(1);
       expect(store.get('station', slug)).toMatchObject({ url, source: 'submission' });
-      expect((await state()).stations).toEqual([{ slug, originKey: 'migration.example.com', url, name: '网址形态切换站' }]);
+      expect((await state()).stations).toEqual([{ slug, submissionId: batch.results[0].id, originKey: new URL(url).hostname, url, name: '网址形态切换站' }]);
     }
+  });
+
+  it.each(['feishu', 'agent'] as const)('批准 %s 裸域新版本后，同实体的 www 飞书待审版本被替代，其他渠道仍按精确 hostname', async channel => {
+    const first = await submit([stationItem('www.pending-alias.example.com')], 'pending-www');
+    const agent = enqueueSubmission(store, {
+      ...stationItem('www.pending-alias.example.com'), channel: 'agent', ip: '127.0.0.1', now: clock(),
+    });
+    const unbatched = enqueueSubmission(store, {
+      ...stationItem('www.pending-alias.example.com'), channel: 'feishu',
+      payload: { ...(stationItem('www.pending-alias.example.com').payload as object), name: '非批次待审版本' },
+      ip: '127.0.0.1', now: clock(),
+    });
+    const response = await send('/api/admin/submissions/batch', { channel, batchId: 'pending-bare', items: [stationItem('pending-alias.example.com')] });
+    expect(response.status).toBe(200);
+    const second = await response.json() as AdminBatchSubmitResponse;
+    await batchReview(second.batchId);
+    expect(listSubmissions(store, { batchId: first.batchId }).items[0].status).toBe('superseded');
+    expect((await send(`/api/admin/submissions/${first.results[0].id}/review`, { status: 'approved' })).status).toBe(409);
+    expect(listSubmissions(store, {}).items.filter(item => [agent.submission.id, unbatched.submission.id].includes(item.id))
+      .map(item => item.status)).toEqual(['pending', 'pending']);
+    expect(store.get('station', 'sub-pending-alias-example-com')?.url).toBe('https://pending-alias.example.com/');
+  });
+
+  it('飞书只去掉一个前导 www，不替代 www.www 与 www 的不同分组', async () => {
+    const first = await submit([stationItem('www.boundary.example.com')], 'single-www');
+    const second = await submit([stationItem('www.www.boundary.example.com')], 'double-www');
+    await batchReview(second.batchId);
+    expect(listSubmissions(store, { batchId: first.batchId }).items[0].status).toBe('pending');
+    await batchReview(first.batchId);
+    expect(store.all('station').filter(station => station.url?.includes('boundary.example.com')).map(station => station.url).sort())
+      .toEqual(['https://www.boundary.example.com/', 'https://www.www.boundary.example.com/']);
+  });
+
+  it('Agent 更新单独的 www 实体时，不替代会认领另一裸域实体的飞书批次', async () => {
+    const bare = approveStation('separate.example.com', 'agent');
+    const www = approveStation('www.separate.example.com', 'agent');
+    const pending = await submit([stationItem('separate.example.com')], 'separate-pending');
+    const { submission } = enqueueSubmission(store, {
+      ...stationItem('www.separate.example.com'), channel: 'agent',
+      payload: { ...(stationItem('www.separate.example.com').payload as object), name: '更新独立 www 实体' },
+      ip: '127.0.0.1', now: clock(),
+    });
+    reviewSubmission(store, clock(), submission.id, { status: 'approved' });
+    expect(listSubmissions(store, { batchId: pending.batchId }).items[0].status).toBe('pending');
+    expect(store.get('station', bare.slug)).toEqual(bare);
+    expect(store.get('station', www.slug)?.name).toBe('更新独立 www 实体');
   });
 });
 
 describe('下架请求', () => {
   it('人工通过下架后删除站点和全部 offers，入队本身不删除', async () => {
     const station = approveStation();
-    const batch = await submit([{ kind: 'station', originKey: 'batch.example.com', action: 'remove', payload: { slug: station.slug } }]);
+    const batch = await submit([removalItem(station)]);
     expect(listSubmissions(store, { batchId: batch.batchId }).items[0].action).toBe('remove');
     expect(store.get('station', station.slug)).toEqual(station);
     const result = await batchReview(batch.batchId);
@@ -245,7 +391,7 @@ describe('下架请求', () => {
 
   it('拒绝下架只更新审核状态，站点和报价保留', async () => {
     const station = approveStation();
-    const batch = await submit([{ kind: 'station', originKey: 'batch.example.com', action: 'remove', payload: { slug: station.slug } }]);
+    const batch = await submit([removalItem(station)]);
     await batchReview(batch.batchId, 'rejected');
     expect(store.get('station', station.slug)).toEqual(station);
     expect(server.db.prepare('SELECT rate FROM offers WHERE stationSlug = ?').get(station.slug)).toEqual({ rate: 0.5 });
@@ -254,7 +400,7 @@ describe('下架请求', () => {
   it.each(['agent', 'demo', 'user'] as const)('不能下架 source=%s 的站点，返回 409 并保留所有内容', async source => {
     const station = approveStation('protected.example.com', 'agent');
     store.transaction(() => store.put('station', station.slug, { ...station, source }));
-    const batch = await submit([{ kind: 'station', originKey: 'protected.example.com', action: 'remove', payload: { slug: station.slug } }]);
+    const batch = await submit([removalItem(station)]);
     const response = await send(`/api/admin/submissions/${batch.results[0].id}/review`, { status: 'approved' });
     expect(response.status).toBe(409);
     expect(store.get('station', station.slug)?.source).toBe(source);
@@ -262,17 +408,86 @@ describe('下架请求', () => {
     expect(listSubmissions(store, { batchId: batch.batchId }).items[0].status).toBe('pending');
   });
 
-  it('remove payload 缺少 slug 时单条入口返回 400，批次逐条报错', async () => {
-    const item: Item = { kind: 'station', originKey: 'batch.example.com', action: 'remove', payload: {} };
+  it('remove payload 缺少 slug 时单条和批次返回 400，不入队其他条目', async () => {
+    const item: Item = { kind: 'station', originKey: 'batch.example.com', action: 'remove', payload: { submissionId: 'expected-version' } };
     expect((await send('/api/admin/submissions', { ...item, channel: 'feishu' })).status).toBe(400);
-    const batch = await submit([item, stationItem('other.example.com')]);
-    expect(batch.results[0].error?.code).toBe('INVALID_INPUT');
-    expect(batch.results[1].status).toBe('pending');
+    const response = await send('/api/admin/submissions/batch', { channel: 'feishu', items: [stationItem('other.example.com'), item] });
+    expect(response.status).toBe(400);
+    expect(listSubmissions(store, {}).total).toBe(0);
+  });
+
+  it('remove payload 缺 submissionId 时单条和批次返回 400，站点保留', async () => {
+    const station = approveStation();
+    const item = { kind: 'station', originKey: 'batch.example.com', action: 'remove', payload: { slug: station.slug } };
+    expect((await send('/api/admin/submissions', { ...item, channel: 'feishu' })).status).toBe(400);
+    const response = await send('/api/admin/submissions/batch', { channel: 'feishu', items: [stationItem('other.example.com'), item] });
+    expect(response.status).toBe(400);
     expect(listSubmissions(store, {}).total).toBe(1);
+    expect(store.get('station', station.slug)).toEqual(station);
+  });
+
+  it.each(['feishu', 'agent'] as const)('state A 之后被 %s 更新为 B，旧 remove 审核返回 STALE_REMOVAL 并保留站点报价', async channel => {
+    const first = await submit([stationItem()], 'version-a');
+    await batchReview(first.batchId);
+    const snapshot = (await state()).stations[0];
+    expect(snapshot.submissionId).toBe(first.results[0].id);
+    const response = await send('/api/admin/submissions/batch', { channel, batchId: 'version-b', items: [{
+      ...stationItem(), payload: { ...(stationItem().payload as object), name: '重新收录的 B', offers: [{ modelSlug: 'gpt-4-1', rate: 0.8 }] },
+    }] });
+    expect(response.status).toBe(200);
+    const newer = await response.json() as AdminBatchSubmitResponse;
+    await batchReview(newer.batchId);
+    const batch = await submit([{ kind: 'station', originKey: '伪造的 removal key', action: 'remove', payload: {
+      slug: snapshot.slug, submissionId: snapshot.submissionId,
+    } }]);
+    const review = await send(`/api/admin/submissions/${batch.results[0].id}/review`, { status: 'approved' });
+    expect(review.status).toBe(409);
+    expect(await review.json()).toMatchObject({ error: { code: 'STALE_REMOVAL', message: expect.stringContaining('该站点在读取后已被更新，请重新同步') } });
+    expect(store.get('station', snapshot.slug)?.name).toBe('重新收录的 B');
+    expect(server.db.prepare('SELECT rate FROM offers WHERE stationSlug = ?').get(snapshot.slug)).toEqual({ rate: 0.8 });
+    expect(listSubmissions(store, { batchId: batch.batchId }).items[0].status).toBe('pending');
+  });
+
+  it('www 与裸域形态切换也会阻止旧版本下架，state 给出当前实际版本', async () => {
+    const first = await submit([stationItem('www.race.example.com')]);
+    await batchReview(first.batchId);
+    const snapshot = (await state()).stations[0];
+    const second = await submit([stationItem('race.example.com')]);
+    await batchReview(second.batchId);
+    const current = (await state()).stations[0];
+    expect(current).toMatchObject({ slug: snapshot.slug, originKey: 'race.example.com', submissionId: second.results[0].id });
+    const batch = await submit([{ kind: 'station', originKey: snapshot.originKey, action: 'remove', payload: {
+      slug: snapshot.slug, submissionId: first.results[0].id,
+    } }]);
+    const result = await batchReview(batch.batchId);
+    expect(result.results[0].error).toMatchObject({ status: 409, code: 'STALE_REMOVAL' });
+    expect(store.get('station', snapshot.slug)?.url).toBe('https://race.example.com/');
+  });
+
+  it('历史 pending 的非 hostname key 在通过时规范化，不能绕过当前下架版本', async () => {
+    const first = await submit([stationItem()], 'legacy-key-a');
+    await batchReview(first.batchId);
+    const snapshot = (await state()).stations[0];
+    const newer = await submit([{ ...stationItem(), payload: {
+      ...(stationItem().payload as object), name: '历史待审的 B', offers: [{ modelSlug: 'gpt-4-1', rate: 0.8 }],
+    } }], 'legacy-key-b');
+    // 模拟规范化上线前已落库、尚未审核的客户端记录 ID。
+    server.db.prepare('UPDATE submissions SET originKey = ? WHERE id = ?').run('legacy-record-id', newer.results[0].id!);
+    await batchReview(newer.batchId);
+    const removal = await submit([{ kind: 'station', originKey: snapshot.originKey, action: 'remove', payload: {
+      slug: snapshot.slug, submissionId: snapshot.submissionId,
+    } }]);
+    const response = await send(`/api/admin/submissions/${removal.results[0].id}/review`, { status: 'approved' });
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ error: { code: 'STALE_REMOVAL' } });
+    expect(listSubmissions(store, { batchId: newer.batchId }).items[0].originKey).toBe('batch.example.com');
+    expect((await state()).stations[0].submissionId).toBe(newer.results[0].id);
+    expect(store.get('station', snapshot.slug)?.name).toBe('历史待审的 B');
+    expect(server.db.prepare('SELECT rate FROM offers WHERE stationSlug = ?').get(snapshot.slug)).toEqual({ rate: 0.8 });
   });
 
   it('不存在的下架目标返回 404，不把请求伪装为已生效', async () => {
-    const batch = await submit([{ kind: 'station', originKey: 'missing.example.com', action: 'remove', payload: { slug: 'sub-missing' } }]);
+    const batch = await submit([{ kind: 'station', originKey: 'missing.example.com', action: 'remove', payload: { slug: 'sub-missing', submissionId: 'missing-version' } }]);
     const result = await batchReview(batch.batchId);
     expect(result.results[0].error).toMatchObject({ status: 404, code: 'NOT_FOUND' });
     expect(listSubmissions(store, { batchId: batch.batchId }).items[0].status).toBe('pending');
@@ -280,7 +495,7 @@ describe('下架请求', () => {
 
   it('下架后的审核写入失败时，站点、offers 和 pending 状态一起回滚', async () => {
     const station = approveStation();
-    const batch = await submit([{ kind: 'station', originKey: 'batch.example.com', action: 'remove', payload: { slug: station.slug } }]);
+    const batch = await submit([removalItem(station)]);
     const id = batch.results[0].id!;
     server.db.exec("CREATE TRIGGER fail_removal_review BEFORE UPDATE OF status ON submissions WHEN NEW.status = 'approved' BEGIN SELECT RAISE(ABORT, '审核写入失败'); END;");
     expect(() => reviewSubmission(store, clock(), id, { status: 'approved' })).toThrow('审核写入失败');
@@ -290,8 +505,9 @@ describe('下架请求', () => {
   });
 
   it('action 是幂等键的一部分，不能用 remove 复用相同 payload 的 upsert', async () => {
-    const upsert = enqueueSubmission(store, { kind: 'station', channel: 'feishu', originKey: 'same', payload: { slug: 'sub-same' }, ip: '127.0.0.1', now: clock() });
-    const removal = enqueueSubmission(store, { kind: 'station', channel: 'feishu', originKey: 'same', action: 'remove', payload: { slug: 'sub-same' }, ip: '127.0.0.1', now: clock() });
+    const payload = { ...(stationItem().payload as object), slug: 'sub-batch-example-com', submissionId: 'expected-version' };
+    const upsert = enqueueSubmission(store, { kind: 'station', channel: 'feishu', originKey: 'batch.example.com', payload, ip: '127.0.0.1', now: clock() });
+    const removal = enqueueSubmission(store, { kind: 'station', channel: 'feishu', originKey: 'batch.example.com', action: 'remove', payload, ip: '127.0.0.1', now: clock() });
     expect(removal.submission.id).not.toBe(upsert.submission.id);
     expect(removal.deduplicated).toBe(false);
   });
@@ -302,12 +518,12 @@ describe('下架请求', () => {
 });
 
 describe('当前队列站点状态', () => {
-  it('只返回已上线且 approved 的 station，包含原 originKey、实际 slug 和 payload 的 url/name', async () => {
+  it('只返回已上线且 approved 的 station，包含规范化 hostname、实际 slug 和当前 submissionId', async () => {
     const approved = approveStation();
     await submit([stationItem('pending.example.com'), postItem, modelItem]);
     const rejected = await submit([stationItem('rejected.example.com')]);
     await batchReview(rejected.batchId, 'rejected');
-    expect((await state()).stations).toEqual([{ slug: approved.slug, originKey: 'batch.example.com', url: 'https://batch.example.com/', name: 'batch.example.com' }]);
+    expect((await state()).stations).toEqual([{ slug: approved.slug, submissionId: expect.any(String), originKey: 'batch.example.com', url: 'https://batch.example.com/', name: 'batch.example.com' }]);
   });
 
   it('同站点多次 approved 只返回最新版本，采用服务器实际分配的碰撞 slug', async () => {
@@ -317,7 +533,27 @@ describe('当前队列站点状态', () => {
     await batchReview(updated.batchId);
     const stations = (await state()).stations;
     expect(stations).toHaveLength(2);
-    expect(stations.find(item => item.originKey === 'a-b.com')).toEqual({ slug: station.slug, originKey: 'a-b.com', url: 'https://a-b.com/', name: '最新站名' });
+    expect(stations.find(item => item.originKey === 'a-b.com')).toEqual({ slug: station.slug, submissionId: updated.results[0].id, originKey: 'a-b.com', url: 'https://a-b.com/', name: '最新站名' });
+  });
+
+  it('飞书站点被其他渠道更新后 state 返回当前 approved id，匹配该版本可人工下架', async () => {
+    const first = await submit([stationItem()]);
+    await batchReview(first.batchId);
+    const { submission } = enqueueSubmission(store, {
+      ...stationItem(), channel: 'agent', originKey: 'another-record-id',
+      payload: { ...(stationItem().payload as object), name: '其他渠道更新的当前站点' }, ip: '127.0.0.1', now: clock(),
+    });
+    reviewSubmission(store, clock(), submission.id, { status: 'approved' });
+    const current = (await state()).stations[0];
+    expect(current).toEqual({
+      slug: 'sub-batch-example-com', submissionId: submission.id, originKey: 'batch.example.com',
+      url: 'https://batch.example.com/', name: '其他渠道更新的当前站点',
+    });
+    const removal = await submit([{ kind: 'station', originKey: 'client-key', action: 'remove', payload: {
+      slug: current.slug, submissionId: current.submissionId,
+    } }]);
+    expect((await batchReview(removal.batchId)).results[0].submission?.status).toBe('approved');
+    expect(store.get('station', current.slug)).toBeUndefined();
   });
 
   it('旧全量导入没有 approved 投稿记录的站点不进入下架比较状态', async () => {
@@ -332,16 +568,19 @@ describe('当前队列站点状态', () => {
     expect((await state()).stations).toEqual([]);
   });
 
-  it.each(['agent', 'feishu'] as const)('%s 用记录 ID 更新旧群友站点后，该 ID 不进入飞书 hostname 下架状态', async channel => {
+  it.each(['agent', 'feishu'] as const)('%s 用记录 ID 提交也改存 URL hostname，仅飞书 approved 站点进入下架状态', async channel => {
     const host = 'record-key.example.com';
     const slug = 'sub-record-key-example-com';
     expect((await send('/api/admin/import', {
       stations: [{ slug, name: '渠道过渡站', description: '旧飞书站点', url: `https://${host}/`, rechargeThreshold: null, paymentMethods: [], offers: [] }], posts: [],
     })).status).toBe(200);
     const { submission } = enqueueSubmission(store, { ...stationItem(host), channel, originKey: 'old-record-1', ip: '127.0.0.1', now: clock() });
+    expect(submission.originKey).toBe(host);
     reviewSubmission(store, clock(), submission.id, { status: 'approved' });
     expect(store.get('station', slug)?.source).toBe('submission');
-    expect((await state()).stations).toEqual([]);
+    expect((await state()).stations).toEqual(channel === 'agent' ? [] : [{
+      slug, submissionId: submission.id, originKey: host, url: `https://${host}/`, name: host,
+    }]);
     const batch = await submit([stationItem(host)]);
     await batchReview(batch.batchId);
     expect((await state()).stations).toMatchObject([{ originKey: host, slug }]);
@@ -358,41 +597,58 @@ describe('当前队列站点状态', () => {
     await batchReview(batch.batchId);
     expect(store.get('station', 'sub-legacy-first')?.name).toBe(host);
     expect(store.get('station', 'sub-legacy-second')?.name).toBe('sub-legacy-second');
-    expect((await state()).stations).toEqual([{ slug: 'sub-legacy-first', originKey: host, url: `https://${host}/`, name: host }]);
+    expect((await state()).stations).toEqual([{ slug: 'sub-legacy-first', submissionId: batch.results[0].id, originKey: host, url: `https://${host}/`, name: host }]);
   });
 });
 
 describe('批次自动通过', () => {
-  it('开启后整批即上站，下架立即生效，仍强制 null 测量指标', async () => {
+  it('开启后 upsert 即上站，下架仍 pending，继续强制 null 测量指标', async () => {
     const old = approveStation('old.example.com');
     expect((await send('/api/admin/settings', { autoApprove: true })).status).toBe(200);
-    const batch = await submit([stationItem(), postItem, { kind: 'station', originKey: 'old.example.com', action: 'remove', payload: { slug: old.slug } }]);
-    expect(batch.results.every(item => item.autoApproved && item.status === 'approved')).toBe(true);
-    expect(store.get('station', old.slug)).toBeUndefined();
-    expect(server.db.prepare('SELECT * FROM offers WHERE stationSlug = ?').all(old.slug)).toEqual([]);
+    const batch = await submit([stationItem(), postItem, removalItem(old)]);
+    expect(batch.results.slice(0, 2).every(item => item.autoApproved && item.status === 'approved')).toBe(true);
+    expect(batch.results[2]).toMatchObject({ autoApproved: false, status: 'pending' });
+    expect(store.get('station', old.slug)).toEqual(old);
+    expect(server.db.prepare('SELECT rate FROM offers WHERE stationSlug = ?').get(old.slug)).toEqual({ rate: 0.5 });
     expect(store.get('station', 'sub-batch-example-com')).toMatchObject({ source: 'submission', uptime: null, firstTokenLatencyMs: null, foundedAt: null, status: null });
     expect(store.get('post', `sub-${batch.results[1].id}`)).toBeDefined();
-    expect(listSubmissions(store, { batchId: batch.batchId, status: 'pending' }).total).toBe(0);
+    expect(listSubmissions(store, { batchId: batch.batchId, status: 'pending' }).total).toBe(1);
   });
 
-  it('自动通过失败只回滚该条，不留下 approved 幽灵，其余条目仍生效', async () => {
+  it('自动通过不审受保护来源的下架，人工审核报错，其余 upsert 正常生效', async () => {
     const protectedStation = approveStation('agent.example.com', 'agent');
     await send('/api/admin/settings', { autoApprove: true });
-    const batch = await submit([{ kind: 'station', originKey: 'agent.example.com', action: 'remove', payload: { slug: protectedStation.slug } }, stationItem()]);
-    expect(batch.results[0].error).toBeDefined();
+    const batch = await submit([removalItem(protectedStation), stationItem()]);
+    expect(batch.results[0]).toMatchObject({ status: 'pending', autoApproved: false });
     expect(batch.results[1]).toMatchObject({ status: 'approved', autoApproved: true });
     expect(store.get('station', protectedStation.slug)?.source).toBe('agent');
-    expect(listSubmissions(store, { batchId: batch.batchId }).total).toBe(1);
+    expect(listSubmissions(store, { batchId: batch.batchId }).total).toBe(2);
+    expect((await batchReview(batch.batchId)).results[0].error).toMatchObject({ status: 409, code: 'STATION_SOURCE_CONFLICT' });
   });
 
   it('自动通过允许已下架的相同内容在新批次重新上架', async () => {
     await send('/api/admin/settings', { autoApprove: true });
     await submit([stationItem()]);
-    await submit([{ kind: 'station', originKey: 'batch.example.com', action: 'remove', payload: { slug: 'sub-batch-example-com' } }]);
+    const removal = await submit([removalItem(store.get('station', 'sub-batch-example-com')!)]);
+    await batchReview(removal.batchId);
     expect(store.get('station', 'sub-batch-example-com')).toBeUndefined();
     const restored = await submit([stationItem()]);
     expect(restored.results[0]).toMatchObject({ status: 'approved', autoApproved: true });
     expect(store.get('station', 'sub-batch-example-com')).toBeDefined();
+  });
+
+  it('切换自动通过后重试 pending remove 仍复用 id 并保持待人工审', async () => {
+    const old = approveStation();
+    const item = removalItem(old);
+    const first = await submit([item], 'pending-remove');
+    await send('/api/admin/settings', { autoApprove: true });
+    const repeated = await submit([item], first.batchId);
+    expect(repeated.results[0]).toMatchObject({ id: first.results[0].id, status: 'pending', deduplicated: true, autoApproved: false });
+    expect(store.get('station', old.slug)).toEqual(old);
+    const direct = await send('/api/admin/submissions', { ...item, channel: 'feishu', batchId: first.batchId });
+    expect(direct.status).toBe(200);
+    expect(await direct.json()).toMatchObject({ submission: { id: first.results[0].id, status: 'pending' }, autoApproved: false });
+    expect(store.get('station', old.slug)).toEqual(old);
   });
 
   it('开启自动通过后重试原 pending 批次，复用 id 并在同一事务物化', async () => {
@@ -415,6 +671,21 @@ describe('批次自动通过', () => {
     expect(restored.results[0].autoApproved).toBe(true);
     expect(store.get('station', 'sub-batch-example-com')?.name).toBe('batch.example.com');
     const repeated = await submit([stationItem()], 'same-batch');
+    expect(repeated.results[0]).toMatchObject({ id: restored.results[0].id, deduplicated: true, autoApproved: false });
+  });
+
+  it('同 batchId 自动通过 www 和裸域切换后，重提旧内容按实际站点当前版本重新物化', async () => {
+    await send('/api/admin/settings', { autoApprove: true });
+    const first = await submit([stationItem('www.auto-alias.example.com')], 'auto-alias');
+    const slug = (await state()).stations[0].slug;
+    const second = await submit([stationItem('auto-alias.example.com')], first.batchId);
+    expect((await state()).stations[0]).toMatchObject({ slug, submissionId: second.results[0].id });
+    const restored = await submit([stationItem('www.auto-alias.example.com')], first.batchId);
+    expect(restored.results[0]).toMatchObject({ deduplicated: false, autoApproved: true });
+    expect(restored.results[0].id).not.toBe(first.results[0].id);
+    expect(store.get('station', slug)).toMatchObject({ name: 'www.auto-alias.example.com', url: 'https://www.auto-alias.example.com/' });
+    expect((await state()).stations[0]).toMatchObject({ slug, submissionId: restored.results[0].id });
+    const repeated = await submit([stationItem('www.auto-alias.example.com')], first.batchId);
     expect(repeated.results[0]).toMatchObject({ id: restored.results[0].id, deduplicated: true, autoApproved: false });
   });
 });

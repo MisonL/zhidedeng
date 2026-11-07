@@ -117,6 +117,11 @@ describe('buildBatch', () => {
     expect(skipped).toMatch(/recC6.*网址/);
   });
 
+  it('返回实际聚合成功的站点数，坏记录和空输入不计入', () => {
+    expect(result().validStations).toBe(2);
+    expect(buildBatch([], MODELS)).toMatchObject({ validStations: 0, skipped: [] });
+  });
+
   it('坏倍率行和未知模型只跳过那一行并报告', () => {
     const notes = result().notes.join('\n');
     for (const line of ['未知模型X', 'o3', 'gemini-pro', 'glm', 'kimi', '没有等号的行']) expect(notes).toContain(line);
@@ -169,13 +174,13 @@ describe('buildBatch', () => {
 
 describe('planBatch', () => {
   const online: AdminSubmissionStateResponse = { stations: [
-    { slug: 'actual-collision-slug', originKey: 'WWW.API.EXAMPLE.COM', url: 'https://www.api.example.com/', name: '已有站点' },
-    { slug: 'sub-gone-original', originKey: 'gone.example.com', url: 'https://gone.example.com/', name: '已撤销站点' },
+    { slug: 'actual-collision-slug', submissionId: 'online-a', originKey: 'WWW.API.EXAMPLE.COM', url: 'https://www.api.example.com/', name: '已有站点' },
+    { slug: 'sub-gone-original', submissionId: 'online-gone', originKey: 'gone.example.com', url: 'https://gone.example.com/', name: '已撤销站点' },
   ] };
 
   it('线上有而表格没有时生成 remove，slug 完整沿用线上值', () => {
     const plan = planBatch(buildBatch(fixtureRecords(), MODELS).payload, online);
-    expect(plan.removals).toEqual([{ kind: 'station', originKey: 'gone.example.com', action: 'remove', payload: { slug: 'sub-gone-original' } }]);
+    expect(plan.removals).toEqual([{ kind: 'station', originKey: 'gone.example.com', action: 'remove', payload: { slug: 'sub-gone-original', submissionId: 'online-gone' } }]);
     expect(plan.payload.items.at(-1)).toEqual(plan.removals[0]);
   });
 
@@ -187,12 +192,21 @@ describe('planBatch', () => {
     expect(plan.removals.some(item => item.originKey === 'api.example.com')).toBe(false);
   });
 
-  it('空的已读取表格仍生成下架计划，无线上状态则明确无法区分新增和更新', () => {
+  it('规划只比较快照，空表保护由命令行执行；无状态无法区分新增和更新', () => {
     expect(planBatch(buildBatch([], MODELS).payload, online).removals).toHaveLength(2);
     const partial = planBatch(buildBatch(fixtureRecords(), MODELS).payload, null);
     expect(partial.removals).toEqual([]);
     expect(partial.added).toBeNull();
     expect(partial.updated).toBeNull();
+  });
+
+  it('显式允许跳过坏记录时完全不生成下架，保留 upsert 与评价', () => {
+    const batch = buildBatch(fixtureRecords(), MODELS).payload;
+    const plan = planBatch(batch, online, true);
+    expect(plan.removals).toEqual([]);
+    expect(plan.payload.items).toEqual(batch.items);
+    expect(plan.added).toBe(1);
+    expect(plan.updated).toBe(1);
   });
 });
 
@@ -204,6 +218,7 @@ describe('命令行', () => {
   let siteUrl: string;
   let imports: { authorization: string | undefined; body: AdminBatchSubmitRequest }[];
   let importStatus: number;
+  let importFailureAt: number | null;
   let requests: { method: string; path: string; authorization: string | undefined }[];
   let online: unknown;
   let stateStatus: number;
@@ -213,13 +228,22 @@ describe('命令行', () => {
     dir = mkdtempSync(join(tmpdir(), 'sync-feishu-'));
     imports = [];
     importStatus = 200;
+    importFailureAt = null;
     requests = [];
     stateStatus = 200;
     failedOrigin = null;
     online = { stations: [
-      { slug: 'actual-collision-slug', originKey: 'API.EXAMPLE.COM', url: 'https://api.example.com/', name: '已有站点' },
-      { slug: 'sub-gone-original', originKey: 'gone.example.com', url: 'https://gone.example.com/', name: '已撤销站点' },
+      { slug: 'actual-collision-slug', submissionId: 'online-a', originKey: 'API.EXAMPLE.COM', url: 'https://api.example.com/', name: '已有站点' },
+      { slug: 'sub-gone-original', submissionId: 'online-gone', originKey: 'gone.example.com', url: 'https://gone.example.com/', name: '已撤销站点' },
     ] };
+    // 正常同步使用可解析的数据；原 fixture 的坏记录仍用于 buildBatch 和中止回归。
+    for (const name of ['page-1', 'page-2']) {
+      const page = JSON.parse(readFileSync(join(FIXTURES, `${name}.json`), 'utf8'));
+      const keep = page.data.record_id_list.map((id: string) => !id.startsWith('recC'));
+      page.data.record_id_list = page.data.record_id_list.filter((_id: string, index: number) => keep[index]);
+      page.data.data = page.data.data.filter((_row: unknown, index: number) => keep[index]);
+      writeFileSync(join(dir, `${name}.json`), JSON.stringify(page));
+    }
     // 假 lark-cli：把调用记下来，按 offset 返回 fixture。绝不接触飞书。
     writeFileSync(join(dir, 'lark-cli'), `#!/usr/bin/env node
 const fs = require('node:fs');
@@ -227,8 +251,18 @@ const args = process.argv.slice(2);
 fs.appendFileSync(${JSON.stringify(join(dir, 'calls.jsonl'))}, JSON.stringify({ args, configDir: process.env.LARKSUITE_CLI_CONFIG_DIR, home: process.env.HOME }) + '\\n');
 if (process.env.FAKE_LARK_FAIL) { console.error('boom ' + args.join(' ')); process.exit(3); }
 const offset = args[args.indexOf('--offset') + 1];
+if (process.env.FAKE_LARK_RECORDS) {
+  const records = JSON.parse(fs.readFileSync(process.env.FAKE_LARK_RECORDS, 'utf8'));
+  const start = Number(offset);
+  const limit = Number(args[args.indexOf('--limit') + 1]);
+  process.stdout.write(JSON.stringify({ data: {
+    items: records.slice(start, start + limit).map(record => ({ record_id: record.recordId, fields: record.fields })),
+    has_more: start + limit < records.length,
+  } }));
+  process.exit(0);
+}
 const fixture = process.env.FAKE_LARK_FIXTURE || (offset === '0' ? 'page-1' : 'page-2');
-process.stdout.write(fs.readFileSync(${JSON.stringify(FIXTURES)} + '/' + fixture + '.json'));
+process.stdout.write(fs.readFileSync(${JSON.stringify(dir)} + '/' + fixture + '.json'));
 `);
     chmodSync(join(dir, 'lark-cli'), 0o755);
     site = createServer((req, res) => {
@@ -245,8 +279,12 @@ process.stdout.write(fs.readFileSync(${JSON.stringify(FIXTURES)} + '/' + fixture
         } else if (req.url === '/api/admin/submissions/batch' && req.method === 'POST') {
           const body = JSON.parse(raw) as AdminBatchSubmitRequest;
           imports.push({ authorization: req.headers.authorization, body });
-          res.statusCode = importStatus;
-          res.end(JSON.stringify({ batchId: 'fake-batch', results: body.items.map((item, index) => ({
+          res.statusCode = imports.length === importFailureAt ? 503 : importStatus;
+          if (res.statusCode !== 200) {
+            res.end(JSON.stringify({ error: { code: 'SERVICE_UNAVAILABLE', message: '批次请求失败' } }));
+            return;
+          }
+          res.end(JSON.stringify({ batchId: body.batchId ?? 'fake-batch', results: body.items.map((item, index) => ({
             kind: item.kind, originKey: item.originKey,
             ...(item.originKey === failedOrigin ? { error: { code: 'INVALID_INPUT', message: '未知模型：missing-model' } }
               : { id: `queued-${index}`, status: 'pending', deduplicated: false, autoApproved: false }),
@@ -279,6 +317,15 @@ process.stdout.write(fs.readFileSync(${JSON.stringify(FIXTURES)} + '/' + fixture
     return new Promise<{ code: number | null; output: string; stdout: string }>(done => child.on('close', code => done({ code, output: stdout + stderr, stdout })));
   }
 
+  const goodRecord = (recordId = 'good', hostname = 'api.example.com'): RawRecord => ({ recordId, fields: {
+    中转站名称: hostname, 网址: `https://${hostname}/`, 提交类型: '推荐新站', 审核状态: '通过', 提交时间: '2026-11-07',
+  } });
+  const runRecords = (records: RawRecord[], args: string[] = []) => {
+    const path = join(dir, 'records.json');
+    writeFileSync(path, JSON.stringify(records));
+    return run(args, { FAKE_LARK_RECORDS: path });
+  };
+
   const larkCalls = () => {
     try {
       return readFileSync(join(dir, 'calls.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line) as { args: string[]; configDir: string; home: string });
@@ -304,19 +351,22 @@ process.stdout.write(fs.readFileSync(${JSON.stringify(FIXTURES)} + '/' + fixture
     expect(imports[0].authorization).toBe(`Bearer ${SYNC_TOKEN}`);
     expect(imports[0].body.channel).toBe('feishu');
     expect(imports[0].body.items.filter(item => item.kind === 'station' && item.action === 'upsert').map(item => item.originKey)).toEqual(['api.example.com', 'other.example']);
-    expect(imports[0].body.items.at(-1)).toEqual({ kind: 'station', originKey: 'gone.example.com', action: 'remove', payload: { slug: 'sub-gone-original' } });
+    expect(imports[0].body.items.at(-1)).toEqual({ kind: 'station', originKey: 'gone.example.com', action: 'remove', payload: { slug: 'sub-gone-original', submissionId: 'online-gone' } });
     expect(requests.map(request => request.path)).toEqual(['/api/models?page=1&pageSize=50', '/api/admin/submissions/state', '/api/admin/submissions/batch']);
     expect(requests[1].authorization).toBe(`Bearer ${SYNC_TOKEN}`);
     expect(JSON.stringify(imports[0].body)).not.toContain('秘密');
   });
 
-  it('--dry-run 打印内容和跳过原因，不发布，也不需要 SYNC_TOKEN', async () => {
-    const { code, stdout } = await run(['--dry-run'], { SYNC_TOKEN: undefined });
-    expect(code).toBe(0);
+  it('--dry-run 无 token 遇到坏记录也中止并打印原因，不发 POST', async () => {
+    const path = join(dir, 'bad-records.json');
+    writeFileSync(path, JSON.stringify(fixtureRecords()));
+    const { code, output } = await run(['--dry-run'], { SYNC_TOKEN: undefined, FAKE_LARK_RECORDS: path });
+    expect(code).toBe(2);
     expect(imports).toEqual([]);
-    expect(stdout).toContain('示例站pro');
-    expect(stdout).toMatch(/recC1.*网址/);
-    expect(stdout).not.toContain('秘密');
+    expect(requests.every(request => request.method === 'GET')).toBe(true);
+    expect(output).toContain('有 6 条记录无法解析，为避免误下架已中止');
+    expect(output).toMatch(/recC1.*网址/);
+    expect(output).not.toContain('秘密');
   });
 
   it('--dry-run 配置 token 时只发 GET，打印完整入队内容和下架计划', async () => {
@@ -329,7 +379,89 @@ process.stdout.write(fs.readFileSync(${JSON.stringify(FIXTURES)} + '/' + fixture
     expect(stdout).toContain('[下架] gone.example.com：sub-gone-original');
     const payload = JSON.parse(stdout.slice(stdout.indexOf('{\n'))) as AdminBatchSubmitRequest;
     expect(payload.items).toHaveLength(5);
-    expect(payload.items.at(-1)).toEqual({ kind: 'station', originKey: 'gone.example.com', action: 'remove', payload: { slug: 'sub-gone-original' } });
+    expect(payload.items.at(-1)).toEqual({ kind: 'station', originKey: 'gone.example.com', action: 'remove', payload: { slug: 'sub-gone-original', submissionId: 'online-gone' } });
+  });
+
+  it('一条已通过的坏记录使脚本退出 2，任何条目都不 POST', async () => {
+    const good = goodRecord();
+    const bad = { ...goodRecord('bad', 'gone.example.com'), fields: { ...good.fields, 网址: 'https://gone.example.com/', 提交时间: '不是日期' } };
+    const { code, output } = await runRecords([good, bad]);
+    expect(code).toBe(2);
+    expect(imports).toEqual([]);
+    expect(requests.filter(request => request.method === 'POST')).toEqual([]);
+    expect(output).toContain('有 1 条记录无法解析，为避免误下架已中止');
+    expect(output).toContain('--allow-skipped');
+  });
+
+  it('--allow-skipped 允许有效 upsert 入队，但完全不同步下架', async () => {
+    const good = goodRecord();
+    const bad = { ...goodRecord('bad', 'gone.example.com'), fields: { ...good.fields, 网址: '不是网址' } };
+    const { code, output } = await runRecords([good, bad], ['--allow-skipped']);
+    expect(code).toBe(0);
+    expect(output).toContain('本次不同步下架');
+    expect(imports).toHaveLength(1);
+    expect(imports[0].body.items).toMatchObject([{ kind: 'station', action: 'upsert', originKey: 'api.example.com' }]);
+    expect(imports[0].body.items.some(item => item.action === 'remove')).toBe(false);
+  });
+
+  it('--allow-skipped 即使没有坏记录也不生成下架', async () => {
+    const { code, output } = await runRecords([goodRecord()], ['--allow-skipped']);
+    expect(code).toBe(0);
+    expect(output).toContain('本次不同步下架');
+    expect(imports[0].body.items).toHaveLength(1);
+    expect(imports[0].body.items[0].action).toBe('upsert');
+  });
+
+  it.each([[[]], [['--dry-run']], [['--allow-skipped']]])('空记录且线上有站点时 %j 退出 2，零 POST', async args => {
+    const { code, output } = await runRecords([], args);
+    expect(code).toBe(2);
+    expect(output).toContain('成功解析的站点数为 0');
+    expect(output).toContain('为避免误下架已中止');
+    expect(imports).toEqual([]);
+    expect(requests.filter(request => request.method === 'POST')).toEqual([]);
+  });
+
+  it('--dry-run --allow-skipped 只预览有效条目并警告不同步下架', async () => {
+    const good = goodRecord();
+    const bad = { ...goodRecord('bad'), fields: { ...good.fields, 提交时间: '坏日期' } };
+    const { code, stdout, output } = await runRecords([good, bad], ['--dry-run', '--allow-skipped']);
+    expect(code).toBe(0);
+    expect(output).toContain('本次不同步下架');
+    const payload = JSON.parse(stdout.slice(stdout.indexOf('{\n'))) as AdminBatchSubmitRequest;
+    expect(payload.items).toHaveLength(1);
+    expect(payload.items[0].action).toBe('upsert');
+    expect(imports).toEqual([]);
+  });
+
+  it('600 条站点记录分为 500 和 100 两次 POST，共用一个 batchId', async () => {
+    online = { stations: [] };
+    const { code, output } = await runRecords(Array.from({ length: 600 }, (_, index) => goodRecord(`record-${index}`, `station-${index}.example.com`)));
+    expect(code).toBe(0);
+    expect(imports.map(request => request.body.items.length)).toEqual([500, 100]);
+    expect(imports[0].body.batchId).toBeTruthy();
+    expect(imports[1].body.batchId).toBe(imports[0].body.batchId);
+    expect(new Set(imports.flatMap(request => request.body.items.map(item => item.originKey))).size).toBe(600);
+    expect(output).toContain('新增 600，更新 0，下架 0，评价 0，失败 0');
+  });
+
+  it('后续分块 HTTP 失败时也保留前块逐条错误日志和 batchId，退出 1', async () => {
+    online = { stations: [] };
+    failedOrigin = 'station-0.example.com';
+    importFailureAt = 2;
+    const { code, output } = await runRecords(Array.from({ length: 600 }, (_, index) => goodRecord(`record-${index}`, `station-${index}.example.com`)));
+    expect(code).toBe(1);
+    expect(imports.map(request => request.body.items.length)).toEqual([500, 100]);
+    expect(output).toContain('[失败] station station-0.example.com：INVALID_INPUT 未知模型：missing-model');
+    expect(output).toContain('第 2 块入队失败：HTTP 503');
+    expect(output).toContain(imports[0].body.batchId);
+  });
+
+  it('线上 state 缺 submissionId 时中止，不能发出无版本下架', async () => {
+    online = { stations: [{ slug: 'sub-gone-original', originKey: 'gone.example.com', url: 'https://gone.example.com/', name: '站点' }] };
+    const { code, output } = await run([]);
+    expect(code).not.toBe(0);
+    expect(output).toContain('线上投稿状态结构无法识别');
+    expect(imports).toEqual([]);
   });
 
   it('--dry-run 缺 token 明确跳过下架检测，模型仍公开读取且不发管理请求', async () => {
@@ -403,14 +535,14 @@ process.stdout.write(fs.readFileSync(${JSON.stringify(FIXTURES)} + '/' + fixture
   });
 
   it('表头缺少审核状态时不发布，防止改名后清空全站', async () => {
-    writeFileSync(join(FIXTURES, '.tmp-renamed.json'), JSON.stringify({ data: { fields: ['中转站名称', '网址', '提交类型', '状态', '提交时间'], record_id_list: ['r1'], data: [['站', 'https://a.com', '推荐新站', '通过', '2026-01-01']], has_more: false } }));
+    writeFileSync(join(dir, '.tmp-renamed.json'), JSON.stringify({ data: { fields: ['中转站名称', '网址', '提交类型', '状态', '提交时间'], record_id_list: ['r1'], data: [['站', 'https://a.com', '推荐新站', '通过', '2026-01-01']], has_more: false } }));
     try {
       const { code, output } = await run([], { FAKE_LARK_FIXTURE: '.tmp-renamed' });
       expect(code).not.toBe(0);
       expect(output).toContain('审核状态');
       expect(imports).toEqual([]);
     } finally {
-      rmSync(join(FIXTURES, '.tmp-renamed.json'));
+      rmSync(join(dir, '.tmp-renamed.json'));
     }
   });
 

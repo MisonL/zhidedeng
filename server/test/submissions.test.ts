@@ -60,11 +60,11 @@ describe('投稿入队与列表', () => {
     expect(listSubmissions(store, {}).total).toBe(1);
   });
 
-  it('同 originKey 不同 payload 分别入队，相同 payload 的不同 kind 或 originKey 也互不去重', () => {
+  it('同 hostname 的不同内容分别入队，不同 kind 或 URL hostname 互不去重', () => {
     const first = queue().submission;
     const second = queue({ payload: { ...stationPayload, name: '另一个版本' } }).submission;
     const differentKind = queue({ kind: 'post' }).submission;
-    const differentOrigin = queue({ originKey: 'other.example.com' }).submission;
+    const differentOrigin = queue({ originKey: 'other.example.com', payload: { ...stationPayload, url: 'https://other.example.com/' } }).submission;
     expect(new Set([first.id, second.id, differentKind.id, differentOrigin.id]).size).toBe(4);
     expect(listSubmissions(store, { status: 'pending' }).total).toBe(4);
   });
@@ -79,9 +79,9 @@ describe('投稿入队与列表', () => {
   });
 
   it('按创建时间升序，支持 kind、status 过滤和分页', () => {
-    const latest = queue({ originKey: 'latest.example.com', now: new Date('2026-11-07T03:00:00Z') }).submission;
-    const oldest = queue({ originKey: 'oldest.example.com', now: new Date('2026-11-07T01:00:00Z') }).submission;
-    const middle = queue({ originKey: 'middle.example.com', now: new Date('2026-11-07T02:00:00Z') }).submission;
+    const latest = queue({ originKey: 'latest.example.com', payload: { ...stationPayload, url: 'https://latest.example.com/' }, now: new Date('2026-11-07T03:00:00Z') }).submission;
+    const oldest = queue({ originKey: 'oldest.example.com', payload: { ...stationPayload, url: 'https://oldest.example.com/' }, now: new Date('2026-11-07T01:00:00Z') }).submission;
+    const middle = queue({ originKey: 'middle.example.com', payload: { ...stationPayload, url: 'https://middle.example.com/' }, now: new Date('2026-11-07T02:00:00Z') }).submission;
     const model = queue({ kind: 'model', originKey: modelPayload.slug, payload: modelPayload }).submission;
     reviewSubmission(store, clock(), model.id, { status: 'rejected' });
     expect(listSubmissions(store, { kind: 'station', status: 'pending', page: 2, pageSize: 1 }))
@@ -149,10 +149,6 @@ describe('审核物化', () => {
     ['倍率高于范围', { ...stationPayload, offers: [{ modelSlug: 'o3', rate: 20.01 }] }],
     ['未知模型', { ...stationPayload, offers: [{ modelSlug: 'missing-model', rate: 0.5 }] }],
     ['重复报价', { ...stationPayload, offers: [stationPayload.offers[0], stationPayload.offers[0]] }],
-    ['非 HTTP URL', { ...stationPayload, url: 'javascript:alert(1)' }],
-    ['URL 带 query', { ...stationPayload, url: 'https://api.example.com/?aff=1' }],
-    ['URL 带 fragment', { ...stationPayload, url: 'https://api.example.com/#aff' }],
-    ['URL 带凭证', { ...stationPayload, url: 'https://user:pass@api.example.com/' }],
   ])('拒绝%s，投稿仍 pending，旧站点和报价不变', (_name, payload) => {
     store.put('station', 'sub-api-example-com', existingStation('submission'));
     server.db.prepare('INSERT INTO offers (stationSlug, modelSlug, rate) VALUES (?, ?, ?)').run('sub-api-example-com', 'o3', 0.7);
@@ -161,6 +157,22 @@ describe('审核物化', () => {
     const submission = queue({ payload }).submission;
     expect(() => approve(submission.id)).toThrow(expect.objectContaining({ status: 400, code: 'INVALID_INPUT' }));
     expect(record(submission.id)).toEqual(submission);
+    expect(entities()).toEqual(before);
+    expect(offers()).toEqual(previousOffers);
+  });
+
+  it.each([
+    ['非 HTTP URL', 'javascript:alert(1)'],
+    ['URL 带 query', 'https://api.example.com/?aff=1'],
+    ['URL 带 fragment', 'https://api.example.com/#aff'],
+    ['URL 带凭证', 'https://user:pass@api.example.com/'],
+  ])('入队前拒绝%s，不能规范化的内容不留下记录或改写旧站点', (_name, url) => {
+    store.put('station', 'sub-api-example-com', existingStation('submission'));
+    server.db.prepare('INSERT INTO offers (stationSlug, modelSlug, rate) VALUES (?, ?, ?)').run('sub-api-example-com', 'o3', 0.7);
+    const before = entities();
+    const previousOffers = offers();
+    expect(() => queue({ payload: { ...stationPayload, url } })).toThrow(expect.objectContaining({ status: 400, code: 'INVALID_INPUT' }));
+    expect(listSubmissions(store, {}).total).toBe(0);
     expect(entities()).toEqual(before);
     expect(offers()).toEqual(previousOffers);
   });
@@ -239,7 +251,7 @@ describe('审核物化', () => {
     const first = queue().submission;
     const second = queue({ channel: 'feishu', payload: { ...stationPayload, name: '第二版' } }).submission;
     const otherKind = queue({ kind: 'post' }).submission;
-    const otherOrigin = queue({ originKey: 'other.example.com' }).submission;
+    const otherOrigin = queue({ originKey: 'other.example.com', payload: { ...stationPayload, url: 'https://other.example.com/' } }).submission;
     approve(first.id);
     expect(record(second.id).status).toBe('superseded');
     expect(record(otherKind.id).status).toBe('pending');

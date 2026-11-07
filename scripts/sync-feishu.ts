@@ -7,10 +7,11 @@
 //   SITE_URL                  站点地址。管理接口不对公网开放，在服务器本机运行，用 http://127.0.0.1:PORT
 //   SYNC_TOKEN                管理接口密钥，至少 32 位。dry-run 缺省时跳过下架检测
 //
-//   node scripts/sync-feishu.ts [--dry-run]
+//   node scripts/sync-feishu.ts [--dry-run] [--allow-skipped]
 //
 // 任何读取失败都中止且不入队：把读取失败当成空表会生成错误的下架请求。
 import { execFile } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -28,6 +29,7 @@ interface SiteModel {
 }
 
 const PAGE_SIZE = 200;
+const BATCH_SIZE = 500;
 const APPROVED = '通过';
 const REQUIRED_COLUMNS = ['中转站名称', '网址', '提交类型', '审核状态', '提交时间'];
 const REVIEW_TYPES = new Set(['使用评价', '避坑反馈']);
@@ -186,7 +188,7 @@ type PostItem = {
   kind: 'post'; originKey: string;
   payload: Omit<CatalogImportPost, 'recordId' | 'stationSlug'> & { hostname: string };
 };
-type RemovalItem = { kind: 'station'; originKey: string; action: 'remove'; payload: { slug: string } };
+type RemovalItem = { kind: 'station'; originKey: string; action: 'remove'; payload: { slug: string; submissionId: string } };
 
 function parseSubmission(record: RawRecord, models: Map<string, string>, notes: string[]): Submission | string {
   const { recordId, fields } = record;
@@ -289,16 +291,16 @@ export function buildBatch(records: RawRecord[], models: SiteModel[]) {
   skipped.sort();
   notes.sort();
   const payload = { channel: 'feishu' as const, items: [...stations, ...posts] };
-  return { payload, skipped, notes };
+  return { payload, skipped, notes, validStations: stations.length };
 }
 
 /** 按飞书分组的 hostname 比较，slug 只取服务端返回的值，不在脚本里派生。 */
-export function planBatch(batch: AdminBatchSubmitRequest, state: AdminSubmissionStateResponse | null) {
+export function planBatch(batch: AdminBatchSubmitRequest, state: AdminSubmissionStateResponse | null, allowSkipped = false) {
   const upserts = batch.items.filter(item => item.kind === 'station' && (item.action ?? 'upsert') === 'upsert');
   const incoming = new Set(upserts.map(item => feishuHostnameKey(item.originKey)));
   const current = new Set(state?.stations.map(station => feishuHostnameKey(station.originKey)));
-  const removals: RemovalItem[] = state?.stations.filter(station => !incoming.has(feishuHostnameKey(station.originKey))).map(station => ({
-    kind: 'station', originKey: feishuHostnameKey(station.originKey), action: 'remove', payload: { slug: station.slug },
+  const removals: RemovalItem[] = allowSkipped ? [] : state?.stations.filter(station => !incoming.has(feishuHostnameKey(station.originKey))).map(station => ({
+    kind: 'station', originKey: feishuHostnameKey(station.originKey), action: 'remove', payload: { slug: station.slug, submissionId: station.submissionId },
   })) ?? [];
   return {
     payload: { ...batch, items: [...batch.items, ...removals] }, removals,
@@ -308,6 +310,7 @@ export function planBatch(batch: AdminBatchSubmitRequest, state: AdminSubmission
 }
 
 class UsageError extends Error {}
+class UnsafeBatchError extends Error {}
 
 function requireEnv(name: string) {
   const value = process.env[name];
@@ -375,6 +378,7 @@ async function readSubmissionState(config: Config): Promise<AdminSubmissionState
   if (!isObject(body) || !Array.isArray(body.stations) || !body.stations.every((station: unknown) => isObject(station)
     && typeof station.slug === 'string' && station.slug.length > 0 && station.slug.length <= 200
     && typeof station.originKey === 'string' && station.originKey.length > 0 && station.originKey.length <= 253
+    && typeof station.submissionId === 'string' && station.submissionId.trim().length > 0 && station.submissionId.length <= 200
     && typeof station.name === 'string' && (station.url === null || typeof station.url === 'string'))) {
     throw new Error('线上投稿状态结构无法识别，中止同步');
   }
@@ -392,19 +396,26 @@ function batchResult(body: unknown, items: AdminBatchSubmitRequest['items']): Ad
   return body as unknown as AdminBatchSubmitResponse;
 }
 
-async function main(dryRun: boolean, config: Config) {
+async function main(dryRun: boolean, allowSkipped: boolean, config: Config) {
   const records = await readAllRecords(config);
   const models = await readModels(config.site);
-  const { payload: batch, skipped, notes } = buildBatch(records, models);
-  const stationCount = batch.items.filter(item => item.kind === 'station').length;
+  const { payload: batch, skipped, notes, validStations } = buildBatch(records, models);
+  const stationCount = validStations;
   const postCount = batch.items.filter(item => item.kind === 'post').length;
-  console.log(`读取 ${records.length} 条记录，将入队 ${stationCount} 个站点、${postCount} 篇评价，跳过 ${skipped.length} 条坏记录`);
+  console.log(`读取 ${records.length} 条记录，成功解析 ${stationCount} 个站点、${postCount} 篇评价，无法解析 ${skipped.length} 条记录`);
   for (const line of skipped) console.log(`[跳过] ${line}`);
   for (const line of notes) console.log(`[提示] ${line}`);
+  if (skipped.length > 0 && !allowSkipped) {
+    throw new UnsafeBatchError(`有 ${skipped.length} 条记录无法解析，为避免误下架已中止。修正数据后重试，或用 --allow-skipped 跳过这些记录但不同步下架`);
+  }
+  if (allowSkipped) console.error('[警告] 本次不同步下架：已启用 --allow-skipped，仅提交有效的新增、更新和评价');
   let state: AdminSubmissionStateResponse | null = null;
   if (config.syncToken) state = await readSubmissionState(config);
   else console.log('跳过下架检测：未配置 SYNC_TOKEN');
-  const { payload, removals, added, updated } = planBatch(batch, state);
+  if (validStations === 0 && state !== null && state.stations.length > 0) {
+    throw new UnsafeBatchError(`成功解析的站点数为 0，线上仍有 ${state.stations.length} 个站点，为避免误下架已中止。请确认表格内容和读取结果后重试`);
+  }
+  const { payload, removals, added, updated } = planBatch(batch, state, allowSkipped);
   console.log(state === null
     ? `同步计划：上架/更新 ${stationCount}，评价 ${postCount}，下架未检测`
     : `同步计划：新增 ${added}，更新 ${updated}，下架 ${removals.length}，评价 ${postCount}`);
@@ -413,14 +424,24 @@ async function main(dryRun: boolean, config: Config) {
     console.log(JSON.stringify(payload, null, 2));
     return;
   }
-  const response = await fetch(new URL('/api/admin/submissions/batch', config.site), {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', authorization: `Bearer ${config.syncToken}` },
-    body: JSON.stringify(payload),
-    signal: AbortSignal.timeout(30_000),
-  });
-  if (!response.ok) throw new Error(`批次入队失败：HTTP ${response.status} ${await response.text()}`);
-  const result = batchResult(await response.json(), payload.items);
+  const batchId = randomUUID();
+  const result: AdminBatchSubmitResponse = { batchId, results: [] };
+  // 串行分块，共用同一 batchId；空批次保留一次请求，返回明确的入队结果。
+  for (let offset = 0; offset < Math.max(payload.items.length, 1); offset += BATCH_SIZE) {
+    const items = payload.items.slice(offset, offset + BATCH_SIZE);
+    const response = await fetch(new URL('/api/admin/submissions/batch', config.site), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${config.syncToken}` },
+      body: JSON.stringify({ ...payload, batchId, items }),
+      signal: AbortSignal.timeout(30_000),
+    });
+    if (!response.ok) throw new Error(`批次 ${batchId} 第 ${offset / BATCH_SIZE + 1} 块入队失败：HTTP ${response.status} ${await response.text()}`);
+    const chunk = batchResult(await response.json(), items);
+    if (chunk.batchId !== batchId) throw new Error(`批次 ${batchId} 入队响应的 batchId 不一致，请核对服务端批次结果`);
+    // 立即报告本块错误，后续 HTTP 失败不能遮住已经返回的逐条失败详情。
+    for (const item of chunk.results.filter(item => item.error)) console.log(`[失败] ${item.kind} ${item.originKey}：${item.error!.code} ${item.error!.message}`);
+    result.results.push(...chunk.results);
+  }
   const failed = result.results.filter(item => item.error);
   const accepted = new Set(result.results.filter(item => !item.error).map(item => `${item.kind}:${item.originKey}`));
   const current = new Set(state?.stations.map(station => feishuHostnameKey(station.originKey)));
@@ -430,19 +451,19 @@ async function main(dryRun: boolean, config: Config) {
   const removeCount = removals.filter(item => accepted.has(`station:${item.originKey}`)).length;
   const reviewCount = batch.items.filter(item => item.kind === 'post' && accepted.has(`post:${item.originKey}`)).length;
   console.log(`批次 ${result.batchId} 入队完成：新增 ${newCount}，更新 ${updateCount}，下架 ${removeCount}，评价 ${reviewCount}，失败 ${failed.length}`);
-  for (const item of failed) console.log(`[失败] ${item.kind} ${item.originKey}：${item.error!.code} ${item.error!.message}`);
   if (failed.length > 0) throw new Error(`批次 ${result.batchId} 有 ${failed.length} 条入队失败`);
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const dryRun = process.argv.includes('--dry-run');
+  const allowSkipped = process.argv.includes('--allow-skipped');
   const secrets = () => ['FEISHU_BASE_TOKEN', 'SYNC_TOKEN'].map(name => process.env[name]).filter((value): value is string => Boolean(value));
   try {
-    await main(dryRun, readConfig(dryRun));
+    await main(dryRun, allowSkipped, readConfig(dryRun));
   } catch (error) {
     // lark-cli 的错误输出可能回显命令行参数，打印前抹掉 token。
     const message = secrets().reduce((text, secret) => text.replaceAll(secret, '***'), error instanceof Error ? error.message : String(error));
     console.error(`同步失败：${message}`);
-    process.exitCode = 1;
+    process.exitCode = error instanceof UnsafeBatchError ? 2 : 1;
   }
 }
