@@ -151,4 +151,36 @@ describe('投稿全链路（HTTP 层）', () => {
     });
     expect([401, 403]).toContain(mine.status);
   });
+
+  it('管理员可以通过接口入队，重复提交去重', async () => {
+    const body = JSON.stringify({
+      kind: 'station', channel: 'feishu', originKey: 'route.example.com', payload, actorHandle: 'ops',
+    });
+    const first = await server.app.request('/api/admin/submissions', { method: 'POST', headers: admin, body });
+    expect(first.status).toBe(200);
+    const created = await first.json() as { submission: { id: string; channel: string; actorHandle: string }; deduplicated: boolean };
+    expect(created.deduplicated).toBe(false);
+    expect(created.submission).toMatchObject({ channel: 'feishu', actorHandle: 'ops' });
+
+    const again = await (await server.app.request('/api/admin/submissions', { method: 'POST', headers: admin, body })).json() as { deduplicated: boolean; submission: { id: string } };
+    expect(again.deduplicated).toBe(true);
+    expect(again.submission.id).toBe(created.submission.id);
+
+    // 入队不直接物化，要等审核
+    expect((await server.app.request('/api/stations/sub-route-example-com')).status).toBe(404);
+    await review(created.submission.id, { status: 'approved' });
+    expect((await server.app.request('/api/stations/sub-route-example-com')).status).toBe(200);
+  });
+
+  it('入队接口校验参数并需要鉴权', async () => {
+    expect((await server.app.request('/api/admin/submissions', {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
+    })).status).toBe(401);
+
+    const bad = await server.app.request('/api/admin/submissions', {
+      method: 'POST', headers: admin,
+      body: JSON.stringify({ kind: 'unknown-kind', channel: 'agent', originKey: 'x', payload: {} }),
+    });
+    expect(bad.status).toBe(400);
+  });
 });

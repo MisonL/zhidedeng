@@ -117,6 +117,28 @@ export function listSubmissions(store: Store, input: {
   return { items: rows.map(submissionRecord), total, page, pageSize };
 }
 
+/** 从站点 url 取归一化 hostname，用于判断某个 slug 是不是同一个站点。 */
+function hostnameOf(url: string | null): string | null {
+  if (!url) return null;
+  try { return new URL(url).hostname.toLowerCase(); } catch { return null; }
+}
+
+/**
+ * 站点 slug：`sub-` 加 hostname 清洗后的可读形式。
+ * hostname 超过长度上限、或清洗后与另一个站点撞车时，改用哈希后缀保证唯一——
+ * 否则两个不同站点会写到同一条记录上，后审的覆盖先审的。
+ */
+function stationSlug(store: Store, originKey: string): string {
+  const hostname = originKey.toLowerCase();
+  const base = `sub-${hostname}`.replace(/[^a-z0-9]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
+  const digest = createHash('sha256').update(hostname).digest('hex').slice(0, 10);
+  const hashed = () => `${base.slice(0, 89)}-${digest}`;
+  if (base.length > 100) return hashed();
+  const existing = store.get('station', base);
+  // 已有的同名 slug 若指向别的 hostname，说明是清洗后撞车，不能用它。
+  return existing && hostnameOf(existing.url) !== hostname ? hashed() : base;
+}
+
 export function reviewSubmission(store: Store, now: Date, id: string, decision: {
   status: 'approved' | 'rejected';
   reason?: string;
@@ -133,13 +155,15 @@ export function reviewSubmission(store: Store, now: Date, id: string, decision: 
       if (submission.kind === 'model') {
         const payload = parse(modelSchema, submission.payload);
         if (!store.get('vendor', payload.vendor)) throw new ApiError(400, 'INVALID_INPUT', `厂商 ${payload.vendor} 不存在，请先新增厂商`);
+        // 已存在的模型直接覆盖会静默改写名称和厂商、并清空 tags，与新增接口的 409 不一致。
+        if (store.get('model', payload.slug)) throw new ApiError(409, 'MODEL_EXISTS', `模型 ${payload.slug} 已存在，如需修改信息请走模型管理接口`);
         store.put('model', payload.slug, { ...payload, tags: [] });
       } else if (submission.kind === 'station') {
         const { offers, ...payload } = parse(stationSchema, submission.payload);
         for (const offer of offers) {
           if (!store.get('model', offer.modelSlug)) throw new ApiError(400, 'INVALID_INPUT', `未知模型：${offer.modelSlug}`);
         }
-        const slug = `sub-${submission.originKey}`.toLowerCase().replace(/[^a-z0-9]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '').slice(0, 100);
+        const slug = stationSlug(store, submission.originKey);
         const previous = store.get('station', slug);
         // 更新已有 slug 时保留最初来源，不能把飞书站点改标成 AI 采集。
         store.put('station', slug, {

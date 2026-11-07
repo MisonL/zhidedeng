@@ -31,7 +31,8 @@ const VENDOR_ART: Record<string, { src: string; tint: string; deep: string }> = 
 const SEAL_ART = { tint: '#F8E7DF', deep: '#E62828' };
 /** 新增厂商的 iconKey 可能还没有内置图标，用站内图标兜底，不能让页面崩掉。 */
 const FALLBACK_ICON = '/favicon.svg';
-const VENDOR_ART_OR_FALLBACK = (iconKey: string) => VENDOR_ART[iconKey] ?? { src: FALLBACK_ICON, tint: SEAL_ART.tint, deep: SEAL_ART.deep };
+// 用 hasOwn 查表，避免 iconKey 为 constructor 等原型链属性名时返回 Object 而不是兜底。
+const VENDOR_ART_OR_FALLBACK = (iconKey: string) => Object.hasOwn(VENDOR_ART, iconKey) ? VENDOR_ART[iconKey] : { src: FALLBACK_ICON, tint: SEAL_ART.tint, deep: SEAL_ART.deep };
 
 const ACCENTS = ['#E62828', '#D9722B', '#2F7D6B', '#2F5BE3', '#7A4FC9', '#B8407A', '#1F8FB3', '#8A6A1F'];
 

@@ -78,7 +78,10 @@ function importCatalog(store: Store, input: CatalogImportRequest): CatalogImport
 
     const before = submissionFingerprint(store);
     // 自动创建的占位模型统一挂在 unknown 厂商下，等管理员补全或改建正式厂商。
+    // slug 与直接新增用同一套规则校验，否则像 foo/bar 这种会成为 /models/:slug 无法路由的孤儿。
     if (unknown.length) {
+      const invalid = unknown.find(slug => !adminSlug.safeParse(slug).success);
+      if (invalid) throw new ApiError(400, 'INVALID_INPUT', `未知模型 ${invalid} 不符合 slug 规则，无法自动收录，请先在模型管理接口补录`);
       if (!store.get('vendor', 'unknown')) store.put('vendor', 'unknown', { slug: 'unknown', name: '未知厂商', iconKey: 'unknown' });
       for (const slug of unknown) {
         store.put('model', slug, { slug, vendor: 'unknown', name: slug, description: '群友/Agent 提交时自动创建，待补全', tags: [] });

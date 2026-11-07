@@ -10,7 +10,7 @@ import type { Store } from './database.ts';
 import { Service } from './service.ts';
 import { ApiError } from './errors.ts';
 import { listPosts, reviewPost, setAccountDisabled, setCommentHidden } from './moderation.ts';
-import { listSubmissions, reviewSubmission, submissionQuerySchema, submissionReviewSchema } from './submissions.ts';
+import { enqueueSubmission, listSubmissions, reviewSubmission, submissionQuerySchema, submissionReviewSchema } from './submissions.ts';
 
 const pagination = {
   page: z.coerce.number().int().min(1).max(1_000_000).optional(),
@@ -132,6 +132,19 @@ export function buildApp(store: Store, now: () => Date, options: AppOptions = {}
       iconKey: adminSlug.optional(),
     }).parse(await c.req.json());
     return c.json(createVendor(store, input));
+  });
+  app.post('/api/admin/submissions', async c => {
+    // 运维和同步脚本的入队入口。各渠道自己的接口（飞书同步、Agent 提交）后续接在这个函数上。
+    const input = z.object({
+      kind: z.enum(['station', 'model', 'post']),
+      channel: z.enum(['feishu', 'agent', 'web']),
+      originKey: z.string().trim().min(1).max(253),
+      payload: z.unknown(),
+      actorHandle: z.string().trim().max(200).nullish(),
+    }).parse(await c.req.json());
+    return c.json(enqueueSubmission(store, {
+      ...input, ip: c.req.header('x-forwarded-for')?.split(',')[0].trim() || 'admin', now: now(),
+    }));
   });
   app.get('/api/admin/submissions', c => {
     const query = submissionQuerySchema.parse({ ...c.req.query(), status: c.req.query('status') ?? 'pending' });
