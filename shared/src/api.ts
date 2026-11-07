@@ -207,6 +207,13 @@ export interface AdminCreateModelRequest {
 }
 export type AdminCreateModelResponse = Model;
 
+// PATCH /api/admin/models/:slug。slug 是主键不可改，其余可编辑字段都要给全。
+export interface AdminUpdateModelRequest {
+  vendor: string;
+  name: string;
+  description: string;
+}
+
 // DELETE /api/admin/models/:slug，要求显式确认，避免误删。
 export interface AdminDeleteModelRequest { confirm: true }
 export interface AdminDeleteModelResponse {

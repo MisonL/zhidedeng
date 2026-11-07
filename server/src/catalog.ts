@@ -1,7 +1,7 @@
 import { z, ZodError } from 'zod';
 import { MAX_RATE, MIN_RATE } from '@zhidedeng/shared';
 import type {
-  AdminCreateModelRequest, AdminCreateVendorRequest, AdminDeleteModelResponse,
+  AdminCreateModelRequest, AdminCreateVendorRequest, AdminDeleteModelResponse, AdminUpdateModelRequest,
   CatalogImportRequest, CatalogImportResponse, Model, Vendor,
 } from '@zhidedeng/shared';
 import type { Store } from './database.ts';
@@ -63,27 +63,33 @@ function submissionFingerprint(store: Store) {
 
 function importCatalog(store: Store, input: CatalogImportRequest): CatalogImportResponse {
   return store.transaction(() => {
-    const models = new Set(store.all('model').map(model => model.slug));
-    const offers = input.stations.flatMap(({ slug, offers }) => offers.map(offer => ({ stationSlug: slug, ...offer })));
-    const unknown = [...new Set(offers.map(offer => offer.modelSlug).filter(slug => !models.has(slug)))];
-    if (unknown.length && !input.allowNewModels) throw new ApiError(400, 'INVALID_INPUT', `未知模型：${unknown[0]}`);
-
     // 已经有其他通道（投稿队列）物化过的站点，本接口不再覆盖：它下次同步又会覆盖回来，
     // 而且 DELETE 只清 source='submission'，会留下 agent 站点的残留报价撞上唯一约束。
     // PR4 把飞书接入队列后，这条过渡保护就可以删掉。
     const managed = new Set(store.all('station').filter(station => station.source !== 'submission' && station.source !== 'demo').map(station => station.slug));
     const skipped = input.stations.filter(station => managed.has(station.slug)).map(station => ({ slug: station.slug, reason: '该站点已由其他通道接管' }));
     const accepted = input.stations.filter(station => !managed.has(station.slug));
-    const acceptedOffers = offers.filter(offer => !managed.has(offer.stationSlug));
+    const offers = accepted.flatMap(({ slug, offers: stationOffers }) => stationOffers.map(offer => ({ stationSlug: slug, ...offer })));
+
+    const models = new Set(store.all('model').map(model => model.slug));
+    // 只从真正会被写入的报价里收集未知模型：被跳过的站点引用不到的模型不该建，
+    // 也不该让它把同批次的合法站点一起卡成 400。
+    const unknown = [...new Set(offers.map(offer => offer.modelSlug).filter(slug => !models.has(slug)))];
+    if (unknown.length && !input.allowNewModels) throw new ApiError(400, 'INVALID_INPUT', `未知模型：${unknown[0]}`);
 
     const before = submissionFingerprint(store);
     // 自动创建的占位模型统一挂在 unknown 厂商下，等管理员补全或改建正式厂商。
     // slug 与直接新增用同一套规则校验，否则像 foo/bar 这种会成为 /models/:slug 无法路由的孤儿。
     if (unknown.length) {
-      const invalid = unknown.find(slug => !adminSlug.safeParse(slug).success);
-      if (invalid) throw new ApiError(400, 'INVALID_INPUT', `未知模型 ${invalid} 不符合 slug 规则，无法自动收录，请先在模型管理接口补录`);
-      if (!store.get('vendor', 'unknown')) store.put('vendor', 'unknown', { slug: 'unknown', name: '未知厂商', iconKey: 'unknown' });
+      const resolved: string[] = [];
       for (const slug of unknown) {
+        const parsed = adminSlug.safeParse(slug);
+        // 用解析后的值（已 trim），否则 ' x ' 会带着空格入库，两条 URL 都路由不到。
+        if (!parsed.success) throw new ApiError(400, 'INVALID_INPUT', `未知模型 ${slug} 不符合 slug 规则，无法自动收录，请先在模型管理接口补录`);
+        resolved.push(parsed.data);
+      }
+      if (!store.get('vendor', 'unknown')) store.put('vendor', 'unknown', { slug: 'unknown', name: '未知厂商', iconKey: 'unknown' });
+      for (const slug of resolved) {
         store.put('model', slug, { slug, vendor: 'unknown', name: slug, description: '群友/Agent 提交时自动创建，待补全', tags: [] });
       }
     }
@@ -92,14 +98,14 @@ function importCatalog(store: Store, input: CatalogImportRequest): CatalogImport
     for (const { offers: _offers, ...station } of accepted) {
       store.put('station', station.slug, { ...station, uptime: null, firstTokenLatencyMs: null, foundedAt: null, status: null, source: 'submission' });
     }
-    for (const offer of acceptedOffers) {
+    for (const offer of offers) {
       store.db.prepare('INSERT INTO offers (stationSlug, modelSlug, rate) VALUES (?, ?, ?)').run(offer.stationSlug, offer.modelSlug, offer.rate);
     }
     for (const { recordId, authorName, ...post } of input.posts) {
       const id = `feishu-${recordId}`;
       store.put('post', id, { ...post, id, kind: 'review', authorHandle: 'feishu-submission', authorNickname: authorName, modelSlug: null, cover: null, source: 'submission', status: 'approved' });
     }
-    return { changed: unknown.length > 0 || submissionFingerprint(store) !== before, stations: accepted.length, offers: acceptedOffers.length, posts: input.posts.length, createdModels: unknown.sort(), skipped };
+    return { changed: unknown.length > 0 || submissionFingerprint(store) !== before, stations: accepted.length, offers: offers.length, posts: input.posts.length, createdModels: unknown.sort(), skipped };
   });
 }
 
@@ -143,6 +149,19 @@ export function createModel(store: Store, input: AdminCreateModelRequest): Model
     const model: Model = { slug: input.slug, vendor: input.vendor, name: input.name, description: input.description, tags: [] };
     store.put('model', model.slug, model);
     return model;
+  });
+}
+
+/** 修改已收录模型的可编辑字段。slug 是主键，改不了；被引用也不影响改名字和厂商。 */
+export function updateModel(store: Store, slug: string, input: AdminUpdateModelRequest): Model {
+  return store.transaction(() => {
+    const model = store.get('model', slug);
+    if (!model) throw new ApiError(404, 'NOT_FOUND', `模型不存在：${slug}`);
+    if (!store.get('vendor', input.vendor)) throw new ApiError(400, 'INVALID_INPUT', `厂商不存在：${input.vendor}`);
+    // tags 不在这个接口的可编辑范围，保持原值，避免顺手清空。
+    const updated: Model = { ...model, vendor: input.vendor, name: input.name, description: input.description };
+    store.put('model', slug, updated);
+    return updated;
   });
 }
 

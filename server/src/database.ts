@@ -73,6 +73,12 @@ export const SCHEMA = `
   CREATE INDEX IF NOT EXISTS submissions_status ON submissions(status, kind, createdAt);
   CREATE INDEX IF NOT EXISTS submissions_origin ON submissions(kind, originKey, status);
   CREATE INDEX IF NOT EXISTS submissions_actor ON submissions(actorHandle, createdAt);
+  -- 管理端的运行时开关，管理员随时改，所以存库不存启动配置。
+  CREATE TABLE IF NOT EXISTS settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updatedAt TEXT NOT NULL
+  );
 `;
 
 /** 存储层用到的 node:sqlite 最小接口。 */
