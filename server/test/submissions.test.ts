@@ -56,7 +56,7 @@ describe('投稿入队与列表', () => {
   it('同 kind、originKey 和 payload 的 pending 投稿幂等，跨 channel 也不重复', () => {
     const first = queue().submission;
     const again = queue({ channel: 'feishu', actorHandle: 'another', now: new Date('2026-11-07T02:00:00Z') });
-    expect(again).toEqual({ submission: first, deduplicated: true });
+    expect(again).toEqual({ submission: first, deduplicated: true, autoApproved: false });
     expect(listSubmissions(store, {}).total).toBe(1);
   });
 

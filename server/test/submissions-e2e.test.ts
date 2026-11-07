@@ -127,7 +127,7 @@ describe('投稿全链路（HTTP 层）', () => {
     expect(result.results[1].error?.code).toBe('NOT_FOUND');
   });
 
-  it('agent 来源的文章不能直接绕开队列改状态，只能走队列处理', async () => {
+  it('agent 来源的文章可以直接下架，这是队列之外唯一的下架路径', async () => {
     const store = openStore(server.db);
     const { submission } = enqueueSubmission(store, {
       kind: 'post', channel: 'agent', originKey: 'collected-1',
@@ -136,51 +136,81 @@ describe('投稿全链路（HTTP 层）', () => {
     });
     await review(submission.id, { status: 'approved' });
     const postId = `sub-${submission.id}`;
+    expect((await server.app.request(`/api/posts/${postId}`)).status).toBe(200);
 
-    const blocked = await server.app.request(`/api/admin/posts/${postId}/review`, {
+    // 队列只处理待审记录，已上站的文章只能从这里下架
+    const takedown = await server.app.request(`/api/admin/posts/${postId}/review`, {
       method: 'POST', headers: admin, body: JSON.stringify({ status: 'rejected' }),
     });
-    expect(blocked.status).toBe(409);
-    expect((await blocked.json() as { error: { code: string } }).error.code).toBe('MANAGED_BY_SOURCE');
-
-    // 站内用户自己的投稿不受影响，仍可直接审核
-    const mine = await server.app.request('/api/posts', {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      // 未登录会被拒，这里只确认它不会命中 MANAGED_BY_SOURCE 这条分支
-      body: JSON.stringify({ kind: 'review', title: '标题', summary: '摘要', body: '正文' }),
-    });
-    expect([401, 403]).toContain(mine.status);
+    expect(takedown.status).toBe(200);
+    expect((await server.app.request(`/api/posts/${postId}`)).status).toBe(404);
   });
+});
 
-  it('管理员可以通过接口入队，重复提交去重', async () => {
-    const body = JSON.stringify({
-      kind: 'station', channel: 'feishu', originKey: 'route.example.com', payload, actorHandle: 'ops',
-    });
-    const first = await server.app.request('/api/admin/submissions', { method: 'POST', headers: admin, body });
-    expect(first.status).toBe(200);
-    const created = await first.json() as { submission: { id: string; channel: string; actorHandle: string }; deduplicated: boolean };
-    expect(created.deduplicated).toBe(false);
-    expect(created.submission).toMatchObject({ channel: 'feishu', actorHandle: 'ops' });
+describe('自动通过开关', () => {
+  const setAuto = (autoApprove: boolean) => server.app.request('/api/admin/settings', {
+    method: 'POST', headers: admin, body: JSON.stringify({ autoApprove }),
+  });
+  const enqueueVia = (body: unknown) => server.app.request('/api/admin/submissions', {
+    method: 'POST', headers: admin, body: JSON.stringify(body),
+  });
+  const body = {
+    kind: 'station', channel: 'agent', originKey: 'route.example.com', payload,
+  };
 
-    const again = await (await server.app.request('/api/admin/submissions', { method: 'POST', headers: admin, body })).json() as { deduplicated: boolean; submission: { id: string } };
-    expect(again.deduplicated).toBe(true);
-    expect(again.submission.id).toBe(created.submission.id);
-
-    // 入队不直接物化，要等审核
+  it('默认关闭，投稿需要人工审核', async () => {
+    expect(await (await server.app.request('/api/admin/settings', { headers: admin })).json()).toEqual({ autoApprove: false });
+    const created = await (await enqueueVia(body)).json() as { submission: { status: string }; autoApproved: boolean };
+    expect(created.submission.status).toBe('pending');
+    expect(created.autoApproved).toBe(false);
     expect((await server.app.request('/api/stations/sub-route-example-com')).status).toBe(404);
-    await review(created.submission.id, { status: 'approved' });
-    expect((await server.app.request('/api/stations/sub-route-example-com')).status).toBe(200);
   });
 
-  it('入队接口校验参数并需要鉴权', async () => {
-    expect((await server.app.request('/api/admin/submissions', {
-      method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
-    })).status).toBe(401);
+  it('开启后入队即上站，记录为 approved 且带原因', async () => {
+    await setAuto(true);
+    const created = await (await enqueueVia(body)).json() as { submission: { id: string; status: string; reason: string }; autoApproved: boolean };
+    expect(created.autoApproved).toBe(true);
+    expect(created.submission).toMatchObject({ status: 'approved', reason: '自动通过' });
 
-    const bad = await server.app.request('/api/admin/submissions', {
-      method: 'POST', headers: admin,
-      body: JSON.stringify({ kind: 'unknown-kind', channel: 'agent', originKey: 'x', payload: {} }),
-    });
+    // 直接可公开访问，测量指标仍是 null
+    const detail = await (await server.app.request('/api/stations/sub-route-example-com')).json() as StationDetail;
+    expect(detail).toMatchObject({ name: '路由验证站', source: 'agent' });
+    expect(detail.uptime).toBeNull();
+    expect(detail.firstTokenLatencyMs).toBeNull();
+    // 不在待审列表里
+    expect((await list('?status=pending')).items.map(item => item.id)).not.toContain(created.submission.id);
+  });
+
+  it('关闭后恢复人工审核', async () => {
+    await setAuto(true);
+    await setAuto(false);
+    expect(await (await server.app.request('/api/admin/settings', { headers: admin })).json()).toEqual({ autoApprove: false });
+    const created = await (await enqueueVia(body)).json() as { submission: { status: string } };
+    expect(created.submission.status).toBe('pending');
+  });
+
+  it('自动通过下相同内容重复提交不重复上站', async () => {
+    await setAuto(true);
+    const first = await (await enqueueVia(body)).json() as { deduplicated: boolean };
+    const second = await (await enqueueVia(body)).json() as { deduplicated: boolean };
+    expect(first.deduplicated).toBe(false);
+    expect(second.deduplicated).toBe(true);
+    const stations = openStore(server.db).all('station').filter(station => station.slug.startsWith('sub-'));
+    expect(stations).toHaveLength(1);
+  });
+
+  it('自动通过下校验失败直接 400，不入队也不上站', async () => {
+    await setAuto(true);
+    const bad = await enqueueVia({ ...body, payload: { ...payload, offers: [{ modelSlug: 'no-such-model', rate: 0.5 }] } });
     expect(bad.status).toBe(400);
+    expect((await list('?status=pending')).items).toHaveLength(0);
+    expect(openStore(server.db).all('station').filter(station => station.slug.startsWith('sub-'))).toHaveLength(0);
+  });
+
+  it('设置接口需要鉴权', async () => {
+    expect((await server.app.request('/api/admin/settings')).status).toBe(401);
+    expect((await server.app.request('/api/admin/settings', {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"autoApprove":true}',
+    })).status).toBe(401);
   });
 });

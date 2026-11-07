@@ -5,12 +5,12 @@ import { z, ZodError } from 'zod';
 import { API_ROUTES } from '@zhidedeng/shared';
 import type { ApiContracts, ApiRouteName, ChangePasswordRequest, LoginRequest, RegisterRequest } from '@zhidedeng/shared';
 import { AttemptLimiter, burnPasswordCheck, clearedSessionCookie, createSession, deleteOtherSessions, deleteSession, hashPassword, INITIAL_TOKENS, isWeakPassword, sessionCookie, sessionHandle, USERNAME, verifyPassword } from './auth.ts';
-import { authorizeAdmin, adminSlug, createModel, createVendor, deleteModel, importResponse } from './catalog.ts';
+import { authorizeAdmin, adminSlug, createModel, createVendor, deleteModel, importResponse, updateModel } from './catalog.ts';
 import type { Store } from './database.ts';
 import { Service } from './service.ts';
 import { ApiError } from './errors.ts';
 import { listPosts, reviewPost, setAccountDisabled, setCommentHidden } from './moderation.ts';
-import { enqueueSubmission, listSubmissions, reviewSubmission, submissionQuerySchema, submissionReviewSchema } from './submissions.ts';
+import { autoApproveEnabled, enqueueSubmission, listSubmissions, reviewSubmission, setAutoApprove, submissionQuerySchema, submissionReviewSchema } from './submissions.ts';
 
 const pagination = {
   page: z.coerce.number().int().min(1).max(1_000_000).optional(),
@@ -121,6 +121,14 @@ export function buildApp(store: Store, now: () => Date, options: AppOptions = {}
     }).parse(await c.req.json());
     return c.json(createModel(store, input));
   });
+  app.patch('/api/admin/models/:slug', async c => {
+    const input = z.strictObject({
+      vendor: z.string().trim().min(1).max(64),
+      name: z.string().trim().min(1).max(60),
+      description: z.string().trim().min(1).max(200),
+    }).parse(await c.req.json());
+    return c.json(updateModel(store, c.req.param('slug'), input));
+  });
   app.delete('/api/admin/models/:slug', async c => {
     z.strictObject({ confirm: z.literal(true) }).parse(await c.req.json());
     return c.json(deleteModel(store, c.req.param('slug')));
@@ -142,9 +150,12 @@ export function buildApp(store: Store, now: () => Date, options: AppOptions = {}
       payload: z.unknown(),
       actorHandle: z.string().trim().max(200).nullish(),
     }).parse(await c.req.json());
-    return c.json(enqueueSubmission(store, {
-      ...input, ip: c.req.header('x-forwarded-for')?.split(',')[0].trim() || 'admin', now: now(),
-    }));
+    return c.json(enqueueSubmission(store, { ...input, ip: clientIp(c), now: now() }));
+  });
+  app.get('/api/admin/settings', c => c.json({ autoApprove: autoApproveEnabled(store) }));
+  app.post('/api/admin/settings', async c => {
+    const { autoApprove } = z.strictObject({ autoApprove: z.boolean() }).parse(await c.req.json());
+    return c.json({ autoApprove: setAutoApprove(store, autoApprove, now()) });
   });
   app.get('/api/admin/submissions', c => {
     const query = submissionQuerySchema.parse({ ...c.req.query(), status: c.req.query('status') ?? 'pending' });

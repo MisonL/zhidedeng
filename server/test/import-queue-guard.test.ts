@@ -179,3 +179,100 @@ describe('复核发现的边界问题', () => {
     expect(mine.map(station => station.name).sort()).toEqual(['点号站2', '连字符站2']);
   });
 });
+
+describe('slug 分配的极端情况（Codex 二轮反例）', () => {
+  const approve = (payload: unknown, originKey: string) => {
+    const store = openStore(server.db);
+    const { submission } = enqueueSubmission(store, {
+      kind: 'station', channel: 'agent', originKey, payload, ip: '127.0.0.1', now: clock(),
+    });
+    return reviewSubmission(store, clock(), submission.id, { status: 'approved' });
+  };
+  const byName = (name: string) => openStore(server.db).all('station').find(station => station.name === name);
+
+  it('哈希候选已被占用时不会覆盖别人', async () => {
+    await approve({ ...stationPayload, url: 'https://a.b.com/', name: '甲' }, 'a.b.com');
+    // 预先占掉 「丙」 本该拿到的哈希候选，模拟 hostname 恰好撞上别人哈希的情况
+    const store = openStore(server.db);
+    const yiSlug = 'sub-a-b-com-3e326853e5';
+    store.put('station', yiSlug, {
+      ...stationPayload, slug: yiSlug, name: '乙', url: 'https://b.example.com/',
+      uptime: null, firstTokenLatencyMs: null, foundedAt: null, status: null, source: 'agent',
+    });
+
+    await approve({ ...stationPayload, url: 'https://a-b.com/', name: '丙' }, 'a-b.com');
+
+    // 丙 不能覆盖 乙
+    expect(store.get('station', yiSlug)!.name).toBe('乙');
+    const bing = byName('丙');
+    expect(bing).toBeDefined();
+    expect(bing!.slug).not.toBe(yiSlug);
+  });
+
+  it('同一站点重复审批不会在两种 slug 之间横跳', async () => {
+    await approve({ ...stationPayload, url: 'https://a.b.com/', name: '点号站' }, 'a.b.com');
+    await approve({ ...stationPayload, url: 'https://a-b.com/', name: '连字符站' }, 'a-b.com');
+    const first = byName('连字符站')!.slug;
+
+    // 再提交两次，slug 必须稳定
+    await approve({ ...stationPayload, url: 'https://a-b.com/', name: '连字符站2' }, 'a-b.com');
+    await approve({ ...stationPayload, url: 'https://a-b.com/', name: '连字符站3' }, 'a-b.com');
+
+    expect(byName('连字符站3')!.slug).toBe(first);
+    // 连字符站始终只有一条记录
+    expect(openStore(server.db).all('station').filter(station => station.name.startsWith('连字符站'))).toHaveLength(1);
+  });
+
+  it('base 站点被删掉后重新提交，仍沿用原来的哈希 slug', async () => {
+    await approve({ ...stationPayload, url: 'https://a.b.com/', name: '点号站' }, 'a.b.com');
+    await approve({ ...stationPayload, url: 'https://a-b.com/', name: '连字符站' }, 'a-b.com');
+    const hashedSlug = byName('连字符站')!.slug;
+    const store = openStore(server.db);
+
+    // 删掉占着 base 的那个站点
+    store.db.prepare("DELETE FROM entities WHERE kind = 'station' AND id = ?").run('sub-a-b-com');
+    expect(store.get('station', 'sub-a-b-com')).toBeUndefined();
+
+    await approve({ ...stationPayload, url: 'https://a-b.com/', name: '连字符站再来' }, 'a-b.com');
+    // 不能因为 base 空出来了就搬过去，否则旧链接失效
+    expect(byName('连字符站再来')!.slug).toBe(hashedSlug);
+    expect(store.get('station', 'sub-a-b-com')).toBeUndefined();
+  });
+});
+
+describe('模型更新接口', () => {
+  const patch = (slug: string, body: unknown) => server.app.request(`/api/admin/models/${slug}`, {
+    method: 'PATCH', headers: admin, body: JSON.stringify(body),
+  });
+
+  it('可以改名字和厂商，被报价引用的模型也能改', async () => {
+    const store = openStore(server.db);
+    const before = store.get('model', 'gpt-4-1')!;
+    expect(server.db.prepare('SELECT 1 FROM offers WHERE modelSlug = ? LIMIT 1').get('gpt-4-1')).toBeDefined();
+
+    const response = await patch('gpt-4-1', { vendor: before.vendor, name: '改名后的模型', description: '新描述' });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ slug: 'gpt-4-1', name: '改名后的模型', description: '新描述' });
+    // 报价引用不受影响
+    expect(store.get('model', 'gpt-4-1')!.name).toBe('改名后的模型');
+  });
+
+  it('不存在的模型 404，不存在的厂商 400', async () => {
+    expect((await patch('no-such-model', { vendor: 'openai', name: 'x', description: 'y' })).status).toBe(404);
+    expect((await patch('gpt-4-1', { vendor: 'no-such-vendor', name: 'x', description: 'y' })).status).toBe(400);
+  });
+
+  it('保留原有 tags，不会被顺手清空', async () => {
+    const store = openStore(server.db);
+    const withTags = { ...store.get('model', 'gpt-4-1')!, tags: ['推理'] };
+    store.put('model', 'gpt-4-1', withTags);
+    await patch('gpt-4-1', { vendor: withTags.vendor, name: '改名', description: '描述' });
+    expect(store.get('model', 'gpt-4-1')!.tags).toEqual(['推理']);
+  });
+
+  it('需要鉴权', async () => {
+    expect((await server.app.request('/api/admin/models/gpt-4-1', {
+      method: 'PATCH', headers: { 'content-type': 'application/json' }, body: '{}',
+    })).status).toBe(401);
+  });
+});
