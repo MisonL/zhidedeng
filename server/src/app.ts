@@ -5,6 +5,7 @@ import { z, ZodError } from 'zod';
 import { API_ROUTES } from '@zhidedeng/shared';
 import type { ApiContracts, ApiRouteName, ChangePasswordRequest, LoginRequest, RegisterRequest } from '@zhidedeng/shared';
 import { AttemptLimiter, burnPasswordCheck, clearedSessionCookie, createSession, deleteOtherSessions, deleteSession, hashPassword, INITIAL_TOKENS, isWeakPassword, sessionCookie, sessionHandle, USERNAME, verifyPassword } from './auth.ts';
+import { agentTokenSchema, createAgentToken, listAgentTokens, revokeAgentToken } from './agent-tokens.ts';
 import { authorizeAdmin, adminSlug, createModel, createVendor, deleteModel, importResponse, updateModel } from './catalog.ts';
 import type { Store } from './database.ts';
 import { Service } from './service.ts';
@@ -43,6 +44,7 @@ export interface AppOptions {
   secureCookie?: boolean;
   // 导入和管理接口的 Bearer 密钥；未配置时这些接口一律拒绝。
   syncToken?: string;
+  inviteCodes?: readonly string[];
 }
 
 interface Bindings {
@@ -311,6 +313,28 @@ export function buildApp(store: Store, now: () => Date, options: AppOptions = {}
       deleteOtherSessions(store, handle, cookie);
     });
     return c.json({ ok: true });
+  });
+
+  app.post(API_ROUTES.createAgentToken.path, async c => {
+    c.header('cache-control', 'no-store');
+    const time = now();
+    const handle = sessionHandle(store, c.req.header('cookie'), time);
+    if (!handle) throw new ApiError(401, 'UNAUTHENTICATED', '请先登录');
+    const input = agentTokenSchema.parse(await c.req.json());
+    return c.json(createAgentToken(store, { ...input, handle, now: time, inviteCodes: options.inviteCodes }));
+  });
+  app.get(API_ROUTES.getAgentTokens.path, c => {
+    c.header('cache-control', 'no-store');
+    const handle = sessionHandle(store, c.req.header('cookie'), now());
+    if (!handle) throw new ApiError(401, 'UNAUTHENTICATED', '请先登录');
+    return c.json(listAgentTokens(store, handle));
+  });
+  app.delete(API_ROUTES.revokeAgentToken.path, c => {
+    c.header('cache-control', 'no-store');
+    const time = now();
+    const handle = sessionHandle(store, c.req.header('cookie'), time);
+    if (!handle) throw new ApiError(401, 'UNAUTHENTICATED', '请先登录');
+    return c.json(revokeAgentToken(store, handle, identifier.parse(c.req.param('id')), time));
   });
 
   app.post(API_ROUTES.logout.path, c => {

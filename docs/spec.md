@@ -36,6 +36,7 @@ Slogan：我们的AI中转指南。
 - 会话是随机 token，HttpOnly、SameSite=Lax、生产环境 Secure，30 天；库里只存 SHA-256；可登出
 - 登录和注册进程内限流（IP + 用户名、用户名、IP 三层，失败次数在校验密码前预占），错误文案不区分用户名不存在、密码错和账号被禁用；拒绝常见弱密码；写接口要求 Content-Type: application/json
 - 未登录只读，写接口和个人接口返回 401 UNAUTHENTICATED。新用户初始 120 Token
+- AI Agent 凭证由本人使用会话管理。注册满 7 天、已有至少一篇审核通过的非演示投稿、持有有效邀请码三选一即可签发；邀请码从环境变量 INVITE_CODES 读取，逗号分隔。每账号最多 5 个未吊销凭证，明文只签发时返回，库中只存 SHA-256 和前八字符的展示前缀；签发、吊销记录不含秘密的审计日志
 - 投票数和收藏数对所有人公开累计；评论登录后发布即公开，每账号每分钟 5 条
 - 投稿每账号每小时 10 篇、待审最多 20 篇。提交后是 pending，只有作者能在我的分享和详情页看到，通过后才公开。种子文章公开；飞书内容先进入投稿队列，默认待人工审核
 
@@ -80,9 +81,10 @@ Slogan：我们的AI中转指南。
 
 ## API（全部 JSON，前缀 /api）
 
-列表统一 `{ items, total, page, pageSize }`，参数 `page`、`pageSize`。错误统一 `{ error: { code, message } }`。
+分页列表统一 `{ items, total, page, pageSize }`，参数 `page`、`pageSize`；凭证列表直接返回数组。错误统一 `{ error: { code, message } }`。
 
 - `POST /auth/register`（username、password、nickname?）、`POST /auth/login`、`POST /auth/logout`、`POST /auth/password`（currentPassword、newPassword）
+- `POST /account/agent-tokens`（label、inviteCode?）签发；`GET /account/agent-tokens` 列出本人凭证元数据；`DELETE /account/agent-tokens/:id` 软吊销，重复吊销保留首次 revokedAt。均需会话，不需要管理员权限；准入不足返回 403 ELIGIBILITY_REQUIRED，活跃凭证超限返回 409 TOKEN_LIMIT
 - `GET /me`、`PATCH /me`（nickname、bio）
 - `POST /me/checkin`（当天重复调用返回 409 ALREADY_CHECKED_IN）；`GET /me` 含 tokens、checkedInToday、streak、favoriteCount、shareCount
 - `GET /me/favorites`、`GET /me/posts`

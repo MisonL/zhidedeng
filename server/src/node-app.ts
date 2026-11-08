@@ -46,7 +46,7 @@ export function openStore(db: DatabaseSync) {
   });
 }
 
-export function createApp(options: { dbPath?: string; now?: () => Date; syncToken?: string; webRoot?: string } = {}) {
+export function createApp(options: { dbPath?: string; now?: () => Date; syncToken?: string; inviteCodes?: readonly string[]; webRoot?: string } = {}) {
   const production = process.env.NODE_ENV === 'production';
   if (production && !options.dbPath && !process.env.DB_PATH) throw new Error('生产环境必须设置 DB_PATH');
   const db = openDatabase(options.dbPath ?? process.env.DB_PATH ?? defaultDbPath);
@@ -56,7 +56,8 @@ export function createApp(options: { dbPath?: string; now?: () => Date; syncToke
   const configured = options.syncToken ?? process.env.SYNC_TOKEN;
   const usable = configured && configured.length >= MIN_SYNC_TOKEN_LENGTH ? configured : undefined;
   if (configured && !usable) console.warn(`SYNC_TOKEN 不足 ${MIN_SYNC_TOKEN_LENGTH} 位，视为未配置，管理接口已关闭`);
-  const app = buildApp(store, now, { secureCookie: production, syncToken: usable });
+  const inviteCodes = options.inviteCodes ?? (process.env.INVITE_CODES ?? '').split(',').map(code => code.trim()).filter(Boolean);
+  const app = buildApp(store, now, { secureCookie: production, syncToken: usable, inviteCodes });
   if (options.webRoot) mountWeb(app, options.webRoot);
   return { app, db };
 }

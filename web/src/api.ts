@@ -1,6 +1,6 @@
 import { API_ROUTES } from '@zhidedeng/shared';
 import type {
-  ApiContracts, ApiErrorResponse, ApiRouteName, ChangePasswordRequest, CreateCommentRequest, CreatePostRequest,
+  ApiContracts, ApiErrorResponse, ApiRouteName, ChangePasswordRequest, CreateAgentTokenRequest, CreateCommentRequest, CreatePostRequest,
   GetModelsRequest, GetPostsRequest, GetRankingsRequest, GetStationsRequest, LoginRequest, PaginationQuery,
   PutFavoriteRequest, PutVoteRequest, RegisterRequest, Target, UpdateMeRequest,
 } from '@zhidedeng/shared';
@@ -56,6 +56,9 @@ export const api = {
   login: (body: LoginRequest) => call('login', { body }),
   logout: () => call('logout', { body: {} }),
   changePassword: (body: ChangePasswordRequest) => call('changePassword', { body }),
+  createAgentToken: (body: CreateAgentTokenRequest) => call('createAgentToken', { body }),
+  getAgentTokens: (signal?: AbortSignal) => call('getAgentTokens', { signal }),
+  revokeAgentToken: (id: string) => call('revokeAgentToken', { path: { id }, body: {} }),
   getMe: (signal?: AbortSignal) => call('getMe', { signal }),
   updateMe: (body: UpdateMeRequest) => call('updateMe', { body }),
   checkIn: () => call('checkIn', { body: {} }),

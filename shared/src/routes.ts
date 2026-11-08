@@ -5,6 +5,9 @@ export const API_ROUTES = {
   login: { method: 'POST', path: '/api/auth/login' },
   logout: { method: 'POST', path: '/api/auth/logout' },
   changePassword: { method: 'POST', path: '/api/auth/password' },
+  createAgentToken: { method: 'POST', path: '/api/account/agent-tokens' },
+  getAgentTokens: { method: 'GET', path: '/api/account/agent-tokens' },
+  revokeAgentToken: { method: 'DELETE', path: '/api/account/agent-tokens/:id' },
   getMe: { method: 'GET', path: '/api/me' },
   updateMe: { method: 'PATCH', path: '/api/me' },
   checkIn: { method: 'POST', path: '/api/me/checkin' },
@@ -27,7 +30,7 @@ export const API_ROUTES = {
   search: { method: 'GET', path: '/api/search' },
   getHotSearches: { method: 'GET', path: '/api/hot-searches' },
 } as const satisfies Record<keyof ApiContracts, {
-  method: 'GET' | 'PATCH' | 'POST' | 'PUT';
+  method: 'GET' | 'PATCH' | 'POST' | 'PUT' | 'DELETE';
   path: `/api/${string}`;
 }>;
 

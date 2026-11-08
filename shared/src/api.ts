@@ -1,5 +1,5 @@
 import type {
-  Banner, CheckIn, Comment, CommentReply, CommunityRanking, CurrentUser,
+  AgentToken, Banner, CheckIn, Comment, CommentReply, CommunityRanking, CurrentUser,
   ExpertRanking, FavoriteItem, Model, ModelDetail, ModelRanking, Post, PostKind,
   RankingTab, Station, StationDetail, Target, Vendor, VendorWithModels, VoteSummary, VoteValue,
 } from './domain.js';
@@ -93,6 +93,16 @@ export interface ChangePasswordRequest {
 }
 // 成功后该账号的其他会话全部失效，当前会话保留。
 export interface ChangePasswordResponse { ok: true }
+export interface CreateAgentTokenRequest {
+  label: string;
+  inviteCode?: string;
+}
+// 明文只在本次签发返回，之后列表只能读到展示前缀。
+export type CreateAgentTokenResponse = Pick<AgentToken, 'id' | 'tokenPrefix' | 'label' | 'createdAt'> & { token: string };
+export type GetAgentTokensRequest = EmptyRequest;
+export type GetAgentTokensResponse = AgentToken[];
+export interface RevokeAgentTokenRequest { id: string }
+export interface RevokeAgentTokenResponse { id: string; revokedAt: string }
 // 未登录时 HTTP 401，错误码 UNAUTHENTICATED；我的收藏、我的分享和所有写接口同样如此。
 export type GetMeRequest = EmptyRequest;
 export type GetMeResponse = CurrentUser;
@@ -276,6 +286,9 @@ export interface ApiContracts {
   login: { request: LoginRequest; response: ApiResponse<LoginResponse> };
   logout: { request: LogoutRequest; response: ApiResponse<LogoutResponse> };
   changePassword: { request: ChangePasswordRequest; response: ApiResponse<ChangePasswordResponse> };
+  createAgentToken: { request: CreateAgentTokenRequest; response: ApiResponse<CreateAgentTokenResponse> };
+  getAgentTokens: { request: GetAgentTokensRequest; response: ApiResponse<GetAgentTokensResponse> };
+  revokeAgentToken: { request: RevokeAgentTokenRequest; response: ApiResponse<RevokeAgentTokenResponse> };
   getMe: { request: GetMeRequest; response: ApiResponse<GetMeResponse> };
   updateMe: { request: UpdateMeRequest; response: ApiResponse<UpdateMeResponse> };
   checkIn: { request: CheckInRequest; response: ApiResponse<CheckInResponse> };

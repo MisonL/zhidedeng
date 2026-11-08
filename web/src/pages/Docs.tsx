@@ -19,6 +19,9 @@ const GROUPS: { title: string; routes: Partial<Record<ApiRouteName, { summary: s
       checkIn: { summary: '每日签到，当天重复调用返回 409 ALREADY_CHECKED_IN' },
       getMyFavorites: { summary: '我的收藏', params: 'query: page, pageSize' },
       getMyPosts: { summary: '我的分享', params: 'query: page, pageSize' },
+      createAgentToken: { summary: '签发 AI Agent 凭证，明文只返回一次；需满足注册时长、通过的投稿或邀请码之一', params: 'body: label（1~100 字）, inviteCode?' },
+      getAgentTokens: { summary: '列出本人凭证的元数据数组，不含明文和哈希' },
+      revokeAgentToken: { summary: '吊销本人凭证，重复调用保留首次吊销时间', params: 'path: id' },
     },
   },
   {

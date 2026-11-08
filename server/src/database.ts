@@ -52,6 +52,18 @@ export const SCHEMA = `
   CREATE TABLE IF NOT EXISTS sessions (
     tokenHash TEXT PRIMARY KEY, handle TEXT NOT NULL REFERENCES accounts(handle), expiresAt TEXT NOT NULL
   );
+  CREATE TABLE IF NOT EXISTS agent_tokens (
+    id TEXT PRIMARY KEY,
+    handle TEXT NOT NULL,
+    tokenHash TEXT NOT NULL UNIQUE,
+    label TEXT NOT NULL,
+    tokenPrefix TEXT NOT NULL,
+    createdAt TEXT NOT NULL,
+    lastUsedAt TEXT,
+    revokedAt TEXT,
+    useCount INTEGER NOT NULL DEFAULT 0
+  );
+  CREATE INDEX IF NOT EXISTS agent_tokens_handle ON agent_tokens(handle);
   CREATE INDEX IF NOT EXISTS votes_target ON votes(targetType, targetId);
   CREATE INDEX IF NOT EXISTS favorites_target ON favorites(targetType, targetId);
   CREATE INDEX IF NOT EXISTS comments_target ON comments(targetType, targetId, createdAt);
