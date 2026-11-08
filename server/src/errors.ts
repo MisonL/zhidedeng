@@ -13,3 +13,12 @@ export class ApiError extends Error {
     this.details = details;
   }
 }
+
+export function isDatabaseBusyError(error: unknown): boolean {
+  if (typeof error !== 'object' || error === null) return false;
+  const candidate = error as { code?: unknown; message?: unknown };
+  const code = typeof candidate.code === 'string' ? candidate.code : '';
+  const message = typeof candidate.message === 'string' ? candidate.message : '';
+  return code === 'SQLITE_BUSY' || code === 'ERR_SQLITE_BUSY' || code.startsWith('SQLITE_BUSY_')
+    || /\bdatabase (?:table )?is locked\b/i.test(message);
+}

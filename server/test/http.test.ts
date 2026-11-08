@@ -19,8 +19,7 @@ it('starts the native HTTP entry with PORT and DB_PATH overrides, serves writes,
   child.stderr.on('data', data => { output += String(data); });
   try {
     await new Promise<void>((ready, reject) => {
-      // 子进程要走完 TS 类型剥离和模块加载，在负载高的机器（并行跑整个 workspace 时）
-      // 5 秒不够，会偶发超时。这里给足余量，真正的失败仍然会被 exit 事件立即捕获。
+      // 该计时器限制服务就绪等待；外层用例也设为 30 秒，提前退出仍会立即报错。
       const timeout = setTimeout(() => reject(new Error(`启动超时：${output}`)), 30_000);
       child.once('exit', code => { clearTimeout(timeout); reject(new Error(`服务提前退出 ${code}：${output}`)); });
       child.once('error', error => { clearTimeout(timeout); reject(error); });
@@ -51,4 +50,4 @@ it('starts the native HTTP entry with PORT and DB_PATH overrides, serves writes,
     }
   }
   expect(child.exitCode).toBe(0);
-});
+}, 30_000);

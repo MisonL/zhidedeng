@@ -8,7 +8,7 @@ import { AttemptLimiter, burnPasswordCheck, clearedSessionCookie, createSession,
 import { authorizeAdmin, adminSlug, createModel, createVendor, deleteModel, importResponse, updateModel } from './catalog.ts';
 import type { Store } from './database.ts';
 import { Service } from './service.ts';
-import { ApiError } from './errors.ts';
+import { ApiError, isDatabaseBusyError } from './errors.ts';
 import { listPosts, reviewPost, setAccountDisabled, setCommentHidden } from './moderation.ts';
 import { autoApproveEnabled, enqueueBatch, enqueueSubmission, listSubmissions, reviewSubmission, setAutoApprove, submissionBatchReviewSchema, submissionBatchSchema, submissionQuerySchema, submissionReviewSchema, submissionState } from './submissions.ts';
 
@@ -82,6 +82,7 @@ export function buildApp(store: Store, now: () => Date, options: AppOptions = {}
   const app = new Hono<{ Bindings: Bindings }>();
   app.notFound(c => c.json({ error: { code: 'NOT_FOUND', message: '资源不存在' } }, 404));
   app.onError((error, c) => {
+    if (isDatabaseBusyError(error)) return c.json({ error: { code: 'BUSY', message: '数据库繁忙，请重试' } }, 503);
     if (error instanceof ApiError) return c.json({ error: { code: error.code, message: error.message, ...error.details } }, error.status);
     if (error instanceof ZodError || error instanceof SyntaxError) return c.json({ error: { code: 'INVALID_INPUT', message: '请求参数或 JSON 正文无效' } }, 400);
     console.error(error);
@@ -186,6 +187,7 @@ export function buildApp(store: Store, now: () => Date, options: AppOptions = {}
       try {
         results.push({ id, submission: reviewSubmission(store, now(), id, decision) });
       } catch (error) {
+        if (isDatabaseBusyError(error)) throw error;
         if (error instanceof ApiError) results.push({ id, error: { status: error.status, code: error.code, message: error.message, ...error.details } });
         else {
           console.error(error);

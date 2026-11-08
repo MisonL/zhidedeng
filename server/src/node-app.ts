@@ -18,11 +18,13 @@ export function openDatabase(path: string) {
   try {
     db.exec(`
       PRAGMA foreign_keys = ON;
-      PRAGMA journal_mode = WAL;
       PRAGMA busy_timeout = 5000;
-      ${SCHEMA}
+      PRAGMA journal_mode = WAL;
     `);
-    ensureSubmissionColumns(openStore(db));
+    const hasSubmissions = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'submissions'").get() !== undefined;
+    if (hasSubmissions) ensureSubmissionColumns(openStore(db));
+    db.exec(SCHEMA);
+    if (!hasSubmissions) ensureSubmissionColumns(openStore(db));
   } catch (error) {
     db.close();
     throw error;

@@ -17,6 +17,21 @@ describe('database initialization and persistence', () => {
     expect(defaultDbPath).toBe(resolve('data/app.db'));
   });
 
+  it('creates the submission dedupe index and uses it for the dedupe query', () => {
+    const server = createApp({ dbPath: ':memory:' });
+    try {
+      const columns = server.db.prepare('PRAGMA index_info(submissions_dedupe)').all().map(column => column.name);
+      expect(columns).toEqual(['kind', 'originKey', 'action', 'batchId', 'payloadHash', 'status', 'createdAt']);
+      const plan = server.db.prepare(`EXPLAIN QUERY PLAN
+        SELECT * FROM submissions WHERE kind = ? AND originKey = ? AND action = ? AND payloadHash = ?
+          AND batchId IS ? AND status = 'pending' ORDER BY createdAt DESC, rowid DESC LIMIT 1`)
+        .all('post', 'origin', 'upsert', 'payload', 'batch');
+      expect(plan.some(row => String(row.detail).includes('submissions_dedupe'))).toBe(true);
+    } finally {
+      server.db.close();
+    }
+  });
+
   it('creates parent directories, reopens idempotently and preserves writes', async () => {
     const directory = mkdtempSync(join(tmpdir(), 'zhidedeng-db-'));
     const dbPath = join(directory, 'nested', 'app.db');

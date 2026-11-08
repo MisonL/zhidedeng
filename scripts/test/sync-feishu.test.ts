@@ -192,6 +192,18 @@ describe('planBatch', () => {
     expect(plan.removals.some(item => item.originKey === 'api.example.com')).toBe(false);
   });
 
+  it('同 hostname 的遗留实体按 hostname 统计更新，按 slug 分别生成下架', () => {
+    const repeated: AdminSubmissionStateResponse = { stations: [
+      ...online.stations,
+      { slug: 'sub-api-second', submissionId: 'online-a', originKey: 'api.example.com', url: 'https://api.example.com/', name: '另一个实体' },
+      { slug: 'sub-www-gone', submissionId: 'online-gone', originKey: 'www.gone.example.com', url: 'https://www.gone.example.com/', name: '遗留 www 实体' },
+    ] };
+    const plan = planBatch(buildBatch(fixtureRecords(), MODELS).payload, repeated);
+    expect(plan.added).toBe(1);
+    expect(plan.updated).toBe(1);
+    expect(plan.removals.map(item => item.payload.slug)).toEqual(['sub-gone-original', 'sub-www-gone']);
+  });
+
   it('规划只比较快照，空表保护由命令行执行；无状态无法区分新增和更新', () => {
     expect(planBatch(buildBatch([], MODELS).payload, online).removals).toHaveLength(2);
     const partial = planBatch(buildBatch(fixtureRecords(), MODELS).payload, null);
@@ -223,6 +235,7 @@ describe('命令行', () => {
   let online: unknown;
   let stateStatus: number;
   let failedOrigin: string | null;
+  let failedRemovalSlug: string | null;
 
   beforeEach(async () => {
     dir = mkdtempSync(join(tmpdir(), 'sync-feishu-'));
@@ -232,6 +245,7 @@ describe('命令行', () => {
     requests = [];
     stateStatus = 200;
     failedOrigin = null;
+    failedRemovalSlug = null;
     online = { stations: [
       { slug: 'actual-collision-slug', submissionId: 'online-a', originKey: 'API.EXAMPLE.COM', url: 'https://api.example.com/', name: '已有站点' },
       { slug: 'sub-gone-original', submissionId: 'online-gone', originKey: 'gone.example.com', url: 'https://gone.example.com/', name: '已撤销站点' },
@@ -286,7 +300,8 @@ process.stdout.write(fs.readFileSync(${JSON.stringify(dir)} + '/' + fixture + '.
           }
           res.end(JSON.stringify({ batchId: body.batchId ?? 'fake-batch', results: body.items.map((item, index) => ({
             kind: item.kind, originKey: item.originKey,
-            ...(item.originKey === failedOrigin ? { error: { code: 'INVALID_INPUT', message: '未知模型：missing-model' } }
+            ...(item.originKey === failedOrigin || (item.action === 'remove' && (item.payload as { slug: string }).slug === failedRemovalSlug)
+              ? { error: { code: 'INVALID_INPUT', message: '未知模型：missing-model' } }
               : { id: `queued-${index}`, status: 'pending', deduplicated: false, autoApproved: false }),
           })) }));
         } else {
@@ -480,6 +495,21 @@ process.stdout.write(fs.readFileSync(${JSON.stringify(dir)} + '/' + fixture + '.
     expect(output).toContain('新增 0，更新 1，下架 1，评价 2，失败 1');
     expect(output).toContain('[失败] station other.example：INVALID_INPUT 未知模型：missing-model');
     expect(output).not.toContain(SYNC_TOKEN);
+  });
+
+  it('同 hostname 的两个下架只有一个入队成功时，成功统计按条目对账', async () => {
+    const gone = { submissionId: 'online-gone', originKey: 'gone.example.com', url: 'https://gone.example.com/', name: '已撤销站点' };
+    online = { stations: [
+      { slug: 'actual-collision-slug', submissionId: 'online-a', originKey: 'api.example.com', url: 'https://api.example.com/', name: '已有站点' },
+      { ...gone, slug: 'sub-gone-original' },
+      { ...gone, slug: 'sub-gone-second' },
+    ] };
+    failedRemovalSlug = 'sub-gone-second';
+    const { code, output } = await run([]);
+    expect(code).toBe(1);
+    expect(imports[0].body.items.filter(item => item.action === 'remove').map(item => (item.payload as { slug: string }).slug))
+      .toEqual(['sub-gone-original', 'sub-gone-second']);
+    expect(output).toContain('新增 1，更新 1，下架 1，评价 2，失败 1');
   });
 
   it('线上状态读取失败时中止，不把失败当空状态继续提交', async () => {
