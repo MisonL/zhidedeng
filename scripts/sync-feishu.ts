@@ -304,8 +304,8 @@ export function planBatch(batch: AdminBatchSubmitRequest, state: AdminSubmission
   })) ?? [];
   return {
     payload: { ...batch, items: [...batch.items, ...removals] }, removals,
-    added: state === null ? null : upserts.filter(item => !current.has(feishuHostnameKey(item.originKey))).length,
-    updated: state === null ? null : upserts.filter(item => current.has(feishuHostnameKey(item.originKey))).length,
+    added: state === null ? null : [...incoming].filter(hostname => !current.has(hostname)).length,
+    updated: state === null ? null : [...incoming].filter(hostname => current.has(hostname)).length,
   };
 }
 
@@ -443,13 +443,15 @@ async function main(dryRun: boolean, allowSkipped: boolean, config: Config) {
     result.results.push(...chunk.results);
   }
   const failed = result.results.filter(item => item.error);
-  const accepted = new Set(result.results.filter(item => !item.error).map(item => `${item.kind}:${item.originKey}`));
+  // 结果已按请求顺序校验；同 hostname 的遗留实体各有下架条目，按位置逐条对账。
+  const accepted = payload.items.filter((_item, index) => !result.results[index].error);
   const current = new Set(state?.stations.map(station => feishuHostnameKey(station.originKey)));
-  const stations = batch.items.filter(item => item.kind === 'station' && accepted.has(`station:${item.originKey}`));
-  const newCount = stations.filter(item => !current.has(feishuHostnameKey(item.originKey))).length;
-  const updateCount = stations.length - newCount;
-  const removeCount = removals.filter(item => accepted.has(`station:${item.originKey}`)).length;
-  const reviewCount = batch.items.filter(item => item.kind === 'post' && accepted.has(`post:${item.originKey}`)).length;
+  const stations = new Set(accepted.filter(item => item.kind === 'station' && (item.action ?? 'upsert') === 'upsert')
+    .map(item => feishuHostnameKey(item.originKey)));
+  const newCount = [...stations].filter(hostname => !current.has(hostname)).length;
+  const updateCount = stations.size - newCount;
+  const removeCount = accepted.filter(item => item.kind === 'station' && item.action === 'remove').length;
+  const reviewCount = accepted.filter(item => item.kind === 'post').length;
   console.log(`批次 ${result.batchId} 入队完成：新增 ${newCount}，更新 ${updateCount}，下架 ${removeCount}，评价 ${reviewCount}，失败 ${failed.length}`);
   if (failed.length > 0) throw new Error(`批次 ${result.batchId} 有 ${failed.length} 条入队失败`);
 }

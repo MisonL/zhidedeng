@@ -63,7 +63,15 @@ function submissionFingerprint(store: Store) {
 
 function importCatalog(store: Store, input: CatalogImportRequest): CatalogImportResponse {
   return store.transaction(() => {
-    const offers = input.stations.flatMap(({ slug, offers: stationOffers }) => stationOffers.map(offer => ({ stationSlug: slug, ...offer })));
+    const stations = input.stations.filter(station => {
+      const existing = store.get('station', station.slug);
+      if (existing && existing.source !== 'submission' && existing.source !== 'demo') {
+        console.warn(`跳过导入站点 ${station.slug}：已有来源 ${existing.source}`);
+        return false;
+      }
+      return true;
+    });
+    const offers = stations.flatMap(({ slug, offers: stationOffers }) => stationOffers.map(offer => ({ stationSlug: slug, ...offer })));
 
     const models = new Set(store.all('model').map(model => model.slug));
     const unknown = [...new Set(offers.map(offer => offer.modelSlug).filter(slug => !models.has(slug)))];
@@ -87,8 +95,8 @@ function importCatalog(store: Store, input: CatalogImportRequest): CatalogImport
     }
     store.db.prepare(`DELETE FROM offers WHERE stationSlug IN ${SUBMITTED_STATIONS}`).run();
     store.db.prepare(`DELETE FROM entities WHERE ${IS_SUBMISSION}`).run();
-    for (const { offers: _offers, ...station } of input.stations) {
-      // 通用导入处理全部输入 slug，原来源的报价也要替换，避免残留或撞唯一约束。
+    for (const { offers: _offers, ...station } of stations) {
+      // 允许导入的 slug 要先替换原报价，避免残留或撞唯一约束。
       store.db.prepare('DELETE FROM offers WHERE stationSlug = ?').run(station.slug);
       store.put('station', station.slug, { ...station, uptime: null, firstTokenLatencyMs: null, foundedAt: null, status: null, source: 'submission' });
     }
@@ -99,7 +107,7 @@ function importCatalog(store: Store, input: CatalogImportRequest): CatalogImport
       const id = `feishu-${recordId}`;
       store.put('post', id, { ...post, id, kind: 'review', authorHandle: 'feishu-submission', authorNickname: authorName, modelSlug: null, cover: null, source: 'submission', status: 'approved' });
     }
-    return { changed: unknown.length > 0 || submissionFingerprint(store) !== before, stations: input.stations.length, offers: offers.length, posts: input.posts.length, createdModels: unknown.sort() };
+    return { changed: unknown.length > 0 || submissionFingerprint(store) !== before, stations: stations.length, offers: offers.length, posts: input.posts.length, createdModels: unknown.sort() };
   });
 }
 

@@ -63,6 +63,7 @@ export const SCHEMA = `
     originKey TEXT NOT NULL,
     batchId TEXT,
     action TEXT NOT NULL DEFAULT 'upsert' CHECK(action IN ('upsert','remove')),
+    autoApproved INTEGER NOT NULL DEFAULT 0 CHECK(autoApproved IN (0,1)),
     payload TEXT NOT NULL CHECK(json_valid(payload)),
     payloadHash TEXT NOT NULL,
     actorHandle TEXT,
@@ -75,6 +76,7 @@ export const SCHEMA = `
   CREATE INDEX IF NOT EXISTS submissions_status ON submissions(status, kind, createdAt);
   CREATE INDEX IF NOT EXISTS submissions_origin ON submissions(kind, originKey, status);
   CREATE INDEX IF NOT EXISTS submissions_actor ON submissions(actorHandle, createdAt);
+  CREATE INDEX IF NOT EXISTS submissions_dedupe ON submissions(kind, originKey, action, batchId, payloadHash, status, createdAt);
   -- 管理端的运行时开关，管理员随时改，所以存库不存启动配置。
   CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
@@ -119,7 +121,7 @@ export class Store {
   }
 }
 
-function ensureColumn(db: SqlDatabase, column: 'batchId' | 'action', definition: string) {
+function ensureColumn(db: SqlDatabase, column: 'batchId' | 'action' | 'autoApproved', definition: string) {
   const exists = db.prepare('PRAGMA table_info(submissions)').all().some(row => row.name === column);
   if (!exists) db.prepare(`ALTER TABLE submissions ADD COLUMN ${column} ${definition}`).run();
 }
@@ -129,6 +131,8 @@ export function ensureSubmissionColumns(store: Store) {
   store.transaction(() => {
     ensureColumn(store.db, 'batchId', 'TEXT');
     ensureColumn(store.db, 'action', "TEXT NOT NULL DEFAULT 'upsert' CHECK(action IN ('upsert','remove'))");
+    ensureColumn(store.db, 'autoApproved', 'INTEGER NOT NULL DEFAULT 0 CHECK(autoApproved IN (0,1))');
     store.db.prepare('CREATE INDEX IF NOT EXISTS submissions_batch ON submissions(batchId, status)').run();
+    store.db.prepare('CREATE INDEX IF NOT EXISTS submissions_dedupe ON submissions(kind, originKey, action, batchId, payloadHash, status, createdAt)').run();
   });
 }

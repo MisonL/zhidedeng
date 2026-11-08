@@ -28,8 +28,8 @@ const importCatalog = (payload: unknown) => server.app.request('/api/admin/impor
   method: 'POST', headers: admin, body: JSON.stringify(payload),
 });
 
-describe('通用全量导入在飞书接入队列后处理全部输入站点', () => {
-  const enqueueAndApprove = async (channel: 'agent' | 'feishu' = 'agent') => {
+describe('通用全量导入保留受保护来源，更新允许导入的站点', () => {
+  const enqueueAndApprove = async (channel: 'agent' | 'feishu' | 'web' = 'agent') => {
     const store = openStore(server.db);
     const { submission } = enqueueSubmission(store, {
       kind: 'station', channel, originKey: 'shared.example.com', payload: stationPayload,
@@ -39,16 +39,23 @@ describe('通用全量导入在飞书接入队列后处理全部输入站点', (
     return store;
   };
 
-  it('处理 agent 占用的输入 slug，完整替换内容和报价，不再返回 skipped', async () => {
-    const store = await enqueueAndApprove('agent');
-    const response = await importCatalog(feishuImport());
+  it.each(['agent', 'web'] as const)('保留已有 %s 来源站点及报价', async channel => {
+    const store = await enqueueAndApprove(channel);
+    const before = store.get('station', 'sub-shared-example-com');
+    const input = {
+      ...feishuImport(), allowNewModels: true,
+      stations: [{ ...feishuImport().stations[0], offers: [{ modelSlug: 'protected-only-model', rate: 0.9 }] }],
+    };
+    const response = await importCatalog(input);
     expect(response.status).toBe(200);
     const result = await response.json() as CatalogImportResponse;
     expect(result).not.toHaveProperty('skipped');
-    expect(result.stations).toBe(1);
-    expect(store.get('station', 'sub-shared-example-com')).toMatchObject({ name: '飞书版本', source: 'submission' });
+    expect(result).toMatchObject({ stations: 0, offers: 0, createdModels: [] });
+    expect(store.get('station', 'sub-shared-example-com')).toMatchObject({ name: '队列站点', description: '经队列物化的站点', source: channel === 'agent' ? 'agent' : 'user' });
+    expect(store.get('station', 'sub-shared-example-com')).toEqual(before);
     expect(server.db.prepare('SELECT modelSlug, rate FROM offers WHERE stationSlug = ? ORDER BY modelSlug').all('sub-shared-example-com'))
-      .toEqual([{ modelSlug: 'gpt-4-1', rate: 0.9 }, { modelSlug: 'o3', rate: 1.2 }]);
+      .toEqual([{ modelSlug: 'gpt-4-1', rate: 0.5 }]);
+    expect(store.get('model', 'protected-only-model')).toBeUndefined();
   });
 
   it('feishu 渠道物化的站点仍被本接口接管，不算占用', async () => {
@@ -57,10 +64,12 @@ describe('通用全量导入在飞书接入队列后处理全部输入站点', (
     const result = await response.json() as CatalogImportResponse;
     expect(result).not.toHaveProperty('skipped');
     expect(result.stations).toBe(1);
-    expect(openStore(server.db).get('station', 'sub-shared-example-com')!.name).toBe('飞书版本');
+    expect(openStore(server.db).get('station', 'sub-shared-example-com')).toMatchObject({ name: '飞书版本', description: '来自飞书表格', source: 'submission' });
+    expect(server.db.prepare('SELECT modelSlug, rate FROM offers WHERE stationSlug = ? ORDER BY modelSlug').all('sub-shared-example-com'))
+      .toEqual([{ modelSlug: 'gpt-4-1', rate: 0.9 }, { modelSlug: 'o3', rate: 1.2 }]);
   });
 
-  it('输入中的站点全部导入，同批次不会再按原来源跳过', async () => {
+  it('跳过受保护站点时仍正常创建输入中的新 slug', async () => {
     await enqueueAndApprove('agent');
     const payload: CatalogImportRequest = {
       stations: [
@@ -72,9 +81,10 @@ describe('通用全量导入在飞书接入队列后处理全部输入站点', (
     const response = await importCatalog(payload);
     expect(response.status).toBe(200);
     const result = await response.json() as CatalogImportResponse;
-    expect(result.stations).toBe(2);
+    expect(result.stations).toBe(1);
+    expect(result.offers).toBe(1);
     expect(result).not.toHaveProperty('skipped');
-    expect(openStore(server.db).get('station', 'sub-shared-example-com')!.name).toBe('飞书版本');
+    expect(openStore(server.db).get('station', 'sub-shared-example-com')).toMatchObject({ name: '队列站点', source: 'agent' });
     expect(openStore(server.db).get('station', 'sub-other-example-com')!.name).toBe('另一站');
   });
 });

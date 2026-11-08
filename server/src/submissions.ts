@@ -92,7 +92,7 @@ function submissionOriginKey(store: Store, input: {
   if (input.action === 'remove') {
     const { slug } = parse(removalSchema, input.payload);
     const station = store.get('station', slug);
-    // 不存在的目标只用规范化的客户端 hostname 检查冲突，审核时明确返回 NOT_FOUND。
+    // 不存在的目标只用规范化的客户端 hostname 检查冲突，审核时按幂等下架处理。
     const url = station ? parse(httpUrl, station.url) : parse(httpUrl, `https://${input.originKey}`);
     return new URL(url).hostname;
   }
@@ -105,7 +105,20 @@ function assertBatchChannel(store: Store, batchId: string | null | undefined, ch
   if (conflict) throw new ApiError(409, 'BATCH_CHANNEL_MISMATCH', `批次 ${batchId} 属于 ${String(conflict.channel)} 渠道，不能混入 ${channel} 投稿`);
 }
 
+function assertBatchOpen(store: Store, batchId: string | null | undefined): void {
+  if (batchId === null || batchId === undefined) return;
+  // 还有待审条目，说明这一批还没审完，继续追加是正常的重试/续块。
+  if (store.db.prepare("SELECT 1 FROM submissions WHERE batchId = ? AND status = 'pending' LIMIT 1").get(batchId)) return;
+  // 自动通过的分块会把每条立即置为 approved，此时批次其实还在进行中；
+  // 若把它们当成「已审核」，开启自动通过后超过一块的同步就必然失败。
+  const reviewed = store.db.prepare("SELECT 1 FROM submissions WHERE batchId = ? AND NOT (status = 'approved' AND autoApproved = 1) LIMIT 1")
+    .get(batchId);
+  if (reviewed) throw new ApiError(409, 'BATCH_ALREADY_REVIEWED', '批次已审核完成，不能追加新条目');
+}
+
 const AUTO_APPROVE_KEY = 'submissions.autoApprove';
+/** 给管理员展示的审核原因；批次状态由 autoApproved 元数据判断。 */
+const AUTO_APPROVE_REASON = '自动通过';
 
 /** 自动通过开关。管理员可随时切换，默认关闭（所有投稿都要人工审）。 */
 export function autoApproveEnabled(store: Store): boolean {
@@ -150,6 +163,7 @@ export function enqueueSubmission(store: Store, input: {
   // 查重、插入和（可选）自动物化一起锁定，避免并发下重复入队或半途失败留下脏记录。
   return store.transaction(() => {
     assertBatchChannel(store, validated.batchId, validated.channel);
+    assertBatchOpen(store, validated.batchId);
     const originKey = submissionOriginKey(store, { ...validated, payload: parsedPayload });
     const auto = autoApproveEnabled(store) && validated.action === 'upsert';
     if (auto || validated.action === 'remove') validatePayload(store, validated.kind, parsedPayload, validated.action);
@@ -171,9 +185,9 @@ export function enqueueSubmission(store: Store, input: {
       const submission = submissionRecord(existing);
       if (auto && submission.status === 'pending') {
         materialize(store, submission, reviewedAt);
-        store.db.prepare("UPDATE submissions SET status = 'approved', reason = '自动通过', reviewedAt = ? WHERE id = ?").run(reviewedAt, submission.id);
+        store.db.prepare("UPDATE submissions SET status = 'approved', autoApproved = 1, reason = ?, reviewedAt = ? WHERE id = ?").run(AUTO_APPROVE_REASON, reviewedAt, submission.id);
         supersedePending(store, submission, reviewedAt);
-        return { submission: { ...submission, status: 'approved', reason: '自动通过', reviewedAt }, deduplicated: true, autoApproved: true };
+        return { submission: { ...submission, status: 'approved', reason: AUTO_APPROVE_REASON, reviewedAt }, deduplicated: true, autoApproved: true };
       }
       return { submission, deduplicated: true, autoApproved: false };
     }
@@ -181,13 +195,13 @@ export function enqueueSubmission(store: Store, input: {
       id: randomUUID(), kind: validated.kind, channel: validated.channel, originKey,
       batchId: validated.batchId ?? null, action: validated.action,
       payload: parsedPayload, actorHandle: validated.actorHandle ?? null,
-      status: auto ? 'approved' : 'pending', reason: auto ? '自动通过' : null,
+      status: auto ? 'approved' : 'pending', reason: auto ? AUTO_APPROVE_REASON : null,
       reviewedAt: auto ? reviewedAt : null, createdAt: reviewedAt,
     };
     // 物化失败时整条记录随事务回滚，不会留下 approved 但没上站的幽灵。
     if (auto) materialize(store, submission, reviewedAt);
-    store.db.prepare('INSERT INTO submissions (id, kind, channel, originKey, batchId, action, payload, payloadHash, actorHandle, ip, status, reason, reviewedAt, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
-      .run(submission.id, submission.kind, submission.channel, submission.originKey, submission.batchId, submission.action, serialized, payloadHash,
+    store.db.prepare('INSERT INTO submissions (id, kind, channel, originKey, batchId, action, autoApproved, payload, payloadHash, actorHandle, ip, status, reason, reviewedAt, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+      .run(submission.id, submission.kind, submission.channel, submission.originKey, submission.batchId, submission.action, auto ? 1 : 0, serialized, payloadHash,
         submission.actorHandle, validated.ip, submission.status, submission.reason, submission.reviewedAt, submission.createdAt);
     if (auto) supersedePending(store, submission, reviewedAt);
     return { submission, deduplicated: false, autoApproved: auto };
@@ -198,16 +212,32 @@ export function enqueueSubmission(store: Store, input: {
 export function enqueueBatch(store: Store, input: AdminBatchSubmitRequest & { ip: string; now: Date }): AdminBatchSubmitResponse {
   const batch = parse(submissionBatchSchema, { channel: input.channel, batchId: input.batchId, items: input.items });
   const batchId = batch.batchId ?? randomUUID();
-  if (batch.items.length > 0) assertBatchChannel(store, batchId, batch.channel);
-  const stationOrigins = new Map<string, number>();
+  if (batch.items.length > 0) {
+    assertBatchChannel(store, batchId, batch.channel);
+    assertBatchOpen(store, batchId);
+  }
+  const stationOrigins = new Map<string, { index: number; action: SubmissionRecord['action']; slug?: string; removable: boolean }[]>();
   for (const [index, item] of batch.items.entries()) {
     if (item.kind !== 'station') continue;
     const hostname = submissionOriginKey(store, item);
     // 飞书会把 www 与裸域名物化到同一站点，冲突检测必须沿用这个分组。
     const key = batch.channel === 'feishu' ? feishuHostnameKey(hostname) : hostname;
-    const previous = stationOrigins.get(key);
-    if (previous !== undefined) throw new ApiError(400, 'INVALID_INPUT', `第 ${previous} 条与第 ${index + 1} 条站点 hostname 冲突：${key}`);
-    stationOrigins.set(key, index + 1);
+    const action = item.action ?? 'upsert';
+    const removal = action === 'remove' ? parse(removalSchema, item.payload) : undefined;
+    const slug = removal?.slug;
+    const target = slug ? store.get('station', slug) : undefined;
+    // 重试时部分实体可能已经下架；只沿用属于该 hostname 的真实 approved 版本。
+    const version = removal && !target
+      ? store.db.prepare("SELECT originKey FROM submissions WHERE id = ? AND kind = 'station' AND action = 'upsert' AND status = 'approved'").get(removal.submissionId)
+      : undefined;
+    const versionKey = version ? (batch.channel === 'feishu' ? feishuHostnameKey(version.originKey as string) : version.originKey) : undefined;
+    const intent = { index: index + 1, action, slug, removable: target?.source === 'submission' || versionKey === key };
+    const previous = stationOrigins.get(key) ?? [];
+    const conflict = previous.find(existing => !(existing.action === 'remove' && action === 'remove'
+      && existing.removable && intent.removable && existing.slug !== slug));
+    if (conflict) throw new ApiError(400, 'INVALID_INPUT', `第 ${conflict.index} 条与第 ${index + 1} 条站点 hostname 冲突：${key}`);
+    previous.push(intent);
+    stationOrigins.set(key, previous);
   }
   const results: AdminBatchSubmitResponse['results'] = batch.items.map(item => {
     try {
@@ -217,10 +247,9 @@ export function enqueueBatch(store: Store, input: AdminBatchSubmitRequest & { ip
       return { originKey: item.originKey, kind: item.kind, id: submission.id, status: submission.status, deduplicated, autoApproved };
     } catch (error) {
       // 另一个写入方可能在预检后认领新 batchId，事务内发现时仍返回整批 409。
-      if (error instanceof ApiError && error.code === 'BATCH_CHANNEL_MISMATCH') throw error;
+      if (error instanceof ApiError && (error.code === 'BATCH_CHANNEL_MISMATCH' || error.code === 'BATCH_ALREADY_REVIEWED')) throw error;
       if (error instanceof ApiError) return { originKey: item.originKey, kind: item.kind, error: { code: error.code, message: error.message } };
-      console.error(error);
-      return { originKey: item.originKey, kind: item.kind, error: { code: 'INTERNAL_ERROR', message: '服务暂时不可用' } };
+      throw error;
     }
   });
   return { batchId, results };
@@ -253,6 +282,13 @@ function hostnameOf(url: string | null): string | null {
 }
 
 /** 物化和版本查重沿用同一首次认领规则，只有飞书批次归并 www。 */
+/**
+ * 按 hostname 找站点。
+ * hostname 是从 url 派生的，没有独立索引，所以这里每次都会全表扫描并解析 JSON。
+ * 单条审核无所谓；批量审核 n 条、库里有 m 个站点时是 O(n·m)——实测 600 条 + 大量站点
+ * 时一个批次要十几秒。当前站点规模（几十个）下无感，若将来批量审核变慢，先从这里下手：
+ * 为 entities 增加 hostname 列并建索引，或让批次审核复用一个可增量的索引。
+ */
 function findStation(store: Store, submission: Pick<SubmissionRecord, 'channel' | 'batchId' | 'originKey'>, url: string): StationRecord | undefined {
   const hostname = hostnameOf(url);
   if (hostname === null) return undefined;
@@ -311,62 +347,63 @@ function validatePayload(store: Store, kind: SubmissionKind, payload: unknown, a
 }
 
 /** 下架只允许群友来源，报价和实体共用调用方的审核事务，不另开事务。 */
-export function removeStation(store: Store, slug: string, expectedSubmissionId: string): string {
+export function removeStation(store: Store, slug: string, expectedSubmissionId: string): string | null {
   const station = store.get('station', slug);
-  if (!station) throw new ApiError(404, 'NOT_FOUND', `站点 ${slug} 不存在`);
+  if (!station) return null;
   if (station.source !== 'submission') throw new ApiError(409, 'STATION_SOURCE_CONFLICT', '只能下架群友提交的站点');
   const originKey = new URL(parse(httpUrl, station.url)).hostname;
-  const current = store.db.prepare("SELECT id FROM submissions WHERE kind = 'station' AND status = 'approved' AND originKey = ? ORDER BY reviewedAt DESC, rowid DESC LIMIT 1").get(originKey);
+  const key = feishuHostnameKey(originKey);
+  const current = store.db.prepare("SELECT id, originKey FROM submissions WHERE kind = 'station' AND action = 'upsert' AND status = 'approved' ORDER BY reviewedAt DESC, rowid DESC")
+    .all().find(row => feishuHostnameKey(row.originKey as string) === key);
   if (current?.id !== expectedSubmissionId) throw new ApiError(409, 'STALE_REMOVAL', '该站点在读取后已被更新，请重新同步');
   store.db.prepare('DELETE FROM offers WHERE stationSlug = ?').run(slug);
   store.db.prepare("DELETE FROM entities WHERE kind = 'station' AND id = ?").run(slug);
   return slug;
 }
 
-/** 只列出有 approved 飞书记录的在线群友站点，并携带实际 hostname 对应的当前版本。 */
+/** 只列出有 approved 飞书 upsert 的 hostname 组，并返回组内全部在线群友站点。 */
 export function submissionState(store: Store): AdminSubmissionStateResponse {
-  const rows = store.db.prepare("SELECT * FROM submissions WHERE kind = 'station' AND channel = 'feishu' AND status = 'approved' ORDER BY reviewedAt DESC, rowid DESC").all();
-  const byHost = new Map<string, StationRecord>();
-  const byFeishuHost = new Map<string, StationRecord>();
-  // 与物化时的首次认领一致，不能把同网址的最后一个旧实体误当成审核目标。
-  for (const station of store.all('station')) {
-    const hostname = hostnameOf(station.url);
-    if (hostname === null) continue;
-    if (!byHost.has(hostname)) byHost.set(hostname, station);
-    const key = feishuHostnameKey(hostname);
-    if (!byFeishuHost.has(key)) byFeishuHost.set(key, station);
-  }
-  const seenOrigins = new Set<string>();
-  const seenSlugs = new Set<string>();
-  const stations: AdminSubmissionStateResponse['stations'] = [];
-  for (const row of rows) {
-    const origin = feishuHostnameKey(row.originKey as string);
-    if (seenOrigins.has(origin)) continue;
-    seenOrigins.add(origin);
+  const feishuRows = store.db.prepare("SELECT * FROM submissions WHERE kind = 'station' AND channel = 'feishu' AND action = 'upsert' AND status = 'approved' ORDER BY reviewedAt DESC, rowid DESC").all();
+  const feishuHosts = new Set<string>();
+  for (const row of feishuRows) {
     const submission = submissionRecord(row);
-    if (submission.action === 'remove') continue;
+    const origin = feishuHostnameKey(submission.originKey);
     const payload = parse(stationSchema, submission.payload);
     const hostname = hostnameOf(payload.url);
-    if (hostname === null || origin !== feishuHostnameKey(hostname)) continue;
-    const station = submission.batchId === null ? byHost.get(hostname) : byFeishuHost.get(origin);
-    if (!station || station.source !== 'submission' || seenSlugs.has(station.slug)) continue;
+    if (hostname !== null && origin === feishuHostnameKey(hostname)) feishuHosts.add(origin);
+  }
+
+  // 移除记录不改变同组其他遗留实体的版本；渠道更新仍会推进组的 upsert 版本。
+  const approvedUpserts = store.db.prepare("SELECT id, originKey FROM submissions WHERE kind = 'station' AND action = 'upsert' AND status = 'approved' ORDER BY reviewedAt DESC, rowid DESC").all();
+  const currentByHost = new Map<string, string>();
+  for (const row of approvedUpserts) {
+    const key = feishuHostnameKey(row.originKey as string);
+    if (!currentByHost.has(key)) currentByHost.set(key, row.id as string);
+  }
+
+  const stations: AdminSubmissionStateResponse['stations'] = [];
+  for (const station of store.all('station')) {
+    if (station.source !== 'submission') continue;
     const originKey = hostnameOf(station.url);
     if (originKey === null) continue;
-    // 与 removeStation 使用同一 hostname 和排序，其他渠道的更新也会改变版本。
-    const current = store.db.prepare("SELECT id, action FROM submissions WHERE kind = 'station' AND status = 'approved' AND originKey = ? ORDER BY reviewedAt DESC, rowid DESC LIMIT 1").get(originKey);
-    if (!current || current.action !== 'upsert') continue;
-    seenSlugs.add(station.slug);
-    stations.push({ slug: station.slug, submissionId: current.id as string, originKey, url: station.url, name: station.name });
+    const key = feishuHostnameKey(originKey);
+    const submissionId = currentByHost.get(key);
+    if (!feishuHosts.has(key) || !submissionId) continue;
+    stations.push({ slug: station.slug, submissionId, originKey, url: station.url, name: station.name });
   }
-  return { stations: stations.sort((a, b) => a.originKey.localeCompare(b.originKey)) };
+  return { stations: stations.sort((a, b) => a.originKey.localeCompare(b.originKey) || a.slug.localeCompare(b.slug)) };
 }
 
 /** 把一条投稿写进 entities。不自己开事务，由调用方决定边界。 */
-function materialize(store: Store, submission: SubmissionRecord, reviewedAt: string): void {
+function materialize(store: Store, submission: SubmissionRecord, reviewedAt: string): string | undefined {
   if (submission.action === 'remove') {
     if (submission.kind !== 'station') throw new ApiError(400, 'INVALID_INPUT', '只有站点支持下架');
     const { slug, submissionId } = parse(removalSchema, submission.payload);
-    removeStation(store, slug, submissionId);
+    if (removeStation(store, slug, submissionId) === null) {
+      const reason = '站点已不存在，视为已下架';
+      console.info(`站点 ${slug} ${reason}`);
+      return reason;
+    }
   } else if (submission.kind === 'model') {
     const payload = parse(modelSchema, submission.payload);
     if (!store.get('vendor', payload.vendor)) throw new ApiError(400, 'INVALID_INPUT', `厂商 ${payload.vendor} 不存在，请先新增厂商`);
@@ -411,7 +448,8 @@ function materialize(store: Store, submission: SubmissionRecord, reviewedAt: str
 
 /** 新版本上站后，同 key 的其他待审记录没有再审的意义。 */
 function supersedePending(store: Store, submission: SubmissionRecord, reviewedAt: string): void {
-  store.db.prepare("UPDATE submissions SET status = 'superseded', reviewedAt = ? WHERE kind = ? AND originKey = ? AND status = 'pending' AND id <> ?")
+  const actionFilter = submission.action === 'remove' ? "AND action = 'upsert'" : '';
+  store.db.prepare(`UPDATE submissions SET status = 'superseded', reviewedAt = ? WHERE kind = ? AND originKey = ? AND status = 'pending' AND id <> ? ${actionFilter}`)
     .run(reviewedAt, submission.kind, submission.originKey, submission.id);
   if (submission.kind !== 'station') return;
   const key = feishuHostnameKey(submission.originKey);
@@ -427,7 +465,7 @@ function supersedePending(store: Store, submission: SubmissionRecord, reviewedAt
     if (!target || groupedTarget?.slug !== target.slug) return;
   } else if (submission.channel !== 'feishu' || submission.batchId === null) return;
   for (const alias of aliases) {
-    store.db.prepare("UPDATE submissions SET status = 'superseded', reviewedAt = ? WHERE kind = 'station' AND channel = 'feishu' AND batchId IS NOT NULL AND originKey = ? AND status = 'pending' AND id <> ?")
+    store.db.prepare(`UPDATE submissions SET status = 'superseded', reviewedAt = ? WHERE kind = 'station' AND channel = 'feishu' AND batchId IS NOT NULL AND originKey = ? AND status = 'pending' AND id <> ? ${actionFilter}`)
       .run(reviewedAt, alias, submission.id);
   }
 }
@@ -444,14 +482,18 @@ export function reviewSubmission(store: Store, now: Date, id: string, decision: 
     const submission = submissionRecord(row);
     if (submission.status !== 'pending') throw new ApiError(409, 'ALREADY_REVIEWED', '投稿已审核或被新版本替代');
 
+    let resolvedReason = reason ?? null;
+    let materializationReason: string | undefined;
     if (status === 'approved') {
       // 历史 pending 也采用 URL 身份，避免审核后仍用旧 key 绕过下架版本校验。
       if (submission.kind === 'station' && submission.action === 'upsert') submission.originKey = submissionOriginKey(store, submission);
-      materialize(store, submission, reviewedAt);
+      materializationReason = materialize(store, submission, reviewedAt);
+      resolvedReason = materializationReason ?? resolvedReason;
     }
 
-    store.db.prepare('UPDATE submissions SET status = ?, originKey = ?, reason = ?, reviewedAt = ? WHERE id = ?').run(status, submission.originKey, reason ?? null, reviewedAt, id);
-    if (status === 'approved') supersedePending(store, submission, reviewedAt);
-    return { ...submission, status, reason: reason ?? null, reviewedAt };
+    store.db.prepare('UPDATE submissions SET status = ?, autoApproved = 0, originKey = ?, reason = ?, reviewedAt = ? WHERE id = ?').run(status, submission.originKey, resolvedReason, reviewedAt, id);
+    // 已不存在的目标没有产生新版本，不能借清理旧下架请求替代新的待审投稿。
+    if (status === 'approved' && materializationReason === undefined) supersedePending(store, submission, reviewedAt);
+    return { ...submission, status, reason: resolvedReason, reviewedAt };
   });
 }
