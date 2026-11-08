@@ -10,6 +10,7 @@ import { Avatar } from '../components/visuals';
 import { loginPath } from '../format';
 import { usePaged } from '../hooks';
 import { useHere, useMe } from '../state';
+import AgentTokens from './AgentTokens';
 
 const TABS = [
   { value: 'favorites', label: '我的收藏' },
@@ -166,7 +167,7 @@ export default function Me() {
             </div>
             {tab === 'favorites' && <Favorites />}
             {tab === 'posts' && <MyPosts />}
-            {tab === 'settings' && <><Settings user={user} /><ChangePassword /></>}
+            {tab === 'settings' && <><Settings user={user} /><ChangePassword /><AgentTokens key={user.handle} /></>}
             {tab !== 'settings' && <p className="hint me-tip">想分享新的体验？<Link to="/submit">去投稿</Link></p>}
           </>
         ))}

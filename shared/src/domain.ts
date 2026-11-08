@@ -39,6 +39,18 @@ export interface User {
   tokens: number;
 }
 
+// 凭证管理列表的元数据，不含明文和哈希。
+export interface AgentToken {
+  id: Id;
+  label: string;
+  tokenPrefix: string;
+  createdAt: ISODateTime;
+  lastUsedAt: ISODateTime | null;
+  revokedAt: ISODateTime | null;
+  useCount: number;
+  status: 'active' | 'revoked';
+}
+
 export type Author = Pick<User, 'handle' | 'nickname' | 'avatar'>;
 export interface CurrentUser extends User {
   checkedInToday: boolean;
