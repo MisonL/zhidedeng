@@ -458,10 +458,13 @@ function materialize(store: Store, submission: SubmissionRecord, reviewedAt: str
 }
 
 /** 新版本上站后，同 key 的其他待审记录没有再审的意义。 */
+/** 被新版本替代的旧投稿要给提交人一个能看懂的原因，否则 Agent 无法自我纠正。 */
+const SUPERSEDED_REASON = '已被同一站点的更新版本替代，无需处理';
+
 function supersedePending(store: Store, submission: SubmissionRecord, reviewedAt: string): void {
   const actionFilter = submission.action === 'remove' ? "AND action = 'upsert'" : '';
-  store.db.prepare(`UPDATE submissions SET status = 'superseded', reviewedAt = ? WHERE kind = ? AND originKey = ? AND status = 'pending' AND id <> ? ${actionFilter}`)
-    .run(reviewedAt, submission.kind, submission.originKey, submission.id);
+  store.db.prepare(`UPDATE submissions SET status = 'superseded', reason = ?, reviewedAt = ? WHERE kind = ? AND originKey = ? AND status = 'pending' AND id <> ? ${actionFilter}`)
+    .run(SUPERSEDED_REASON, reviewedAt, submission.kind, submission.originKey, submission.id);
   if (submission.kind !== 'station') return;
   const key = feishuHostnameKey(submission.originKey);
   const aliases = [key, `www.${key}`].filter(host => host !== submission.originKey && feishuHostnameKey(host) === key);
@@ -476,8 +479,8 @@ function supersedePending(store: Store, submission: SubmissionRecord, reviewedAt
     if (!target || groupedTarget?.slug !== target.slug) return;
   } else if (submission.channel !== 'feishu' || submission.batchId === null) return;
   for (const alias of aliases) {
-    store.db.prepare(`UPDATE submissions SET status = 'superseded', reviewedAt = ? WHERE kind = 'station' AND channel = 'feishu' AND batchId IS NOT NULL AND originKey = ? AND status = 'pending' AND id <> ? ${actionFilter}`)
-      .run(reviewedAt, alias, submission.id);
+    store.db.prepare(`UPDATE submissions SET status = 'superseded', reason = ?, reviewedAt = ? WHERE kind = 'station' AND channel = 'feishu' AND batchId IS NOT NULL AND originKey = ? AND status = 'pending' AND id <> ? ${actionFilter}`)
+      .run(SUPERSEDED_REASON, reviewedAt, alias, submission.id);
   }
 }
 
