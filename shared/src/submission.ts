@@ -45,3 +45,36 @@ export const postSchema = z.object({
 
 export type StationPayload = z.infer<typeof stationSchema>;
 export type PostPayload = z.infer<typeof postSchema>;
+
+/**
+ * Agent 接口收得更紧：不允许多余字段，也不允许提交实测指标类字段。
+ * CLI 和服务端用同一份，否则本地通过了服务端还是会拒。
+ */
+export const agentStationSchema = stationSchema.strict();
+export const agentPostSchema = postSchema.omit({ authorHandle: true }).strict();
+
+/** 规范化后比对的禁用字段名（下划线、连字符、大小写都不影响判断）。 */
+export const forbiddenAgentFields: ReadonlySet<string> = new Set([
+  'uptime', 'firsttokenlatencyms', 'foundedat', 'status', 'score', 'lowestrate',
+  'apikey', 'token', 'password', 'secret', 'authorhandle',
+  'accesstoken', 'refreshtoken', 'clientsecret', 'privatekey', 'authorization', 'credentials',
+]);
+
+/** 返回第一个命中禁用规则的字段路径，没有则返回 null。递归查嵌套对象。 */
+export function findForbiddenAgentField(input: unknown): string | null {
+  const pending: { value: unknown; path: string }[] = [{ value: input, path: '' }];
+  while (pending.length > 0) {
+    const { value, path } = pending.pop()!;
+    if (typeof value !== 'object' || value === null) continue;
+    if (Array.isArray(value)) {
+      value.forEach((child, index) => pending.push({ value: child, path: path ? `${path}.${index}` : String(index) }));
+      continue;
+    }
+    for (const [key, child] of Object.entries(value)) {
+      const field = path ? `${path}.${key}` : key;
+      if (forbiddenAgentFields.has(key.replace(/[_-]/g, '').toLowerCase())) return field;
+      pending.push({ value: child, path: field });
+    }
+  }
+  return null;
+}

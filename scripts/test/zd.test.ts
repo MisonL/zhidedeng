@@ -64,6 +64,19 @@ describe('参数解析', () => {
     expect(parseArgs(['submit', '--batch']).flags).toEqual({ batch: true });
   });
 
+  it('--flag=value 形式正确解析', () => {
+    expect(parseArgs(['status', '--limit=5']).flags).toEqual({ limit: '5' });
+  });
+
+  it('-- 之后的参数一律当位置参数', () => {
+    expect(parseArgs(['match', '--', '--weird-name']).positional).toEqual(['--weird-name']);
+    expect(parseArgs(['match', '--', '--weird-name']).flags).toEqual({});
+  });
+
+  it('值本身以 -- 开头时用 = 形式传递', () => {
+    expect(parseArgs(['match', '--q=--abc']).flags).toEqual({ q: '--abc' });
+  });
+
   it('空参数只得到空命令', () => {
     expect(parseArgs([])).toEqual({ command: '', positional: [], flags: {} });
   });
@@ -365,6 +378,39 @@ describe('validate', () => {
     const path = join(home, 'ok.json');
     await writeFile(path, JSON.stringify(station));
     expect(await validate(path)).toMatchObject({ valid: true, kind: 'station' });
+  });
+});
+
+describe('与服务端一致的严格校验', () => {
+  it('多出未声明的字段时本地就拒绝，不等到服务端', () => {
+    expect(validatePayload({ ...station, extraField: 1 }).issues[0]!.message).toContain('多余字段');
+  });
+
+  it('实测指标类字段本地就拒绝', () => {
+    for (const field of ['uptime', 'firstTokenLatencyMs', 'foundedAt', 'status', 'score']) {
+      const result = validatePayload({ ...station, [field]: 1 });
+      expect(result.issues[0]!.field).toBe(field);
+      expect(result.issues[0]!.message).toContain('不允许');
+    }
+  });
+
+  it('禁字段的变体写法也拒绝：大小写、下划线、连字符', () => {
+    for (const key of ['Uptime', 'first_token_latency_ms', 'API-KEY']) {
+      expect(validatePayload({ ...station, [key]: 1 }).issues.length).toBeGreaterThan(0);
+    }
+  });
+
+  it('嵌套里的禁字段也拒绝', () => {
+    const result = validatePayload({ ...station, metadata: { uptime: 99 } });
+    expect(result.issues[0]!.field).toBe('metadata.uptime');
+  });
+
+  it('评价不接受 authorHandle，作者由凭证决定', () => {
+    expect(validatePayload({ ...post, authorHandle: 'someone' }).issues.length).toBeGreaterThan(0);
+  });
+
+  it('站点和评价混在一起时本地拒绝', () => {
+    expect(validatePayload({ ...station, ...post }).issues.length).toBeGreaterThan(0);
   });
 });
 
