@@ -65,7 +65,7 @@ function privateIpv4(parts: number[]): boolean {
 function privateHostname(hostname: string): boolean {
   const host = hostname.replace(/^\[|\]$/g, '').toLowerCase();
   if (host === 'localhost' || host === 'localhost.localdomain' || host === 'local' || host === 'internal'
-    || ['.localhost', '.local', '.internal'].some(suffix => host.endsWith(suffix))) return true;
+    || ['.localhost', '.local', '.internal', '.example'].some(suffix => host.endsWith(suffix))) return true;
   const version = isIP(host);
   if (version === 4) return privateIpv4(host.split('.').map(Number));
   if (version !== 6) return false;
