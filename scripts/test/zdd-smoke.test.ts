@@ -1,7 +1,7 @@
 /**
  * 冒烟测试：用真实 Node 进程和真实 server 跑一遍 CLI。
  *
- * 为什么需要它：单元测试用 vitest（esbuild 转译）跑，`zd.ts` 的语法能否被
+ * 为什么需要它：单元测试用 vitest（esbuild 转译）跑，`zdd.ts` 的语法能否被
  * `node --experimental-strip-types` 直接执行它测不到；CLI 对接口响应形状的
  * 假设，用自己编的 mock 也测不出来。这两类问题让 CLI 曾经完全无法启动、
  * catalog 恒返回空，而 100 多项单测全绿。
@@ -15,7 +15,7 @@ import { fileURLToPath } from 'node:url';
 
 const scriptsDir = fileURLToPath(new URL('..', import.meta.url));
 const serverDir = fileURLToPath(new URL('../../server/', import.meta.url));
-const zdPath = join(scriptsDir, 'zd.ts');
+const zdPath = join(scriptsDir, 'zdd.ts');
 const port = 18991;
 const base = `http://127.0.0.1:${port}`;
 
@@ -23,10 +23,10 @@ let server: ChildProcess | undefined;
 let home: string;
 
 /** 用真实 node 跑 CLI，返回退出码与 stdout/stderr。 */
-async function zd(args: string[], env: Record<string, string> = {}) {
+async function zdd(args: string[], env: Record<string, string> = {}) {
   const child = spawn(process.execPath, ['--experimental-strip-types', zdPath, ...args], {
     cwd: scriptsDir,
-    env: { ...process.env, ZD_API_BASE: base, ZD_CONFIG_HOME: home, NODE_ENV: '', ...env },
+    env: { ...process.env, ZDD_API_BASE: base, ZDD_CONFIG_HOME: home, NODE_ENV: '', ...env },
   });
   let stdout = '';
   let stderr = '';
@@ -37,7 +37,7 @@ async function zd(args: string[], env: Record<string, string> = {}) {
 }
 
 beforeAll(async () => {
-  home = await mkdtemp(join(tmpdir(), 'zd-smoke-'));
+  home = await mkdtemp(join(tmpdir(), 'zdd-smoke-'));
   server = spawn(process.execPath, ['--experimental-strip-types', 'src/index.ts'], {
     cwd: serverDir,
     env: { ...process.env, PORT: String(port), NODE_ENV: '' },
@@ -63,14 +63,14 @@ afterAll(async () => {
 
 describe('真实进程冒烟', () => {
   it('用 node --experimental-strip-types 能启动并输出 help', async () => {
-    const { code, stdout, stderr } = await zd(['help']);
+    const { code, stdout, stderr } = await zdd(['help']);
     expect(code).toBe(0);
-    expect(stderr).toContain('zd ——');
+    expect(stderr).toContain('zdd ——');
     expect(JSON.parse(stdout)).toMatchObject({ ok: true });
   });
 
   it('catalog 从真实接口读出非空目录', async () => {
-    const { code, stdout } = await zd(['catalog']);
+    const { code, stdout } = await zdd(['catalog']);
     expect(code).toBe(0);
     const result = JSON.parse(stdout) as { vendors: unknown[]; models: unknown[]; stations: unknown[] };
     // 演示数据一定有厂商和模型；空数组说明解包形状又写错了。
@@ -80,14 +80,14 @@ describe('真实进程冒烟', () => {
   }, 30_000);
 
   it('match 能命中真实存在的模型', async () => {
-    const { code, stdout } = await zd(['match', 'GPT-4.1']);
+    const { code, stdout } = await zdd(['match', 'GPT-4.1']);
     expect(code).toBe(0);
     const result = JSON.parse(stdout) as { matches: { slug: string }[] };
     expect(result.matches.map(model => model.slug)).toContain('gpt-4-1');
   }, 30_000);
 
   it('未登录时 whoami 以 5 退出', async () => {
-    const { code, stdout } = await zd(['whoami'], { ZD_TOKEN: '' });
+    const { code, stdout } = await zdd(['whoami'], { ZDD_TOKEN: '' });
     expect(code).toBe(5);
     expect(JSON.parse(stdout)).toMatchObject({ ok: false, code: 5 });
   });
@@ -95,13 +95,13 @@ describe('真实进程冒烟', () => {
   it('validate 对本地文件做校验，不联网', async () => {
     const path = join(home, 'bad.json');
     await (await import('node:fs/promises')).writeFile(path, JSON.stringify({ name: 'x', url: 'ftp://a.com/' }));
-    const { code } = await zd(['validate', path]);
+    const { code } = await zdd(['validate', path]);
     expect(code).toBe(3);
   });
 
   it('未知命令不回显输入，避免误传的凭证被打到终端', async () => {
     const secret = 'zd_' + 'f'.repeat(40);
-    const { code, stdout, stderr } = await zd([secret]);
+    const { code, stdout, stderr } = await zdd([secret]);
     expect(code).toBe(1);
     expect(stdout).not.toContain(secret);
     expect(stderr).not.toContain(secret);

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * zd —— 「什么值得蹬」的 Agent 命令行工具。
+ * zdd —— 「什么值得蹬」的 Agent 命令行工具。
  *
  * 设计要点：
  * - stdout 只输出 JSON，人类可读的提示一律走 stderr，方便 Agent 直接管道解析。
@@ -31,7 +31,7 @@ const NEXT_ACTION: Record<number, string> = {
   [EXIT.network]: '网络或服务端问题，可以稍后原样重试',
   [EXIT.validation]: '本地校验未通过，按 issues 修正数据后重试，不要原样重试',
   [EXIT.rejected]: '服务端拒绝，按 message 修正后再试；配额类错误需要等待',
-  [EXIT.unauthorized]: '凭证无效或已吊销，请让账号持有人重新签发并 zd login',
+  [EXIT.unauthorized]: '凭证无效或已吊销，请让账号持有人重新签发并 zdd login',
 };
 
 /** CLI 自身抛出的、带退出码的错误。 */
@@ -52,19 +52,19 @@ interface Config {
   token: string;
 }
 
-/** 配置文件位置。测试通过 ZD_CONFIG_HOME 改写，避免污染真实 HOME。 */
+/** 配置文件位置。测试通过 ZDD_CONFIG_HOME 改写，避免污染真实 HOME。 */
 export function configPath(): string {
-  const base = process.env.ZD_CONFIG_HOME ?? join(homedir(), '.config');
-  return join(base, 'zd', 'config.json');
+  const base = process.env.ZDD_CONFIG_HOME ?? join(homedir(), '.config');
+  return join(base, 'zdd', 'config.json');
 }
 
 export function apiBase(): string {
-  return (process.env.ZD_API_BASE ?? DEFAULT_BASE).replace(/\/+$/, '');
+  return (process.env.ZDD_API_BASE ?? DEFAULT_BASE).replace(/\/+$/, '');
 }
 
 /** 请求实际使用的地址：环境变量优先于登录时记住的地址。 */
 export async function resolveBase(path = configPath()): Promise<string> {
-  if (process.env.ZD_API_BASE) return apiBase();
+  if (process.env.ZDD_API_BASE) return apiBase();
   const config = await readConfig(path);
   return config ? config.apiBase.replace(/\/+$/, '') : DEFAULT_BASE;
 }
@@ -114,10 +114,10 @@ export async function writeConfig(config: Config, path = configPath()): Promise<
 
 /** 解析出的凭证：环境变量优先，便于 CI 不用写盘。 */
 export async function resolveToken(path = configPath()): Promise<string> {
-  const fromEnv = process.env.ZD_TOKEN;
+  const fromEnv = process.env.ZDD_TOKEN;
   if (fromEnv && fromEnv.length > 0) return fromEnv;
   const config = await readConfig(path);
-  if (!config) throw new ZdError(EXIT.unauthorized, '还没有登录，请先运行 zd login --key <凭证>');
+  if (!config) throw new ZdError(EXIT.unauthorized, '还没有登录，请先运行 zdd login --key <凭证>');
   return config.token;
 }
 
@@ -379,8 +379,8 @@ export async function submitBatch(
       const response = await submitFile(join(dir, name), { token, fetchImpl: options.fetchImpl });
       result.submitted.push({ file: name, id: response.submission.id, status: response.submission.status, deduplicated: response.deduplicated });
     } catch (error) {
-      const zd = error instanceof ZdError ? error : new ZdError(EXIT.network, String(error));
-      result.failed.push({ file: name, code: zd.code, message: zd.message });
+      const zdd = error instanceof ZdError ? error : new ZdError(EXIT.network, String(error));
+      result.failed.push({ file: name, code: zdd.code, message: zdd.message });
     }
   }
   return result;
@@ -486,7 +486,7 @@ export async function run(argv: string[]): Promise<number> {
     switch (command) {
       case 'login': {
         const key = typeof flags.key === 'string' ? flags.key : positional[0];
-        if (!key) throw new ZdError(EXIT.usage, '用法：zd login --key zd_xxx');
+        if (!key) throw new ZdError(EXIT.usage, '用法：zdd login --key zd_xxx');
         const result = await login(key);
         note(`已登录 ${result.handle}，凭证保存在 ${result.savedTo}`);
         emit(result);
@@ -502,14 +502,14 @@ export async function run(argv: string[]): Promise<number> {
       }
       case 'match': {
         const query = positional.join(' ').trim();
-        if (!query) throw new ZdError(EXIT.usage, '用法：zd match "模型名"');
+        if (!query) throw new ZdError(EXIT.usage, '用法：zdd match "模型名"');
         const { models } = await catalog();
         emit(matchModel(query, models));
         return EXIT.ok;
       }
       case 'validate': {
         const path = positional[0];
-        if (!path) throw new ZdError(EXIT.usage, '用法：zd validate ./x.json');
+        if (!path) throw new ZdError(EXIT.usage, '用法：zdd validate ./x.json');
         const result = await validate(path);
         emit(result);
         return result.valid ? EXIT.ok : EXIT.validation;
@@ -522,7 +522,7 @@ export async function run(argv: string[]): Promise<number> {
           return result.failed.length === 0 ? EXIT.ok : EXIT.rejected;
         }
         const path = positional[0];
-        if (!path) throw new ZdError(EXIT.usage, '用法：zd submit ./x.json 或 zd submit --batch ./dir/');
+        if (!path) throw new ZdError(EXIT.usage, '用法：zdd submit ./x.json 或 zdd submit --batch ./dir/');
         emit(await submitFile(path));
         return EXIT.ok;
       }
@@ -544,16 +544,16 @@ export async function run(argv: string[]): Promise<number> {
       case '--help':
         note(
           [
-            'zd —— 什么值得蹬 Agent 命令行',
+            'zdd —— 什么值得蹬 Agent 命令行',
             '',
-            '  zd login --key zd_xxx        保存凭证',
-            '  zd whoami                    身份与配额余量',
-            '  zd catalog                   厂商、模型、已有站点',
-            '  zd match "模型名"            模型名模糊匹配',
-            '  zd validate ./x.json         本地校验，不联网',
-            '  zd submit ./x.json           提交单个',
-            '  zd submit --batch ./dir/     批量提交',
-            '  zd status [--limit N]        审核进度与拒绝原因',
+            '  zdd login --key zd_xxx        保存凭证',
+            '  zdd whoami                    身份与配额余量',
+            '  zdd catalog                   厂商、模型、已有站点',
+            '  zdd match "模型名"            模型名模糊匹配',
+            '  zdd validate ./x.json         本地校验，不联网',
+            '  zdd submit ./x.json           提交单个',
+            '  zdd submit --batch ./dir/     批量提交',
+            '  zdd status [--limit N]        审核进度与拒绝原因',
             '',
             '所有命令输出 JSON 到 stdout，提示信息走 stderr。',
           ].join('\n'),
@@ -562,21 +562,21 @@ export async function run(argv: string[]): Promise<number> {
         return EXIT.ok;
       default:
         // 不回显输入：误把凭证当命令传进来时会原样打到终端和 Agent 记录里。
-        throw new ZdError(EXIT.usage, '未知命令。运行 zd help 查看用法');
+        throw new ZdError(EXIT.usage, '未知命令。运行 zdd help 查看用法');
     }
   } catch (error) {
-    const zd = error instanceof ZdError ? error : new ZdError(EXIT.network, error instanceof Error ? error.message : String(error));
-    const message = scrubSecret(zd.message) as string;
+    const zdd = error instanceof ZdError ? error : new ZdError(EXIT.network, error instanceof Error ? error.message : String(error));
+    const message = scrubSecret(zdd.message) as string;
     note(`失败：${message}`);
-    note(`建议：${NEXT_ACTION[zd.code] ?? '未知错误'}`);
-    emit({ ok: false, code: zd.code, message, detail: scrubSecret(zd.detail ?? null), nextAction: NEXT_ACTION[zd.code] ?? null });
-    return zd.code;
+    note(`建议：${NEXT_ACTION[zdd.code] ?? '未知错误'}`);
+    emit({ ok: false, code: zdd.code, message, detail: scrubSecret(zdd.detail ?? null), nextAction: NEXT_ACTION[zdd.code] ?? null });
+    return zdd.code;
   }
 }
 
 /** 只在被直接执行时跑，被测试 import 时不触发。 */
 const invokedPath = process.argv[1] ? resolve(process.argv[1]) : '';
-if (invokedPath.endsWith('zd.ts') || invokedPath.endsWith('zd.js')) {
+if (invokedPath.endsWith('zdd.ts') || invokedPath.endsWith('zdd.js')) {
   run(process.argv.slice(2)).then(code => {
     process.exitCode = code;
   });

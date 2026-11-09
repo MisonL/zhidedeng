@@ -6,20 +6,20 @@ import {
   EXIT, catalog, configPath, inferKind, login, matchModel, normalizeModelName, parseArgs,
   readConfig, resolveToken, run, status, submitBatch, submitFile, submitOne, validate,
   scrubSecret, validatePayload, whoami, writeConfig, ZdError,
-} from '../zd.ts';
+} from '../zdd.ts';
 
 let home: string;
 beforeEach(async () => {
-  home = await mkdtemp(join(tmpdir(), 'zd-test-'));
-  process.env.ZD_CONFIG_HOME = home;
-  process.env.ZD_API_BASE = 'https://api.test';
-  delete process.env.ZD_TOKEN;
+  home = await mkdtemp(join(tmpdir(), 'zdd-test-'));
+  process.env.ZDD_CONFIG_HOME = home;
+  process.env.ZDD_API_BASE = 'https://api.test';
+  delete process.env.ZDD_TOKEN;
 });
 afterEach(async () => {
   await rm(home, { recursive: true, force: true });
-  delete process.env.ZD_CONFIG_HOME;
-  delete process.env.ZD_API_BASE;
-  delete process.env.ZD_TOKEN;
+  delete process.env.ZDD_CONFIG_HOME;
+  delete process.env.ZDD_API_BASE;
+  delete process.env.ZDD_TOKEN;
 });
 
 // 与服务端签发格式一致：zd_ + 32 字节 base64url，固定 43 个字符。
@@ -100,7 +100,7 @@ describe('退出码', () => {
   });
 
   it('--limit 非正整数返回用法错误', async () => {
-    process.env.ZD_TOKEN = TOKEN;
+    process.env.ZDD_TOKEN = TOKEN;
     expect(await run(['status', '--limit', '0'])).toBe(EXIT.usage);
     expect(await run(['status', '--limit', 'abc'])).toBe(EXIT.usage);
   });
@@ -112,7 +112,7 @@ describe('凭证存储', () => {
     expect(await readConfig()).toEqual({ apiBase: 'https://api.test', token: TOKEN });
     if (process.platform !== 'win32') {
       expect((await stat(configPath())).mode & 0o777).toBe(0o600);
-      expect((await stat(join(home, 'zd'))).mode & 0o777).toBe(0o700);
+      expect((await stat(join(home, 'zdd'))).mode & 0o777).toBe(0o700);
     }
   });
 
@@ -121,7 +121,7 @@ describe('凭证存储', () => {
   });
 
   it('配置文件损坏时返回 null', async () => {
-    await mkdir(join(home, 'zd'), { recursive: true });
+    await mkdir(join(home, 'zdd'), { recursive: true });
     await writeFile(configPath(), '{not json');
     expect(await readConfig()).toBeNull();
   });
@@ -131,9 +131,9 @@ describe('凭证存储', () => {
     await expect(resolveToken()).rejects.toMatchObject({ code: EXIT.unauthorized });
   });
 
-  it('ZD_TOKEN 优先于配置文件', async () => {
+  it('ZDD_TOKEN 优先于配置文件', async () => {
     await writeConfig({ apiBase: 'https://api.test', token: TOKEN });
-    process.env.ZD_TOKEN = 'zd_fromenv';
+    process.env.ZDD_TOKEN = 'zd_fromenv';
     expect(await resolveToken()).toBe('zd_fromenv');
   });
 });
@@ -164,7 +164,7 @@ describe('地址优先级', () => {
   const statusOk = { '/api/agent/status': { body: statusBody } };
 
   it('没有环境变量时用配置里记住的地址', async () => {
-    delete process.env.ZD_API_BASE;
+    delete process.env.ZDD_API_BASE;
     await writeConfig({ apiBase: 'https://saved.invalid', token: TOKEN });
     const { impl, calls } = fakeFetch(statusOk);
     await whoami({ fetchImpl: impl });
@@ -174,7 +174,7 @@ describe('地址优先级', () => {
   it('重新登录不会把配置地址改回线上默认', async () => {
     // 曾经验证走 resolveBase()、落盘走 apiBase()，结果在自定义地址上重新
     // 登录一次，地址被改写成线上默认，下一次请求带着凭证打到生产站点。
-    delete process.env.ZD_API_BASE;
+    delete process.env.ZDD_API_BASE;
     await writeConfig({ apiBase: 'https://saved.invalid', token: TOKEN });
     const { impl, calls } = fakeFetch(statusOk);
     await login(TOKEN, { fetchImpl: impl });
@@ -183,12 +183,12 @@ describe('地址优先级', () => {
   });
 
   it('环境变量优先于配置', async () => {
-    delete process.env.ZD_API_BASE;
+    delete process.env.ZDD_API_BASE;
     await writeConfig({ apiBase: 'https://saved.invalid', token: TOKEN });
     const { impl, calls } = fakeFetch(statusOk);
     await whoami({ fetchImpl: impl });
     expect(calls[0]!.url).toContain('https://saved.invalid');
-    process.env.ZD_API_BASE = 'https://env.invalid';
+    process.env.ZDD_API_BASE = 'https://env.invalid';
     const second = fakeFetch(statusOk);
     await whoami({ fetchImpl: second.impl });
     expect(second.calls[0]!.url).toContain('https://env.invalid');
@@ -334,12 +334,12 @@ describe('错误分类', () => {
 
 describe('参数校验', () => {
   it('--limit 缺值报用法错误，不静默用默认值', async () => {
-    process.env.ZD_TOKEN = TOKEN;
+    process.env.ZDD_TOKEN = TOKEN;
     expect(await run(['status', '--limit'])).toBe(EXIT.usage);
   });
 
   it('--limit 超过服务端上限 50 报用法错误', async () => {
-    process.env.ZD_TOKEN = TOKEN;
+    process.env.ZDD_TOKEN = TOKEN;
     expect(await run(['status', '--limit', '51'])).toBe(EXIT.usage);
     expect(await run(['status', '--limit', '50'])).not.toBe(EXIT.usage);
   });
@@ -352,7 +352,7 @@ describe('参数校验', () => {
 
 describe('配置文件原子写入', () => {
   it('覆盖已存在的宽权限文件后，权限收紧为 600 且内容是新凭证', async () => {
-    await mkdir(join(home, 'zd'), { recursive: true });
+    await mkdir(join(home, 'zdd'), { recursive: true });
     await writeFile(configPath(), JSON.stringify({ apiBase: 'x', token: 'zd_old' }), { mode: 0o666 });
     await chmod(configPath(), 0o666);
     await writeConfig({ apiBase: 'https://api.test', token: TOKEN });
@@ -364,7 +364,7 @@ describe('配置文件原子写入', () => {
 
   it('写入后目录里不留临时文件', async () => {
     await writeConfig({ apiBase: 'https://api.test', token: TOKEN });
-    const entries = await readdir(join(home, 'zd'));
+    const entries = await readdir(join(home, 'zdd'));
     expect(entries.filter(name => name.endsWith('.tmp'))).toHaveLength(0);
   });
 });
