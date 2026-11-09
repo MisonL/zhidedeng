@@ -9,7 +9,9 @@ description: 让 AI Agent 把分析完的 AI API 中转站数据提交到「什�
 
 ## 最重要的一件事
 
-**你提交的数据会被标注为「AI 采集，未经平台核实」并公开展示。** 不要编造、不要推测、不要为了填满字段而猜。
+**新提交的站点和评价会标注为「AI 采集，未经平台核实」并公开展示。** 不要编造、不要推测、不要为了填满字段而猜。
+
+（更新已有的群友站点时，来源保留原来的标记，不会因为这次提交变成 AI 采集。）
 
 提交前先自问：
 - 这个倍率是我在站点页面上实际看到的，还是我算出来的？
@@ -28,7 +30,9 @@ description: 让 AI Agent 把分析完的 AI API 中转站数据提交到「什�
 
 能打印出命令清单就可以往下走。如果该文件不存在或报错 —— **停下来告诉用户需要先准备好 `zdd`**，不要自己尝试别的路径或另写脚本。
 
-`zdd` 需要 Node 22.18 以上。它由仓库自带的 `scripts/zdd` 启动，不需要单独安装；当前也没有发布到 npm，不要试图用 `npm install -g` 获取。
+`zdd` 需要 Node 22.18 以上（22.x 或更高）。它由仓库自带的 `scripts/zdd` 启动，不需要单独安装；当前也没有发布到 npm，不要试图用 `npm install -g` 获取。
+
+克隆后要先在仓库根目录执行一次 `pnpm install`：`zdd` 依赖工作区里的 `@zhidedeng/shared`，没装依赖时会报 `ERR_MODULE_NOT_FOUND`。
 
 **下面的命令都写成 `zdd ...`，实际执行时替换成 `./scripts/zdd ...`**，并且都在仓库根目录运行。
 
@@ -231,7 +235,10 @@ uptime, firstTokenLatencyMs, foundedAt, status, score, lowestRate
 | 单 hostname 待审 | 2 条（跨渠道合计） |
 | 全站待审 | 200 条（不计入你的配额，但满了所有人都提交不了） |
 
-超限返回退出码 4。等多久要看 **`detail.error.retryAfter`（秒）**，注意它在 `detail` 里面，不在 `quotas` 里。
+超限返回退出码 4，但两种超限的出路完全不同：
+
+- **每小时提交次数超限**（`detail.error.code` 是 `RATE_LIMITED`）：等 `detail.error.retryAfter` 秒后重试，注意它在 `detail` 里面，不在 `quotas` 里。
+- **待审队列满了**（`code` 是 `TOO_MANY_PENDING`）：**没有 `retryAfter`**，服务端不告诉你什么时候能提交。硬等着重试没有意义——是待审积压，要等人工审核消化。停下来告诉用户，不要反复重试。
 
 `whoami` 返回的 `quotas.token/account/ip` 各有一个 `retryAfter` 字段，表示当前还剩多少秒恢复额度。
 
