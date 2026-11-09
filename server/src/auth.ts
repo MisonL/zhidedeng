@@ -127,6 +127,11 @@ export class AttemptLimiter {
     return recent.length < this.max ? 0 : Math.ceil((recent[0] + this.windowMs - now) / 1000);
   }
 
+  /** 当前滑动窗口的剩余次数；查询不预占名额。 */
+  remaining(key: string, now: number) {
+    return Math.max(0, this.max - this.recent(key, now).length);
+  }
+
   record(key: string, now: number) {
     if (this.attempts.size > 10_000) {
       for (const stale of this.attempts.keys()) if (this.recent(stale, now).length === 0) this.attempts.delete(stale);

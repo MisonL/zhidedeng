@@ -6,6 +6,8 @@ import { API_ROUTES } from '@zhidedeng/shared';
 import type { ApiContracts, ApiRouteName, ChangePasswordRequest, LoginRequest, RegisterRequest } from '@zhidedeng/shared';
 import { AttemptLimiter, burnPasswordCheck, clearedSessionCookie, createSession, deleteOtherSessions, deleteSession, hashPassword, INITIAL_TOKENS, isWeakPassword, sessionCookie, sessionHandle, USERNAME, verifyPassword } from './auth.ts';
 import { agentTokenSchema, createAgentToken, listAgentTokens, revokeAgentToken } from './agent-tokens.ts';
+import { agentHandle, agentTokenHash } from './agent-auth.ts';
+import { AgentApi } from './agent-api.ts';
 import { authorizeAdmin, adminSlug, createModel, createVendor, deleteModel, importResponse, updateModel } from './catalog.ts';
 import type { Store } from './database.ts';
 import { Service } from './service.ts';
@@ -89,12 +91,17 @@ export function buildApp(store: Store, now: () => Date, options: AppOptions = {}
   const inviteByCode = new AttemptLimiter(INVITE_PER_CODE_LIMIT, INVITE_WINDOW_MS);
   const agentTokenByUser = new AttemptLimiter(AGENT_TOKEN_PER_USER, AGENT_TOKEN_WINDOW_MS);
   const agentTokenByIp = new AttemptLimiter(AGENT_TOKEN_PER_IP, AGENT_TOKEN_WINDOW_MS);
+  const agentApi = new AgentApi(store);
 
   const app = new Hono<{ Bindings: Bindings }>();
   app.notFound(c => c.json({ error: { code: 'NOT_FOUND', message: '资源不存在' } }, 404));
   app.onError((error, c) => {
     if (isDatabaseBusyError(error)) return c.json({ error: { code: 'BUSY', message: '数据库繁忙，请重试' } }, 503);
-    if (error instanceof ApiError) return c.json({ error: { code: error.code, message: error.message, ...error.details } }, error.status);
+    if (error instanceof ApiError) {
+      const retryAfter = error.details?.retryAfter;
+      if (error.status === 429 && typeof retryAfter === 'number') c.header('retry-after', String(retryAfter));
+      return c.json({ error: { code: error.code, message: error.message, ...error.details } }, error.status);
+    }
     if (error instanceof ZodError || error instanceof SyntaxError) return c.json({ error: { code: 'INVALID_INPUT', message: '请求参数或 JSON 正文无效' } }, 400);
     console.error(error);
     return c.json({ error: { code: 'INTERNAL_ERROR', message: '服务暂时不可用' } }, 500);
@@ -232,6 +239,23 @@ export function buildApp(store: Store, now: () => Date, options: AppOptions = {}
       return c.json(handler(new Service(store, now, handle), schema.parse(raw)));
     });
   }
+
+  function agentRequest(c: AppContext) {
+    c.header('cache-control', 'no-store');
+    const time = now();
+    const authorization = c.req.header('authorization');
+    const handle = agentHandle(store, authorization, time);
+    return { handle, tokenHash: agentTokenHash(authorization), ip: clientIp(c), now: time };
+  }
+  app.post(API_ROUTES.createAgentStation.path, async c => {
+    const request = agentRequest(c);
+    return c.json(agentApi.submitStation(await c.req.json(), request));
+  });
+  app.post(API_ROUTES.createAgentPost.path, async c => {
+    const request = agentRequest(c);
+    return c.json(agentApi.submitPost(await c.req.json(), request));
+  });
+  app.get(API_ROUTES.getAgentStatus.path, c => c.json(agentApi.status(agentRequest(c), c.req.query())));
 
   function refuseIfLimited(c: AppContext, limited: number[]) {
     const retryAfter = Math.max(...limited);

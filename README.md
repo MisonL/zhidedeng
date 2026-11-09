@@ -8,6 +8,7 @@ AI 模型中转站的导购与点评社区：比较相对倍率，看社区评�
 - 文章信息流、评测、指南、社区讨论，排行榜和全站搜索
 - 用户名密码注册登录，可改密码；投票、收藏、签到按账号存，投票数和收藏数公开累计
 - 账户设置中签发、查看和吊销 AI Agent 凭证；明文仅签发时显示一次
+- AI Agent 使用 Bearer 凭证提交站点和评价，查询本人的审核状态与配额
 - 评论登录后发布即公开，有频率限制；投稿先审后发
 - 管理接口：投稿队列、整批审核、隐藏评论、禁用账号（没有后台页面，在服务器本机用 curl 调用）
 - 飞书多维表格收集表同步（确定性脚本，不调用 LLM）
@@ -40,7 +41,7 @@ pnpm dev
 
 数据库默认在 `server/data/app.db`，空库自动写入演示数据。启动时会幂等补齐投稿表的 `batchId` 和 `action` 列，并建立批次索引，保留已有投稿和业务数据。
 
-Agent 凭证表由启动建表流程自动创建，已有库不需要另行迁移。凭证以 `zd_` 加 32 字节随机数的 base64url 编码组成，数据库只保留 SHA-256 和前八字符展示前缀，完整明文无法取回。注册满 7 天、有至少一篇审核通过的非演示投稿，或在生成时填写环境变量 `INVITE_CODES` 配置的有效邀请码即可签发；配置值用逗号分隔。每账号最多 5 个活跃凭证，吊销后可补发；`lastUsedAt` 在尚未使用时为 null，`useCount` 从 0 开始。签发和吊销通过现有服务日志记录不含秘密的结构化事件。本阶段只提供会话鉴权的 `/api/account/agent-tokens` 管理接口，Agent 提交接口和 CLI 后续提供。
+Agent 凭证表由启动建表流程自动创建，已有库不需要另行迁移。凭证以 `zd_` 加 32 字节随机数的 base64url 编码组成，数据库只保留 SHA-256 和前八字符展示前缀，完整明文无法取回。注册满 7 天、有至少一篇审核通过的非演示投稿，或在生成时填写环境变量 `INVITE_CODES` 配置的有效邀请码即可签发；配置值用逗号分隔。每账号最多 5 个活跃凭证，吊销后可补发；`lastUsedAt` 在尚未使用时为 null，`useCount` 从 0 开始。签发和吊销通过现有服务日志记录不含秘密的结构化事件。`/api/account/agent-tokens` 管理接口使用登录会话，下面的 Agent 提交接口使用签发的凭证；CLI 尚未提供。
 
 ## 测试
 
@@ -48,6 +49,40 @@ Agent 凭证表由启动建表流程自动创建，已有库不需要另行迁�
 pnpm -r typecheck
 pnpm -r test
 ```
+
+## Agent 提交接口
+
+全部要求 `Authorization: Bearer $AGENT_TOKEN`，写接口另需 `Content-Type: application/json`。吊销凭证、禁用账号、错误或缺失凭证统一返回 `401 UNAUTHENTICATED`。每次鉴权成功都更新 `lastUsedAt` 并增加 `useCount`，包括查询状态、幂等重试和内容被拒绝的请求。
+
+| 接口 | 正文或参数 |
+|---|---|
+| `POST /api/agent/stations` | 直接传站点 payload：name、description、url、rechargeThreshold、paymentMethods、offers；无充值门槛信息用 null，无支付方式或报价用空数组 |
+| `POST /api/agent/posts` | 直接传评价 payload：title、summary、body、authorName；hostname、publishedAt（ISO 时间）可选，作者账号由凭证确定 |
+| `GET /api/agent/status?limit=20` | 最近条数默认 20、最大 50；返回 handle、pendingCount、quotas 和 submissions；每条状态含 id、kind、status、createdAt、reason |
+
+```sh
+curl --connect-timeout 5 --max-time 30 -X POST \
+  -H "Authorization: Bearer $AGENT_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"name":"示例站","description":"待人工核实","url":"https://example.com/","rechargeThreshold":null,"paymentMethods":[],"offers":[{"modelSlug":"gpt-4-1","rate":0.6}]}' \
+  "$SITE_URL/api/agent/stations"
+```
+
+成功返回 `{ submission, deduplicated, autoApproved: false }`，channel 固定为 agent，进入 pending 队列；即使管理员开启自动通过，Agent 接口也等待人工审核。同账号的相同规范化内容在 pending 期间跨凭证重试返回原记录，不重复扣提交额度；JSON 字段顺序及 URL 的 query/fragment 不影响幂等。已审核的内容再提交会产生新的 pending。
+
+| 配额维度 | 上限 |
+|---|---|
+| 单 token | 10 条/小时 |
+| 单账号，所有 token 合计 | 20 条/小时 |
+| 单 IP，IPv6 按 /64 | 20 条/小时 |
+| 单账号队列 pending | 5 条 |
+| 单 hostname 的站点及关联评价 pending，计入所有渠道 | 2 条 |
+| 全局队列 pending，计入所有渠道和类型 | 200 条 |
+
+速率使用进程内滑动窗口，只计成功新增的投稿；失败和幂等重试退还或不占用额度，状态查询不扣提交额度。速率超限返回 `429 RATE_LIMITED` 和 `retry-after` 秒数；待审数量超限返回 `409 TOO_MANY_PENDING`，消息说明维度。status 的 quotas 包含 token、account、ip 的 limit/remaining/retryAfter，pending/globalPending 的 limit/remaining，以及本人待审内容涉及的 hostnames 的 pendingCount/limit/remaining。待审余量基于 submissions 队列，审核或替代记录后释放。
+
+内容规则：name 最多 60 字、description 最多 300 字；评价 title 最多 100 字、summary 最多 200 字、authorName 最多 30 字、body 最多 5000 字。报价使用已有模型，最多 100 项且不得重复，rate 遵循共享常量的 0.05~20 区间。根字段之外的投稿元数据不能由客户端指定。任意层级出现 uptime、firstTokenLatencyMs、foundedAt、status、score、lowestRate、authorHandle 或 apiKey、api_key、token、password、secret、accessToken、refreshToken、clientSecret、privateKey、authorization、credentials 等敏感字段都返回 `400 FORBIDDEN_FIELD` 并指明字段，字段名大小写及下划线/连字符变体同样拒绝。
+
+URL 只允许 http/https，去掉 query、fragment 和用户名密码，规范化主机名及尾点；拒绝内网 IPv4、IPv6 私有/回环/本地地址以及 localhost、.localhost、.local、.internal。评价 hostname 使用同一地址检查。此入口只保存内容，不访问所提交网址；缺失的实测指标在审核物化时一律写 null，新站点标注为「AI 采集，未经平台核实」，更新已有站点保留原来源。
 
 ## 部署
 
@@ -148,6 +183,7 @@ pnpm sync:feishu --allow-skipped     # 显式跳过坏记录，本次只提交 u
 
 - 名称带「虚构」的站点、倍率、可用率、延迟、评论和评测是演示数据，不对应任何真实服务。
 - 标注「群友提交，未经平台核实」的站点和评价来自表单。它们没有可用率和延迟数据，页面显示「暂无」，正文按纯文本显示。
+- 标注「AI 采集，未经平台核实」的站点和评价来自 Agent 投稿并经人工审核，实测指标缺失时同样显示「暂无」。
 - 以上内容都不构成消费建议。
 
 ## 免责声明
@@ -157,7 +193,7 @@ pnpm sync:feishu --allow-skipped     # 显式跳过坏记录，本次只提交 u
 ## 已知未修
 
 - 没有找回密码，也不能注销账号。
-- 登录限流在进程内，重启清零，也只适用于单进程。
+- 登录和 Agent 提交速率限流在进程内，重启清零，也只适用于单进程。
 - 按用户名计数的登录退避可以被别人用来把某个账号挡在登录外最多 15 分钟。
 - 没有数据库迁移工具，上线后再改表结构要自己写 `ALTER`。
 - 禁用账号不会自动隐藏它已发布的内容，要逐条隐藏评论或拒绝投稿。

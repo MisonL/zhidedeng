@@ -51,7 +51,7 @@ const enqueueSchema = z.object({
 }).refine(input => input.action !== 'remove' || input.kind === 'station', '只有站点支持下架');
 const modelSchema = z.object({ slug: adminSlug, vendor: adminSlug, name: text(60), description: text(200) });
 const stationUrlSchema = z.object({ url: httpUrl });
-const stationSchema = z.object({
+export const stationSchema = z.object({
   name: text(60),
   description: text(300),
   url: httpUrl,
@@ -59,20 +59,23 @@ const stationSchema = z.object({
   paymentMethods: z.array(text(20)).max(10),
   offers: z.array(z.object({ modelSlug: text(200), rate: offerRate })).max(100),
 }).refine(station => new Set(station.offers.map(offer => offer.modelSlug)).size === station.offers.length, '存在重复的报价');
-const postSchema = z.object({
+export const postSchema = z.object({
   title: text(100), summary: text(200), body: text(5000), authorName: text(30),
   authorHandle: text(200).nullish(), hostname: text(253).nullish(), publishedAt: z.iso.datetime().nullish(),
 });
 const removalSchema = z.object({ slug: z.string().min(1).max(200), submissionId: batchIdentifier });
 
-function parse<T>(schema: z.ZodType<T>, input: unknown): T {
+export function parseSubmissionInput<T>(schema: z.ZodType<T>, input: unknown): T {
   const result = schema.safeParse(input);
   if (!result.success) {
     const issue = result.error.issues[0];
-    throw new ApiError(400, 'INVALID_INPUT', `投稿参数无效：${issue.path.join('.')}: ${issue.message}`);
+    const field = issue.code === 'unrecognized_keys' ? [...issue.path, ...issue.keys].join('.') : issue.path.join('.');
+    throw new ApiError(400, 'INVALID_INPUT', `投稿参数无效：${field}: ${issue.message}`);
   }
   return result.data;
 }
+
+const parse = parseSubmissionInput;
 
 function submissionRecord(row: SqlRow): SubmissionRecord {
   return {
@@ -147,7 +150,12 @@ export function enqueueSubmission(store: Store, input: {
   actorHandle?: string | null;
   ip: string;
   now: Date;
-}): { submission: SubmissionRecord; deduplicated: boolean; autoApproved: boolean } {
+}, options: {
+  pendingOnly?: boolean;
+  deduplicateByActor?: boolean;
+  // 在查重之后、插入之前执行，复用本函数的 BEGIN IMMEDIATE，不能另开事务。
+  beforeInsert?: () => void;
+} = {}): { submission: SubmissionRecord; deduplicated: boolean; autoApproved: boolean } {
   const validated = parse(enqueueSchema, input);
   let payload: string | undefined;
   try {
@@ -165,13 +173,15 @@ export function enqueueSubmission(store: Store, input: {
     assertBatchChannel(store, validated.batchId, validated.channel);
     assertBatchOpen(store, validated.batchId);
     const originKey = submissionOriginKey(store, { ...validated, payload: parsedPayload });
-    const auto = autoApproveEnabled(store) && validated.action === 'upsert';
+    const auto = !options.pendingOnly && autoApproveEnabled(store) && validated.action === 'upsert';
     if (auto || validated.action === 'remove') validatePayload(store, validated.kind, parsedPayload, validated.action);
     // 自动通过下相同内容已上站就不再重复物化；人工审核下仍只按 pending 去重。
     // 幂等限定在同一批次内，避免新批次借用旧批次的 id，导致一键审核漏掉这些条目。
     const scope = auto ? "AND status IN ('pending','approved')" : "AND status = 'pending'";
-    const existing = store.db.prepare(`SELECT * FROM submissions WHERE kind = ? AND originKey = ? AND action = ? AND payloadHash = ? AND batchId IS ? ${scope} ORDER BY createdAt DESC, rowid DESC LIMIT 1`)
-      .get(validated.kind, originKey, validated.action, payloadHash, validated.batchId ?? null);
+    const actorScope = options.deduplicateByActor ? 'AND channel = ? AND actorHandle IS ?' : '';
+    const existing = store.db.prepare(`SELECT * FROM submissions WHERE kind = ? AND originKey = ? AND action = ? AND payloadHash = ? AND batchId IS ? ${actorScope} ${scope} ORDER BY createdAt DESC, rowid DESC LIMIT 1`)
+      .get(validated.kind, originKey, validated.action, payloadHash, validated.batchId ?? null,
+        ...(options.deduplicateByActor ? [validated.channel, validated.actorHandle ?? null] : []));
     const reviewedAt = validated.now.toISOString();
     // 飞书 www/裸域切换会更新同一实体，版本应取实际实体当前 URL 的 hostname。
     const currentOriginKey = auto && existing?.status === 'approved' && validated.kind === 'station'
@@ -191,6 +201,7 @@ export function enqueueSubmission(store: Store, input: {
       }
       return { submission, deduplicated: true, autoApproved: false };
     }
+    options.beforeInsert?.();
     const submission: SubmissionRecord = {
       id: randomUUID(), kind: validated.kind, channel: validated.channel, originKey,
       batchId: validated.batchId ?? null, action: validated.action,
@@ -328,7 +339,7 @@ function stationSlug(store: Store, url: string | null, originKey: string): strin
   throw new ApiError(409, 'SLUG_CONFLICT', '无法为这个站点分配唯一的地址');
 }
 
-function parseStationPayload(store: Store, input: unknown) {
+export function parseStationPayload(store: Store, input: unknown) {
   const payload = parse(stationSchema, input);
   for (const offer of payload.offers) {
     if (!store.get('model', offer.modelSlug)) throw new ApiError(400, 'INVALID_INPUT', `未知模型：${offer.modelSlug}`);
