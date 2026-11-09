@@ -150,7 +150,9 @@ describe('三选一准入', () => {
   it.each([
     ['省略 source 的站内投稿', { status: 'approved' }, 200],
     ['显式用户来源', { source: 'user', status: 'approved' }, 200],
-    ['其他非演示来源', { source: 'agent', status: 'approved' }, 200],
+    // agent 和飞书通道的 authorHandle 取自 payload，可以被冒用，不能用来准入。
+    ['Agent 通道投稿', { source: 'agent', status: 'approved' }, 403],
+    ['飞书同步投稿', { source: 'submission', status: 'approved' }, 403],
     ['演示文章', { source: 'demo', status: 'approved' }, 403],
     ['待审核', { status: 'pending' }, 403],
     ['已拒绝', { status: 'rejected' }, 403],
@@ -179,6 +181,30 @@ describe('三选一准入', () => {
     });
     expect(reviewed.status).toBe(200);
     expect((await issue(cookie)).status).toBe(200);
+  });
+
+  it('agent 通道代写投稿不能用来满足准入', async () => {
+    // 0 天新号，本来必须被拒。
+    const cookie = account('Mallory', START);
+    expect((await issue(cookie)).status).toBe(403);
+    // 通过 agent 通道挂一篇 authorHandle 写成 Mallory 的投稿并审核通过。
+    const adminToken = 'agent-test-admin-0123456789abcdef';
+    const admin = buildApp(openStore(server.db), () => clock, { syncToken: adminToken });
+    const queued = await admin.request('/api/admin/submissions', {
+      method: 'POST', headers: { ...json, authorization: 'Bearer ' + adminToken },
+      body: JSON.stringify({ kind: 'post', channel: 'agent', originKey: 'forged-1',
+        payload: { title: '伪造评价', summary: '摘要', body: '正文', authorName: 'Mallory', authorHandle: 'Mallory' } }),
+    });
+    expect(queued.status).toBe(200);
+    const submission = await queued.json() as { submission: { id: string } };
+    const reviewed = await admin.request('/api/admin/submissions/' + submission.submission.id + '/review', {
+      method: 'POST', headers: { ...json, authorization: 'Bearer ' + adminToken }, body: JSON.stringify({ status: 'approved' }),
+    });
+    expect(reviewed.status).toBe(200);
+    // 投稿确实落地并记在 Mallory 名下，但它是 agent 来源。
+    expect(openStore(server.db).all('post').find(p => p.authorHandle === 'Mallory')).toMatchObject({ source: 'agent' });
+    // 准入仍然必须拒绝。
+    expect((await issue(cookie)).status).toBe(403);
   });
 
   it.each(['invite-first', 'invite-second', '  invite-second  '])('环境变量逗号分隔的邀请码 %j 可单独准入', async inviteCode => {

@@ -29,6 +29,12 @@ const changePasswordSchema: z.ZodType<ChangePasswordRequest> = z.strictObject({ 
 
 const LOGIN_WINDOW_MS = 15 * 60_000;
 const REGISTER_WINDOW_MS = 60 * 60_000;
+// 邀请码是长期有效的共享秘密，必须限制同一把凭证被多少个新号兑换、每个新号试几次。
+const INVITE_WINDOW_MS = 60 * 60_000;
+const INVITE_PER_CODE_LIMIT = 20;
+const AGENT_TOKEN_WINDOW_MS = 60 * 60_000;
+const AGENT_TOKEN_PER_USER = 10;
+const AGENT_TOKEN_PER_IP = 30;
 
 // 这些读接口只有本人的数据，未登录直接 401。
 const PERSONAL_READS = new Set<ApiRouteName>(['getMe', 'getMyFavorites', 'getMyPosts']);
@@ -80,6 +86,9 @@ export function buildApp(store: Store, now: () => Date, options: AppOptions = {}
   const loginByUsername = new AttemptLimiter(20, LOGIN_WINDOW_MS);
   const passwordChangeByUser = new AttemptLimiter(5, LOGIN_WINDOW_MS);
   const registerByIp = new AttemptLimiter(10, REGISTER_WINDOW_MS);
+  const inviteByCode = new AttemptLimiter(INVITE_PER_CODE_LIMIT, INVITE_WINDOW_MS);
+  const agentTokenByUser = new AttemptLimiter(AGENT_TOKEN_PER_USER, AGENT_TOKEN_WINDOW_MS);
+  const agentTokenByIp = new AttemptLimiter(AGENT_TOKEN_PER_IP, AGENT_TOKEN_WINDOW_MS);
 
   const app = new Hono<{ Bindings: Bindings }>();
   app.notFound(c => c.json({ error: { code: 'NOT_FOUND', message: '资源不存在' } }, 404));
@@ -321,7 +330,26 @@ export function buildApp(store: Store, now: () => Date, options: AppOptions = {}
     const handle = sessionHandle(store, c.req.header('cookie'), time);
     if (!handle) throw new ApiError(401, 'UNAUTHENTICATED', '请先登录');
     const input = agentTokenSchema.parse(await c.req.json());
-    return c.json(createAgentToken(store, { ...input, handle, now: time, inviteCodes: options.inviteCodes }));
+    // 邀请码兑换要同时看「这把码被用过多少次」和「这个尝试者试过几次」，否则
+    // 码泄露后可以用它把无限多个新号提权。
+    const byUser = `agentToken:${handle}`;
+    const byIp = `agentTokenIp:${clientIp(c)}`;
+    refuseIfLimited(c, [agentTokenByUser.retryAfter(byUser, time.getTime()), agentTokenByIp.retryAfter(byIp, time.getTime()),
+      ...(input.inviteCode === undefined ? [] : [inviteByCode.retryAfter(`invite:${input.inviteCode}`, time.getTime())])]);
+    agentTokenByUser.record(byUser, time.getTime());
+    agentTokenByIp.record(byIp, time.getTime());
+    if (input.inviteCode !== undefined) inviteByCode.record(`invite:${input.inviteCode}`, time.getTime());
+    try {
+      return c.json(createAgentToken(store, { ...input, handle, now: time, inviteCodes: options.inviteCodes }));
+    } catch (error) {
+      // 准入没通过就退回计数，避免失败尝试把合法用户挡在门外。
+      if (error instanceof ApiError && (error.code === 'ELIGIBILITY_REQUIRED' || error.code === 'TOKEN_LIMIT')) {
+        agentTokenByUser.release(byUser);
+        agentTokenByIp.release(byIp);
+        if (input.inviteCode !== undefined) inviteByCode.release(`invite:${input.inviteCode}`);
+      }
+      throw error;
+    }
   });
   app.get(API_ROUTES.getAgentTokens.path, c => {
     c.header('cache-control', 'no-store');

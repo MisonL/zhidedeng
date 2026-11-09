@@ -133,12 +133,22 @@ export class Store {
   }
 }
 
-function ensureColumn(db: SqlDatabase, column: 'batchId' | 'action' | 'autoApproved', definition: string) {
-  const exists = db.prepare('PRAGMA table_info(submissions)').all().some(row => row.name === column);
-  if (!exists) db.prepare(`ALTER TABLE submissions ADD COLUMN ${column} ${definition}`).run();
+// 表名只来自本文件内的常量，不接受外部输入，拼进 SQL 是安全的。
+function ensureColumn(db: SqlDatabase, column: string, definition: string, table = 'submissions') {
+  const exists = db.prepare(`PRAGMA table_info(${table})`).all().some(row => row.name === column);
+  if (!exists) db.prepare(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`).run();
 }
 
 /** 建表不会补旧表的列。先幂等补列，再建依赖新列的索引，保留全部旧投稿。 */
+/** 补齐 agent_tokens 后加的列。老库或不完整的库都可能缺。 */
+export function ensureAgentTokenColumns(store: Store) {
+  const table = store.db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'agent_tokens'").get();
+  if (!table) return; // 表不存在时由 SCHEMA 的 CREATE TABLE 建全，不需要补列。
+  store.transaction(() => {
+    ensureColumn(store.db, 'tokenPrefix', "TEXT NOT NULL DEFAULT ''", 'agent_tokens');
+  });
+}
+
 export function ensureSubmissionColumns(store: Store) {
   store.transaction(() => {
     ensureColumn(store.db, 'batchId', 'TEXT');
