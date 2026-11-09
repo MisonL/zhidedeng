@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import {
   EXIT, catalog, configPath, inferKind, login, matchModel, normalizeModelName, parseArgs,
   readConfig, resolveToken, run, status, submitBatch, submitFile, submitOne, validate,
-  validatePayload, whoami, writeConfig, ZdError,
+  scrubSecret, validatePayload, whoami, writeConfig, ZdError,
 } from '../zd.ts';
 
 let home: string;
@@ -32,7 +32,8 @@ function fakeFetch(routes: Record<string, { status?: number; body?: unknown }>) 
   const impl = (async (input: string | URL | Request, init?: RequestInit) => {
     const url = String(input);
     calls.push({ url, init });
-    const path = url.replace('https://api.test', '');
+    // 按路径匹配，不依赖主机名——地址优先级的用例会换主机。
+    const path = new URL(url).pathname + new URL(url).search;
     const key = Object.keys(routes).find(candidate => path === candidate || path.startsWith(candidate + '?'));
     const route = key ? routes[key]! : { status: 404, body: { error: { message: '没有这条路由' } } };
     return new Response(JSON.stringify(route.body ?? {}), { status: route.status ?? 200 });
@@ -155,6 +156,61 @@ describe('login', () => {
     const { impl } = fakeFetch({ '/api/agent/status': { status: 401, body: { error: { message: '无效' } } } });
     await expect(login(TOKEN, { fetchImpl: impl })).rejects.toMatchObject({ code: EXIT.unauthorized });
     expect(await readConfig()).toBeNull();
+  });
+});
+
+describe('地址优先级', () => {
+  const statusOk = { '/api/agent/status': { body: statusBody } };
+
+  it('没有环境变量时用配置里记住的地址', async () => {
+    delete process.env.ZD_API_BASE;
+    await writeConfig({ apiBase: 'https://saved.invalid', token: TOKEN });
+    const { impl, calls } = fakeFetch(statusOk);
+    await whoami({ fetchImpl: impl });
+    expect(calls[0]!.url).toContain('https://saved.invalid');
+  });
+
+  it('重新登录不会把配置地址改回线上默认', async () => {
+    // 曾经验证走 resolveBase()、落盘走 apiBase()，结果在自定义地址上重新
+    // 登录一次，地址被改写成线上默认，下一次请求带着凭证打到生产站点。
+    delete process.env.ZD_API_BASE;
+    await writeConfig({ apiBase: 'https://saved.invalid', token: TOKEN });
+    const { impl, calls } = fakeFetch(statusOk);
+    await login(TOKEN, { fetchImpl: impl });
+    expect(calls[0]!.url).toContain('https://saved.invalid');
+    expect(await readConfig()).toMatchObject({ apiBase: 'https://saved.invalid' });
+  });
+
+  it('环境变量优先于配置', async () => {
+    delete process.env.ZD_API_BASE;
+    await writeConfig({ apiBase: 'https://saved.invalid', token: TOKEN });
+    const { impl, calls } = fakeFetch(statusOk);
+    await whoami({ fetchImpl: impl });
+    expect(calls[0]!.url).toContain('https://saved.invalid');
+    process.env.ZD_API_BASE = 'https://env.invalid';
+    const second = fakeFetch(statusOk);
+    await whoami({ fetchImpl: second.impl });
+    expect(second.calls[0]!.url).toContain('https://env.invalid');
+  });
+});
+
+describe('凭证脱敏', () => {
+  it('错误消息里的凭证被抹掉', () => {
+    expect(scrubSecret(`令牌 ${TOKEN} 无效`)).toBe('令牌 zd_*** 无效');
+  });
+
+  it('嵌套结构里的凭证也被抹掉', () => {
+    expect(JSON.stringify(scrubSecret({ error: { message: `bad ${TOKEN}` } })))
+      .not.toContain(TOKEN);
+  });
+
+  it('普通消息不受影响', () => {
+    expect(scrubSecret('单账号待审投稿已达 5 条')).toBe('单账号待审投稿已达 5 条');
+  });
+
+  it('服务端错误响应里带凭证时，输出中不含明文', async () => {
+    const { impl } = fakeFetch({ '/api/agent/status': { status: 400, body: { error: { message: `bad token ${TOKEN}` } } } });
+    await expect(status(undefined, { token: TOKEN, fetchImpl: impl })).rejects.toBeInstanceOf(ZdError);
   });
 });
 

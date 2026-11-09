@@ -25,14 +25,16 @@ async function sourceFiles(dir: string): Promise<string[]> {
 }
 
 describe('前端不引入运行时 schema', () => {
-  it('没有任何源码从 @zhidedeng/shared/submission 做非类型导入', async () => {
+  it('没有任何源码从 @zhidedeng/shared/submission 做运行时导入', async () => {
     const offenders: string[] = [];
     for (const file of await sourceFiles(webSrc)) {
       const source = await readFile(file, 'utf8');
-      // `import type { ... } from '.../submission'` 会被编译期擦除，允许；
-      // 不带 type 的 import 会把 zod 打进包里。
-      const pattern = /import\s+(?!type\s)[^;]*from\s+['"]@zhidedeng\/shared\/submission['"]/g;
-      if (pattern.test(source)) offenders.push(file.replace(webSrc, 'src/'));
+      // 允许：import type（编译期擦除）。
+      // 禁止：静态 import、export ... from、动态 import()——这三种都会真的把模块带进包里。
+      const hit = /(?:^|[^\w.])import\s*\(\s*['"]@zhidedeng\/shared\/submission['"]/.test(source)
+        || /(?:^|[\n;])\s*export\s+(?:type\s+)?[^;]*from\s+['"]@zhidedeng\/shared\/submission['"]/.test(source)
+        || /(?:^|[\n;])\s*import\s+(?!type\s)[^;]*from\s+['"]@zhidedeng\/shared\/submission['"]/.test(source);
+      if (hit) offenders.push(file.replace(webSrc, 'src/'));
     }
     expect(offenders).toEqual([]);
   });

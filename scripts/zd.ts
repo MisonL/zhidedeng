@@ -84,26 +84,31 @@ export async function readConfig(path = configPath()): Promise<Config | null> {
 export async function writeConfig(config: Config, path = configPath()): Promise<void> {
   const dir = dirname(path);
   // 目录先收紧。已存在的目录 mkdir 不会改权限，所以要单独 chmod。
+  // 收不紧就中止：宽权限目录里的 0600 文件仍然可被替换。
   await mkdir(dir, { recursive: true, mode: 0o700 });
-  await chmod(dir, 0o700).catch(() => {});
+  try {
+    await chmod(dir, 0o700);
+  } catch (error) {
+    throw new ZdError(EXIT.network, `配置目录收不紧权限（${error instanceof Error ? error.message : String(error)}），已中止`);
+  }
 
   // 秘密不能先落到宽权限文件上再修：writeFile 的 mode 只在新创建时生效，
   // 已存在的 0666 文件会带着旧权限写入，中间存在可被其他用户读到的窗口。
-  // 改成「同目录临时文件（0600 从创建那一刻生效）→ 写满 → rename 原子替换」。
+  // 改成「同目录临时文件（0600 从创建那一刻生效）→ 写满 → 校验 → rename」。
   const temp = join(dir, `.config.${process.pid}.${Date.now()}.tmp`);
   try {
     await writeFile(temp, JSON.stringify(config, null, 2) + '\n', { mode: 0o600, flag: 'wx' });
     await chmod(temp, 0o600);
+    // 替换之前先确认临时文件确实是私有的。这里失败不会动到既有配置。
+    const tempMode = (await stat(temp)).mode & 0o777;
+    if (tempMode !== 0o600) {
+      throw new ZdError(EXIT.network, `临时凭证文件权限是 ${tempMode.toString(8)}，不是 600，已放弃写入`);
+    }
     await rename(temp, path);
   } catch (error) {
     await rm(temp, { force: true }).catch(() => {});
+    if (error instanceof ZdError) throw error;
     throw new ZdError(EXIT.network, `保存凭证失败：${error instanceof Error ? error.message : String(error)}`);
-  }
-  // 替换后确认落盘权限确实是私有，收不紧就明确失败，不能当成已保存。
-  const mode = (await stat(path)).mode & 0o777;
-  if (mode !== 0o600) {
-    await rm(path, { force: true }).catch(() => {});
-    throw new ZdError(EXIT.network, `凭证文件权限是 ${mode.toString(8)}，不是 600，已删除以免泄漏`);
   }
 }
 
@@ -174,10 +179,15 @@ export async function login(key: string, options: { fetchImpl?: typeof fetch } =
   if (!/^zd_[A-Za-z0-9_-]{16,}$/.test(token)) {
     throw new ZdError(EXIT.validation, '凭证格式不对，应以 zd_ 开头');
   }
-  // 先验证再用，避免把无效凭证写进配置。
-  const status = await request(API_ROUTES.getAgentStatus.path, { token, fetchImpl: options.fetchImpl }) as GetAgentStatusResponse;
+  // 验证和落盘必须用同一个地址。早先验证走 resolveBase()（会读配置），
+  // 落盘却用 apiBase()（只看环境变量），于是在自定义地址上重新登录一次，
+  // 配置就被改写成线上默认地址，下一次请求带着凭证打到生产站点。
   const path = configPath();
-  await writeConfig({ apiBase: apiBase(), token }, path);
+  const base = await resolveBase(path);
+  const status = await request(API_ROUTES.getAgentStatus.path, {
+    token, base, fetchImpl: options.fetchImpl,
+  }) as GetAgentStatusResponse;
+  await writeConfig({ apiBase: base, token }, path);
   return { handle: status.handle, savedTo: path };
 }
 
@@ -432,6 +442,22 @@ function emit(value: unknown): void {
   process.stdout.write(JSON.stringify(value) + '\n');
 }
 
+/** 凭证形态的字符串（zd_ + 足够长的随机串）。错误消息里出现就必须抹掉。 */
+const TOKEN_PATTERN = /zd_[A-Za-z0-9_-]{16,}/g;
+
+/**
+ * 抹掉字符串里的凭证。服务端的错误消息、fetch 异常、用户误传的文件名
+ * 都可能把明文凭证带出来，统一在出口处处理，不依赖每个调用点自觉。
+ */
+export function scrubSecret(value: unknown): unknown {
+  if (typeof value === 'string') return value.replace(TOKEN_PATTERN, 'zd_***');
+  if (Array.isArray(value)) return value.map(scrubSecret);
+  if (typeof value === 'object' && value !== null) {
+    return Object.fromEntries(Object.entries(value).map(([key, child]) => [key, scrubSecret(child)]));
+  }
+  return value;
+}
+
 /** 人类可读提示一律走 stderr，不污染 stdout。 */
 function note(message: string): void {
   process.stderr.write(message + '\n');
@@ -523,9 +549,10 @@ export async function run(argv: string[]): Promise<number> {
     }
   } catch (error) {
     const zd = error instanceof ZdError ? error : new ZdError(EXIT.network, error instanceof Error ? error.message : String(error));
-    note(`失败：${zd.message}`);
+    const message = scrubSecret(zd.message) as string;
+    note(`失败：${message}`);
     note(`建议：${NEXT_ACTION[zd.code] ?? '未知错误'}`);
-    emit({ ok: false, code: zd.code, message: zd.message, detail: zd.detail ?? null, nextAction: NEXT_ACTION[zd.code] ?? null });
+    emit({ ok: false, code: zd.code, message, detail: scrubSecret(zd.detail ?? null), nextAction: NEXT_ACTION[zd.code] ?? null });
     return zd.code;
   }
 }
