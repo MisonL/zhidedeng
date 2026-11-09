@@ -42,7 +42,7 @@ pnpm dev
 
 ## 用 AI Agent 提交数据
 
-当前分支基线为 PR5（`89014e3`）：凭证签发、列表和吊销已实现，`/api/agent/*` 提交接口正在 PR6 中实现，`zd` CLI 和 Skill 待做。公开请求与响应以 [`shared/src/api.ts`](shared/src/api.ts) 和 [`shared/src/routes.ts`](shared/src/routes.ts) 为准；本分支还没有 Agent 提交契约。设计依据与实施状态见 [方案 v2](docs/plan-agent-submission-v2.md)，历史审阅的修复情况见 [交叉审阅记录](docs/review-summary.md)。
+凭证签发、列表和吊销，以及 `/api/agent/*` 三个提交接口都已实现；命令行工具 `zdd` 和 Agent Skill 也已就位。公开请求与响应以 [`shared/src/api.ts`](shared/src/api.ts) 和 [`shared/src/routes.ts`](shared/src/routes.ts) 为准。设计依据与实施状态见 [方案 v2](docs/plan-agent-submission-v2.md)，历史审阅的修复情况见 [交叉审阅记录](docs/review-summary.md)。
 
 ### 申请凭证
 
@@ -77,7 +77,7 @@ curl --connect-timeout 5 --max-time 15 -b "$SESSION_COOKIE_FILE" \
 }
 ```
 
-明文只在本次签发响应显示一次。凭证由 `zd_` 加 32 字节随机数的 base64url 编码组成；数据库只存 SHA-256 和前八字符展示前缀，列表不能找回明文。请把完整凭证保存到密钥管理工具，供 Agent 运行时通过环境变量 `ZD_TOKEN` 读取；丢失后吊销旧凭证再签发。管理响应带 `Cache-Control: no-store`，签发与吊销日志不记录凭证、邀请码或标签（`server/src/agent-tokens.ts:40-49,63-72`、`server/src/app.ts:327-365`）。
+明文只在本次签发响应显示一次。凭证由 `zd_` 加 32 字节随机数的 base64url 编码组成；数据库只存 SHA-256 和前八字符展示前缀，列表不能找回明文。请把完整凭证保存到密钥管理工具，供 Agent 运行时通过环境变量 `ZDD_TOKEN` 读取；丢失后吊销旧凭证再签发。管理响应带 `Cache-Control: no-store`，签发与吊销日志不记录凭证、邀请码或标签（`server/src/agent-tokens.ts:40-49,63-72`、`server/src/app.ts:327-365`）。
 
 ```sh
 # GET /api/account/agent-tokens：只列出本人的元数据，含已吊销凭证
@@ -173,7 +173,7 @@ Agent 设计接受站点公开信息、模型报价和文字评价。倍率区�
 
 ```sh
 curl --connect-timeout 5 --max-time 15 \
-  -H "Authorization: Bearer $ZD_TOKEN" -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $ZDD_TOKEN" -H 'Content-Type: application/json' \
   --data-binary @- "$SITE_URL/api/agent/stations" <<'JSON'
 {
   "name": "示例中转站",
@@ -192,7 +192,7 @@ JSON
 
 ```sh
 curl --connect-timeout 5 --max-time 15 \
-  -H "Authorization: Bearer $ZD_TOKEN" -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $ZDD_TOKEN" -H 'Content-Type: application/json' \
   --data-binary @- "$SITE_URL/api/agent/posts" <<'JSON'
 {
   "title": "示例站点的公开信息说明",
@@ -210,7 +210,7 @@ JSON
 
 ```sh
 curl --connect-timeout 5 --max-time 15 \
-  -H "Authorization: Bearer $ZD_TOKEN" "$SITE_URL/api/agent/status?limit=20"
+  -H "Authorization: Bearer $ZDD_TOKEN" "$SITE_URL/api/agent/status?limit=20"
 ```
 
 `limit` 取 1~50，默认 20。响应（`shared/src/api.ts:137-150`）：
@@ -241,9 +241,9 @@ curl --connect-timeout 5 --max-time 15 \
 
 ### 命令行工具
 
-`scripts/zd.ts` 是为 Agent 准备的命令行封装，把上面的接口包装成 `login` / `whoami` / `catalog` / `match` / `validate` / `submit` / `status` 七个命令。输出一律是 JSON，退出码固定 0~5，Agent 据此决定重试还是改数据。用法见 `zd help`。
+`scripts/zdd.ts` 是为 Agent 准备的命令行封装，把上面的接口包装成 `login` / `whoami` / `catalog` / `match` / `validate` / `submit` / `status` 七个命令。输出一律是 JSON，退出码固定 0~5，Agent 据此决定重试还是改数据。用法见 `zdd help`。
 
-配套的 Agent 使用说明在 `.claude/skills/zd-submit/SKILL.md`。
+配套的 Agent 使用说明在 `.claude/skills/zdd-submit/SKILL.md`。
 
 ## 测试
 
