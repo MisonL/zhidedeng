@@ -7,7 +7,7 @@
  * - 校验规则从 @zhidedeng/shared 导入，与服务端共用同一份 schema，避免本地通过、服务端拒绝。
  * - 退出码固定，Agent 据此判断该重试、该改数据，还是该重新登录。
  */
-import { mkdir, readFile, writeFile, chmod, readdir } from 'node:fs/promises';
+import { chmod, mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { API_ROUTES, type AgentSubmitResponse, type GetAgentStatusResponse } from '@zhidedeng/shared';
@@ -83,10 +83,28 @@ export async function readConfig(path = configPath()): Promise<Config | null> {
 /** 权限收紧到本人可读写；目录同理。Windows 上 chmod 是空操作，不报错。 */
 export async function writeConfig(config: Config, path = configPath()): Promise<void> {
   const dir = dirname(path);
+  // 目录先收紧。已存在的目录 mkdir 不会改权限，所以要单独 chmod。
   await mkdir(dir, { recursive: true, mode: 0o700 });
-  await writeFile(path, JSON.stringify(config, null, 2) + '\n', { mode: 0o600 });
-  await chmod(path, 0o600).catch(() => {});
   await chmod(dir, 0o700).catch(() => {});
+
+  // 秘密不能先落到宽权限文件上再修：writeFile 的 mode 只在新创建时生效，
+  // 已存在的 0666 文件会带着旧权限写入，中间存在可被其他用户读到的窗口。
+  // 改成「同目录临时文件（0600 从创建那一刻生效）→ 写满 → rename 原子替换」。
+  const temp = join(dir, `.config.${process.pid}.${Date.now()}.tmp`);
+  try {
+    await writeFile(temp, JSON.stringify(config, null, 2) + '\n', { mode: 0o600, flag: 'wx' });
+    await chmod(temp, 0o600);
+    await rename(temp, path);
+  } catch (error) {
+    await rm(temp, { force: true }).catch(() => {});
+    throw new ZdError(EXIT.network, `保存凭证失败：${error instanceof Error ? error.message : String(error)}`);
+  }
+  // 替换后确认落盘权限确实是私有，收不紧就明确失败，不能当成已保存。
+  const mode = (await stat(path)).mode & 0o777;
+  if (mode !== 0o600) {
+    await rm(path, { force: true }).catch(() => {});
+    throw new ZdError(EXIT.network, `凭证文件权限是 ${mode.toString(8)}，不是 600，已删除以免泄漏`);
+  }
 }
 
 /** 解析出的凭证：环境变量优先，便于 CI 不用写盘。 */
@@ -133,15 +151,19 @@ export async function request(path: string, options: RequestOptions = {}): Promi
   try {
     payload = text.length > 0 ? JSON.parse(text) : {};
   } catch {
-    // 5xx 和网关错误不是 Agent 数据的问题，让调用方原样重试；
-    // 4xx 才可能是请求有问题。这里没有可解析的 error 字段，只能按状态码判断。
-    const code = response.status >= 500 ? EXIT.network : EXIT.rejected;
+    // 与下面 JSON 分支保持同一套分类：先看状态码，再看正文格式。
+    const code = response.status === 401 || response.status === 403 ? EXIT.unauthorized
+      : response.ok || response.status >= 500 ? EXIT.network
+        : EXIT.rejected;
     throw new ZdError(code, `服务端返回了非 JSON 响应（HTTP ${response.status}）`);
   }
 
   if (response.ok) return payload;
   const message = (payload as { error?: { message?: string } })?.error?.message ?? `HTTP ${response.status}`;
-  if (response.status === 401) throw new ZdError(EXIT.unauthorized, message);
+  if (response.status === 401 || response.status === 403) throw new ZdError(EXIT.unauthorized, message);
+  // 5xx 是服务端故障，无论响应正文是什么格式都要可原样重试；
+  // 早先按正文是否 JSON 分类，导致同类故障被引导去改投稿数据。
+  if (response.status >= 500) throw new ZdError(EXIT.network, message);
   throw new ZdError(EXIT.rejected, message, payload);
 }
 
@@ -175,11 +197,26 @@ export interface Catalog {
   stations: { slug: string; name: string; url: string }[];
 }
 
+/** 分页接口最多 50 条一页，翻到 total 取完为止。页数设上限防止服务端异常时死循环。 */
+async function fetchAllPages(path: string, fetchImpl?: typeof fetch): Promise<unknown> {
+  const pageSize = 50;
+  const collected: unknown[] = [];
+  for (let page = 1; page <= 40; page++) {
+    const payload = await request(`${path}?page=${page}&pageSize=${pageSize}`, { fetchImpl }) as { items?: unknown; total?: unknown };
+    const items = Array.isArray(payload?.items) ? payload.items : [];
+    collected.push(...items);
+    const total = typeof payload?.total === 'number' ? payload.total : items.length;
+    if (items.length < pageSize || collected.length >= total) break;
+  }
+  return collected;
+}
+
 export async function catalog(options: { fetchImpl?: typeof fetch } = {}): Promise<Catalog> {
   const [vendors, models, stations] = await Promise.all([
     request(API_ROUTES.getVendors.path, { fetchImpl: options.fetchImpl }),
-    request(API_ROUTES.getModels.path, { fetchImpl: options.fetchImpl }),
-    request(`${API_ROUTES.getStations.path}?pageSize=50`, { fetchImpl: options.fetchImpl }),
+    // 模型和站点会超过一页，只取首页会让 match 看不到已有模型。
+    fetchAllPages(API_ROUTES.getModels.path, options.fetchImpl),
+    fetchAllPages(API_ROUTES.getStations.path, options.fetchImpl),
   ]);
   // 服务端分页接口直接返回 {items,total,page,pageSize}，没有外层包裹；
   // 少数接口返回裸数组。两种都认，但不猜别的形状——猜错会静默返回空。
@@ -428,9 +465,14 @@ export async function run(argv: string[]): Promise<number> {
         return EXIT.ok;
       }
       case 'status': {
-        const limit = typeof flags.limit === 'string' ? Number(flags.limit) : undefined;
-        if (limit !== undefined && (!Number.isInteger(limit) || limit < 1)) {
-          throw new ZdError(EXIT.usage, '--limit 需要是正整数');
+        // 服务端接受 1..50；缺值和非法值都不能静默当成默认。
+        let limit: number | undefined;
+        if ('limit' in flags) {
+          if (typeof flags.limit !== 'string') throw new ZdError(EXIT.usage, '--limit 需要一个值');
+          limit = Number(flags.limit);
+          if (!Number.isInteger(limit) || limit < 1 || limit > 50) {
+            throw new ZdError(EXIT.usage, '--limit 需要是 1~50 的整数');
+          }
         }
         emit(await status(limit));
         return EXIT.ok;
@@ -457,7 +499,8 @@ export async function run(argv: string[]): Promise<number> {
         emit({ ok: command === '' || command === 'help' || command === '--help' });
         return EXIT.ok;
       default:
-        throw new ZdError(EXIT.usage, `未知命令：${command}。运行 zd help 查看用法`);
+        // 不回显输入：误把凭证当命令传进来时会原样打到终端和 Agent 记录里。
+        throw new ZdError(EXIT.usage, '未知命令。运行 zd help 查看用法');
     }
   } catch (error) {
     const zd = error instanceof ZdError ? error : new ZdError(EXIT.network, error instanceof Error ? error.message : String(error));

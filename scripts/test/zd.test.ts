@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { mkdtemp, readFile, rm, stat, writeFile, mkdir } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -206,6 +206,78 @@ describe('catalog', () => {
       '/api/stations': { body: { items: [], total: 0, page: 1, pageSize: 20 } },
     });
     expect((await catalog({ fetchImpl: impl })).vendors).toHaveLength(1);
+  });
+});
+
+describe('catalog 分页', () => {
+  it('翻页取完全部模型，不只第一页', async () => {
+    const pages = [
+      { items: Array.from({ length: 50 }, (_, i) => ({ slug: `m${i}`, name: `M${i}`, vendor: 'v' })), total: 60, page: 1, pageSize: 50 },
+      { items: Array.from({ length: 10 }, (_, i) => ({ slug: `m${50 + i}`, name: `M${50 + i}`, vendor: 'v' })), total: 60, page: 2, pageSize: 50 },
+    ];
+    let call = 0;
+    const impl = (async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.includes('/api/vendors')) return new Response(JSON.stringify({ items: [], total: 0 }), { status: 200 });
+      if (url.includes('/api/models')) return new Response(JSON.stringify(pages[call++] ?? pages[1]), { status: 200 });
+      return new Response(JSON.stringify({ items: [], total: 0 }), { status: 200 });
+    }) as unknown as typeof fetch;
+    const result = await catalog({ fetchImpl: impl });
+    expect(result.models).toHaveLength(60);
+  });
+});
+
+describe('错误分类', () => {
+  it('JSON 格式的 503 也归为可重试，而不是让 Agent 去改数据', async () => {
+    const { impl } = fakeFetch({ '/api/agent/status': { status: 503, body: { error: { message: '数据库繁忙' } } } });
+    await expect(status(undefined, { token: TOKEN, fetchImpl: impl })).rejects.toMatchObject({ code: EXIT.network });
+  });
+
+  it('HTML 403 归为未登录（CDN 拦请求的典型形态）', async () => {
+    const impl = (async () => new Response('<html>forbidden</html>', { status: 403 })) as unknown as typeof fetch;
+    await expect(status(undefined, { token: TOKEN, fetchImpl: impl })).rejects.toMatchObject({ code: EXIT.unauthorized });
+  });
+
+  it('成功状态但正文不是 JSON 时归为可重试', async () => {
+    const impl = (async () => new Response('<html>ok</html>', { status: 200 })) as unknown as typeof fetch;
+    await expect(status(undefined, { token: TOKEN, fetchImpl: impl })).rejects.toMatchObject({ code: EXIT.network });
+  });
+});
+
+describe('参数校验', () => {
+  it('--limit 缺值报用法错误，不静默用默认值', async () => {
+    process.env.ZD_TOKEN = TOKEN;
+    expect(await run(['status', '--limit'])).toBe(EXIT.usage);
+  });
+
+  it('--limit 超过服务端上限 50 报用法错误', async () => {
+    process.env.ZD_TOKEN = TOKEN;
+    expect(await run(['status', '--limit', '51'])).toBe(EXIT.usage);
+    expect(await run(['status', '--limit', '50'])).not.toBe(EXIT.usage);
+  });
+
+  it('未知命令不回显输入，避免把误传的凭证打到终端', async () => {
+    const secret = 'zd_' + 'b'.repeat(40);
+    expect(await run([secret])).toBe(EXIT.usage);
+  });
+});
+
+describe('配置文件原子写入', () => {
+  it('覆盖已存在的宽权限文件后，权限收紧为 600 且内容是新凭证', async () => {
+    await mkdir(join(home, 'zd'), { recursive: true });
+    await writeFile(configPath(), JSON.stringify({ apiBase: 'x', token: 'zd_old' }), { mode: 0o666 });
+    await chmod(configPath(), 0o666);
+    await writeConfig({ apiBase: 'https://api.test', token: TOKEN });
+    expect(await readConfig()).toMatchObject({ token: TOKEN });
+    if (process.platform !== 'win32') {
+      expect((await stat(configPath())).mode & 0o777).toBe(0o600);
+    }
+  });
+
+  it('写入后目录里不留临时文件', async () => {
+    await writeConfig({ apiBase: 'https://api.test', token: TOKEN });
+    const entries = await readdir(join(home, 'zd'));
+    expect(entries.filter(name => name.endsWith('.tmp'))).toHaveLength(0);
   });
 });
 
