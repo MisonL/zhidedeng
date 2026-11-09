@@ -11,18 +11,18 @@ import { describe, expect, it } from 'vitest';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { forbiddenAgentFields } from '@zhidedeng/shared/submission';
-import { EXIT, validatePayload } from '../zd.ts';
+import { EXIT, validatePayload } from '../zdd.ts';
 
 const repoRoot = join(process.cwd(), '..');
-const skillPath = join(repoRoot, '.claude/skills/zd-submit/SKILL.md');
+const skillPath = join(repoRoot, '.claude/skills/zdd-submit/SKILL.md');
 
 async function skill(): Promise<string> {
   return readFile(skillPath, 'utf8');
 }
 
-/** 从 zd.ts 的 switch 分支反推真实存在的子命令，不硬编码。 */
+/** 从 zdd.ts 的 switch 分支反推真实存在的子命令，不硬编码。 */
 async function implementedCommands(): Promise<Set<string>> {
-  const source = await readFile(join(process.cwd(), 'zd.ts'), 'utf8');
+  const source = await readFile(join(process.cwd(), 'zdd.ts'), 'utf8');
   const body = source.slice(source.indexOf('export async function run'));
   const commands = new Set<string>();
   for (const match of body.matchAll(/case '([a-z]+)':/g)) commands.add(match[1]!);
@@ -48,13 +48,13 @@ describe('SKILL.md 与 CLI 一致', () => {
     const text = await skill();
     const commands = await implementedCommands();
     expect(commands.size).toBeGreaterThan(0);
-    const missing = [...commands].filter(command => !text.includes(`zd ${command}`));
+    const missing = [...commands].filter(command => !text.includes(`zdd ${command}`));
     expect(missing, `这些命令在文档里没写：${missing.join(', ')}`).toEqual([]);
   });
 
-  it('文档里提到的每个 zd 子命令都真实存在', async () => {
+  it('文档里提到的每个 zdd 子命令都真实存在', async () => {
     const text = await skill();
-    const mentioned = new Set([...text.matchAll(/zd ([a-z]+)/g)].map(match => match[1]!));
+    const mentioned = new Set([...text.matchAll(/zdd ([a-z]+)/g)].map(match => match[1]!));
     const commands = await implementedCommands();
     const unknown = [...mentioned].filter(command => !commands.has(command) && command !== 'help');
     expect(unknown, `文档里这些命令不存在：${unknown.join(', ')}`).toEqual([]);
@@ -165,12 +165,12 @@ describe('SKILL.md 与 CLI 一致', () => {
 
   it('文档告诉 Agent 先登录，而不是看到 5 就停下', async () => {
     const text = await skill();
-    expect(text).toContain('zd login');
-    expect(text).toMatch(/还没有登录[\s\S]{0,200}zd login/);
+    expect(text).toContain('zdd login');
+    expect(text).toMatch(/还没有登录[\s\S]{0,200}zdd login/);
   });
 
-  it('文档说明了 zd 的调用方式，不只假设它在 PATH 里', async () => {
-    expect(await skill()).toMatch(/\.\/scripts\/zd|command not found/);
+  it('文档说明了 zdd 的调用方式，不只假设它在 PATH 里', async () => {
+    expect(await skill()).toMatch(/.\/scripts\/zdd|command not found/);
   });
 
   it('提到了 deduplicated 语义，避免 Agent 把幂等命中当失败', async () => {
