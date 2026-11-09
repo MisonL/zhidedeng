@@ -437,23 +437,36 @@ export function parseArgs(argv: string[]): ParsedArgs {
   return { command, positional, flags };
 }
 
-/** 输出到 stdout，保证是单行 JSON，方便 Agent 管道解析。 */
+/**
+ * 输出到 stdout，保证是单行 JSON，方便 Agent 管道解析。
+ *
+ * 这里统一脱敏而不是让每个调用点自己处理：早先只在 catch 分支抹了凭证，
+ * 批量提交的结果走的是成功路径，里面的服务端 message 和文件名照样带出明文。
+ */
 function emit(value: unknown): void {
-  process.stdout.write(JSON.stringify(value) + '\n');
+  process.stdout.write(JSON.stringify(scrubSecret(value)) + '\n');
 }
 
-/** 凭证形态的字符串（zd_ + 足够长的随机串）。错误消息里出现就必须抹掉。 */
-const TOKEN_PATTERN = /zd_[A-Za-z0-9_-]{16,}/g;
+/**
+ * 凭证形态的字符串。真实凭证是 `zd_` + 43 个 base64url 字符，
+ * 这里要求至少 32 个，避免把 `zd_model_identifier_2026` 这类正常标识误抹。
+ */
+const TOKEN_PATTERN = /zd_[A-Za-z0-9_-]{32,}/g;
 
 /**
- * 抹掉字符串里的凭证。服务端的错误消息、fetch 异常、用户误传的文件名
- * 都可能把明文凭证带出来，统一在出口处处理，不依赖每个调用点自觉。
+ * 抹掉凭证。服务端错误消息、fetch 异常、用户误传的文件名都可能把明文
+ * 带出来，统一在出口处理，不依赖每个调用点自觉。
+ *
+ * 键名也要抹：`detail` 里的对象键同样可能被拼进凭证。
  */
 export function scrubSecret(value: unknown): unknown {
   if (typeof value === 'string') return value.replace(TOKEN_PATTERN, 'zd_***');
   if (Array.isArray(value)) return value.map(scrubSecret);
   if (typeof value === 'object' && value !== null) {
-    return Object.fromEntries(Object.entries(value).map(([key, child]) => [key, scrubSecret(child)]));
+    return Object.fromEntries(Object.entries(value).map(([key, child]) => [
+      typeof key === 'string' ? key.replace(TOKEN_PATTERN, 'zd_***') : key,
+      scrubSecret(child),
+    ]));
   }
   return value;
 }
