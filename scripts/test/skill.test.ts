@@ -131,7 +131,9 @@ describe('SKILL.md 与 CLI 一致', () => {
     for (const [pattern, value, name] of expectations) {
       const row = table.find(cells => pattern.test(cells[0]!));
       expect(row, `配额表缺少 ${name} 那一行`).toBeDefined();
-      expect(row![1], `${name} 应为 ${value}`).toContain(String(value));
+      const count = row![1]!.match(/^(\d+)\s*条(?:\/小时)?(?:[（(]|$)/);
+      expect(count, `${name} 的数量格式不合法：${row![1]}`).not.toBeNull();
+      expect(Number(count![1]), `${name} 应为 ${value}`).toBe(value);
     }
   });
 
@@ -144,22 +146,38 @@ describe('SKILL.md 与 CLI 一致', () => {
     const submission = await readFile(join(repoRoot, 'shared/src/submission.ts'), 'utf8');
     const limits = new Map<string, number>();
     for (const match of submission.matchAll(/\b([a-zA-Z]+):\s*text\((\d+)\)/g)) {
-      limits.set(match[1]!, Number(match[2]));
+      if (!forbiddenAgentFields.has(match[1]!.toLowerCase())) limits.set(match[1]!, Number(match[2]));
     }
     expect(limits.size).toBeGreaterThan(5);
 
     const table = tableRows(await skill(), '| 字段 | 约束 |');
 
-    for (const [field, limit] of limits) {
-      // 只看第一列是不是这个字段。不然 offers 那行提到 modelSlug，
-      // 会被误认为 modelSlug 的约束行。
+    // 必须真正找到这一行。早先 `if (!row) continue` 会让删掉整行的变异静默通过。
+    const missing: string[] = [];
+    for (const field of limits.keys()) {
       const row = table.find(cells =>
         cells[0]!.replace(/`/g, '').split('/').some(name => name.trim() === field));
-      if (!row) continue; // 没进约束表的字段不强制（如 hostname、publishedAt）
-      expect(
-        new RegExp(`\\b${limit}\\b`).test(row[1]!),
-        `文档里 ${field} 应写明上限 ${limit}，实际写的是：${row[1]}`,
-      ).toBe(true);
+      if (!row) missing.push(field);
+    }
+    expect(missing, `这些字段在约束表里没有独立一行：${missing.join(', ')}`).toEqual([]);
+
+    for (const [field, limit] of limits) {
+      const cells = table.find(cell =>
+        cell[0]!.replace(/`/g, '').split('/').some(name => name.trim() === field))!;
+      const names = cells[0]!.replace(/`/g, '').split('/').map(name => name.trim());
+      const numbers = [...cells[1]!.matchAll(/\d+/g)].map(match => Number(match[0]));
+
+      if (field === 'title' || field === 'summary' || field === 'body') {
+        // 这三个挤在一行，用「斜杠分隔的字段名」和「斜杠分隔的数字」按位置对齐。
+        const segments = cells[1]!.split('/').map(part => part.trim());
+        expect(segments.length, `${field} 那一行的数字应和字段一一对应：${cells[1]}`).toBe(names.length);
+        const index = names.indexOf(field);
+        expect(Number(segments[index]!.match(/^\d+/)?.[0]), `文档里 ${field} 的上限写错了：${cells[1]}`).toBe(limit);
+        continue;
+      }
+
+      // 单字段行：直接比对唯一的那个上限数字。
+      expect(numbers, `文档里 ${field} 的上限应恰好是 ${limit}：${cells[1]}`).toEqual([limit]);
     }
   });
 
