@@ -135,8 +135,12 @@ zdd match "Claude Sonnet 4.5"
 | `url` | http/https，最多 300 字，**不能带 `?`、`#`、账号密码** |
 | `rate` | 相对倍率，范围 0.05 ~ 20 |
 | `offers` | 最多 100 条，**同一 modelSlug 不能重复** |
+| `modelSlug` | 最多 200 字，必须是平台已收录的 slug |
+| `paymentMethods` | 最多 10 项，**每项最多 20 字** |
 | `title` / `summary` / `body` | 100 / 200 / 5000 字上限 |
 | `authorName` | 最多 30 字 |
+| `hostname` | 可选，最多 253 字，只能主机名加可选端口 |
+| `rechargeThreshold` | 必填，非负数或 `null`（无数据时用 `null`，不能省略） |
 
 **不接受多余字段。** 多写一个字段整条会被拒。
 
