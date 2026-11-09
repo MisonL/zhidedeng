@@ -162,6 +162,25 @@ describe('Bearer 凭证校验', () => {
     read.mockRestore();
     expect(pendingCount()).toBe(0);
   });
+
+  it.each(['吊销', '禁用'])('已存在同内容 pending 时，正文读取期间%s，幂等重放也必须拒绝', async action => {
+    // 幂等重放命中已有记录会提前返回、不执行 beforeInsert，所以入口那一道
+    // 鉴权必须单独有效。这里在正文读取期间吊销，确保只有入口校验能拦住。
+    const key = credential();
+    const first = await submitted(await submitStation(key));
+    expect(pendingCount()).toBe(1);
+    const originalText = Request.prototype.text;
+    const read = vi.spyOn(Request.prototype, 'text').mockImplementationOnce(async function (this: Request) {
+      const body = await originalText.call(this);
+      if (action === '吊销') revokeAgentToken(store, 'Alice', key.id, clock);
+      else setAccountDisabled(store, 'Alice', true, clock);
+      return body;
+    });
+    await error(await submitStation(key), 401, 'UNAUTHENTICATED');
+    read.mockRestore();
+    expect(pendingCount()).toBe(1);
+    expect(server.db.prepare('SELECT status FROM submissions WHERE id = ?').get(first.submission.id)?.status).toBe('pending');
+  });
 });
 
 describe('提交和审核', () => {
@@ -179,6 +198,22 @@ describe('提交和审核', () => {
     expect(new Service(store, () => clock, null).getStation('sub-station-0-example-com')).toMatchObject({
       source: 'agent', rechargeThreshold: null, uptime: null, firstTokenLatencyMs: null, foundedAt: null, status: null, score: null,
     });
+  });
+
+  it('审核物化时强制清空实测指标，即使 payload 被绕过校验塞进了值', async () => {
+    // 禁字段校验是第一道防线，物化时的显式 null 是第二道。
+    // 这里直接写库模拟「绕过校验的脏数据」，确认第二道防线独立有效。
+    const key = credential();
+    const dirty = { ...station(0), uptime: 99.9, firstTokenLatencyMs: 500, foundedAt: '2020-01-01', status: 'running' };
+    openStore(server.db).db.prepare(`INSERT INTO submissions
+      (id, kind, channel, originKey, batchId, action, autoApproved, payload, payloadHash, actorHandle, ip, status, createdAt)
+      VALUES ('dirty-1', 'station', 'agent', 'station-0.example.com', NULL, 'upsert', 0, ?, 'h-dirty', 'Alice', ?, 'pending', ?)`)
+      .run(JSON.stringify(dirty), IP, clock.toISOString());
+    approve('dirty-1');
+    expect(new Service(store, () => clock, null).getStation('sub-station-0-example-com')).toMatchObject({
+      source: 'agent', uptime: null, firstTokenLatencyMs: null, foundedAt: null, status: null, score: null,
+    });
+    expect(key.token).toBeTruthy();
   });
 
   it('评价复用投稿 schema，保留正文，审核后作者绑定凭证账号', async () => {
@@ -305,6 +340,34 @@ describe('六个配额维度', () => {
     expect(pendingCount()).toBe(2);
   });
 
+  it('其他渠道留下的 originKey 大小写或尾点变体，同样计入 hostname 限额', async () => {
+    // enqueueSubmission 会规范化 originKey，所以直接写库模拟历史遗留的未规范化数据。
+    // 计数必须自己再做一次 lower/rtrim，否则大小写变体就能绕过单 hostname 上限。
+    const key = credential();
+    const raw = (id: string) => server.db.prepare(`INSERT INTO submissions
+      (id, kind, channel, originKey, batchId, action, autoApproved, payload, payloadHash, actorHandle, ip, status, createdAt)
+      VALUES (?, 'station', 'feishu', 'Station-0.Example.COM.', NULL, 'upsert', 0, ?, ?, NULL, ?, 'pending', ?)`)
+      .run(id, JSON.stringify(station(0, { name: '历史版本 ' + id })), 'hash-' + id, IP, clock.toISOString());
+    raw('legacy-1');
+    raw('legacy-2');
+    await error(await submitStation(key, station(0)), 409, 'TOO_MANY_PENDING', 'hostname');
+    expect(pendingCount()).toBe(2);
+  });
+
+  it('待审数超过 hostname 上限时，余量显示 0 而不是负数', async () => {
+    const key = credential();
+    const first = await submitted(await submitStation(key));
+    await submitted(await submitPost(key, post({ hostname: 'station-0.example.com' })));
+    // 模拟历史上限更宽或规则收紧后遗留的超额数据：手工再插一条同 hostname 的 pending。
+    enqueueSubmission(store, {
+      kind: 'post', channel: 'agent', actorHandle: 'Alice', originKey: 'agent:Alice:overflow',
+      payload: post({ title: '溢出条目', hostname: 'station-0.example.com' }), ip: IP, now: clock,
+    });
+    const quota = (await status(key)).quotas.hostnames;
+    expect(quota).toEqual([{ hostname: 'station-0.example.com', pendingCount: 3, limit: 2, remaining: 0 }]);
+    expect(first.submission.id).toBeTruthy();
+  });
+
   it('全局 pending 达到 200 条熔断，计入其他渠道，审核后恢复', async () => {
     const key = credential();
     seedPending(200);
@@ -397,6 +460,7 @@ describe('内容完整性与 URL 边界', () => {
     '10.0.0.1', '10.255.255.255', '172.16.0.1', '172.31.255.255', '192.168.1.1', '169.254.0.1', '0.0.0.0',
     '[::1]', '[::]', '[fc00::1]', '[fdff::1]', '[fe80::1]', '[fec0::1]', '[::ffff:127.0.0.1]', '[::ffff:10.0.0.1]', '[::ffff:192.168.1.1]',
     'localhost', 'LOCALHOST.', 'sub.localhost', 'localhost.localdomain', 'host.local', 'host.internal.',
+    'internal.corp.example',
   ])('拒绝内网、回环或本地 URL hostname %s', async hostname => {
     await error(await submitStation(credential(), station(0, { url: `http://${hostname}/` })), 400, 'INVALID_INPUT', 'url');
     expect(pendingCount()).toBe(0);
@@ -408,6 +472,12 @@ describe('内容完整性与 URL 边界', () => {
 
   it.each(['https://8.8.8.8/', 'https://[2001:4860:4860::8888]/', 'https://[::ffff:8.8.8.8]/', 'http://172.15.255.255/', 'http://172.32.0.1/'])('接受公网地址 %s', async url => {
     await submitted(await submitStation(credential(), station(0, { url })));
+  });
+
+  it('IDN 域名规范化成 punycode 后正常入队，不因 Unicode 字符被误判为内网', async () => {
+    const result = await submitted(await submitStation(credential(), station(0, { url: 'https://例え.jp/' })));
+    const row = openStore(server.db).db.prepare('SELECT originKey FROM submissions WHERE id = ?').get(result.submission.id);
+    expect(row?.originKey).toBe('xn--r8jz45g.jp');
   });
 
   it.each(['ftp://example.com/', 'javascript:alert(1)', 'data:text/plain,test', '/relative', 'not-a-url'])('拒绝非 http/https 或无效 URL %s', async url => {
@@ -428,12 +498,12 @@ describe('内容完整性与 URL 边界', () => {
 
   it('站点 URL 和评价 hostname 的 IDN 规范化一致，审核后能关联', async () => {
     const key = credential();
-    const stationResult = await submitted(await submitStation(key, station(0, { url: 'https://例子.example/' })));
+    const stationResult = await submitted(await submitStation(key, station(0, { url: 'https://例子.jp/' })));
     approve(stationResult.submission.id);
-    const postResult = await submitted(await submitPost(key, post({ hostname: '例子.EXAMPLE.' })));
+    const postResult = await submitted(await submitPost(key, post({ hostname: '例子.JP.' })));
     approve(postResult.submission.id);
     const published = store.get('post', `sub-${postResult.submission.id}`)!;
-    expect(store.get('station', published.stationSlug!)?.url).toBe('https://xn--fsqu00a.example/');
+    expect(store.get('station', published.stationSlug!)?.url).toBe('https://xn--fsqu00a.jp/');
   });
 
   it.each([
