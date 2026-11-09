@@ -46,9 +46,14 @@ function stripComments(source: string): string {
 }
 
 /**
- * 找出所有「动态 import 但参数无法静态确定」的位置。
+ * 找出所有「动态 import 但实参不是一个完整字面量」的位置。
  *
- * 模板字符串里带 ${} 也算：Vite 同样解析不了，会退化成运行时拼接。
+ * 关键是要找到整个实参、而不是只看括号后第一个字符：
+ * `import('@zhidedeng/shared/' + 'submission')` 的第一个字符是引号，
+ * 只查首字符会放行，而 Vite 能把这种拼接静态求值、真的打出 zod chunk。
+ * 所以字面量结束之后必须紧跟 `)`，出现 `+` 就算拼接。
+ *
+ * 模板字符串里带 `\${}` 同样算违规：Vite 解析不了，会退化成运行时拼接。
  */
 export function findNonLiteralImports(source: string): number[] {
   const clean = stripComments(source);
@@ -59,14 +64,23 @@ export function findNonLiteralImports(source: string): number[] {
     let index = match.index + match[0].length;
     while (index < clean.length && /\s/.test(clean[index]!)) index++;
     const quote = clean[index];
-    let literal = false;
+    let end = -1;
     if (quote === "'" || quote === '"') {
-      literal = clean.indexOf(quote, index + 1) > index;
+      let cursor = index + 1;
+      while (cursor < clean.length && clean[cursor] !== quote) cursor += clean[cursor] === '\\' ? 2 : 1;
+      if (clean[cursor] === quote) end = cursor + 1;
     } else if (quote === '`') {
-      const end = clean.indexOf('`', index + 1);
-      literal = end > index && !clean.slice(index + 1, end).includes('${');
+      let cursor = index + 1;
+      while (cursor < clean.length && clean[cursor] !== '`') cursor += clean[cursor] === '\\' ? 2 : 1;
+      if (clean[cursor] === '`' && !clean.slice(index + 1, cursor).includes('${')) end = cursor + 1;
     }
-    if (!literal) hits.push(match.index);
+    if (end < 0) {
+      hits.push(match.index);
+      continue;
+    }
+    let next = end;
+    while (next < clean.length && /\s/.test(clean[next]!)) next++;
+    if (clean[next] !== ')') hits.push(match.index);
   }
   return hits;
 }
@@ -116,18 +130,26 @@ describe('前端产物不含 zod', () => {
     expect(offenders).toEqual([]);
   });
 
-  it('探针能分辨字面量和非字面量的动态 import', () => {
-    expect(findNonLiteralImports('const m = await import(p)')).toHaveLength(1);
-    expect(findNonLiteralImports('const m = await import( path )')).toHaveLength(1);
-    // 模板里带插值同样无法静态解析
-    expect(findNonLiteralImports('const m = await import(`./${name}`)')).toHaveLength(1);
+  it('探针能分辨字面量实参和各种绕法', () => {
+    // 放行：实参是单一完整字面量
     expect(findNonLiteralImports("const m = await import('x')")).toHaveLength(0);
     expect(findNonLiteralImports('const m = await import(`x`)')).toHaveLength(0);
     expect(findNonLiteralImports("const m = await import( 'x' )")).toHaveLength(0);
-    expect(findNonLiteralImports('const m = await import("./x")')).toHaveLength(0);
+    expect(findNonLiteralImports(`const m = await import(\n  'x'\n)`)).toHaveLength(0);
+
+    // 拦下：拼接。Vite 能把纯字面量拼接静态求值，真的会打进产物
+    expect(findNonLiteralImports(`import('prefix' + name)`)).toHaveLength(1);
+    expect(findNonLiteralImports(`import(name + 'suffix')`)).toHaveLength(1);
+    expect(findNonLiteralImports(`import('a' + 'b')`)).toHaveLength(1);
+
+    // 拦下：变量、模板插值、函数调用
+    expect(findNonLiteralImports('import(p)')).toHaveLength(1);
+    expect(findNonLiteralImports('import(`./${name}`)')).toHaveLength(1);
+    expect(findNonLiteralImports(`import(getPath())`)).toHaveLength(1);
+
     // 注释里的不算
     expect(findNonLiteralImports('// import(p)')).toHaveLength(0);
-    expect(findNonLiteralImports('/* import(p) */')).toHaveLength(0);
+    expect(findNonLiteralImports("/* import('a' + b) */")).toHaveLength(0);
   });
 
   it('没有源码直接引入 zod', async () => {
