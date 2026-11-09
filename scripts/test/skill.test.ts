@@ -135,14 +135,31 @@ describe('SKILL.md 与 CLI 一致', () => {
     }
   });
 
-  it('文档里写的字段字长上限在 schema 里存在', async () => {
+  it('文档里每个字段的字长上限都与 schema 一致', async () => {
+    // 从 schema 源码直接读 text(N) 的上限，再核对文档有没有写对。
+    //
+    // 早先只匹配「最多 N 字」，漏掉了 title / summary / body 写在同一行、
+    // 用斜杠分隔 100 / 200 / 5000 的那种行 —— 把 body 改成 9999 测试也不会报。
+    // 所以这里按字段名逐个找，找不到对应数字就算失败。
     const submission = await readFile(join(repoRoot, 'shared/src/submission.ts'), 'utf8');
+    const limits = new Map<string, number>();
+    for (const match of submission.matchAll(/\b([a-zA-Z]+):\s*text\((\d+)\)/g)) {
+      limits.set(match[1]!, Number(match[2]));
+    }
+    expect(limits.size).toBeGreaterThan(5);
+
     const table = tableRows(await skill(), '| 字段 | 约束 |');
-    expect(table.length).toBeGreaterThan(0);
-    for (const row of table) {
-      const match = row[1]?.match(/最多\s*(\d+)\s*字/);
-      if (!match) continue;
-      expect(submission, `文档说 ${row[0]} 最多 ${match[1]} 字，schema 里没有这个数字`).toContain(match[1]!);
+
+    for (const [field, limit] of limits) {
+      // 只看第一列是不是这个字段。不然 offers 那行提到 modelSlug，
+      // 会被误认为 modelSlug 的约束行。
+      const row = table.find(cells =>
+        cells[0]!.replace(/`/g, '').split('/').some(name => name.trim() === field));
+      if (!row) continue; // 没进约束表的字段不强制（如 hostname、publishedAt）
+      expect(
+        new RegExp(`\\b${limit}\\b`).test(row[1]!),
+        `文档里 ${field} 应写明上限 ${limit}，实际写的是：${row[1]}`,
+      ).toBe(true);
     }
   });
 
