@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# zd 的启动壳。Node 22 可以直接跑 .ts，不需要编译。
+# 真正的实现在同目录的 zd.ts。
+set -euo pipefail
+exec node --experimental-strip-types "$(dirname "$0")/zd.ts" "$@"
