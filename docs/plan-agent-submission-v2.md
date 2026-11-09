@@ -1,7 +1,7 @@
 # 设计方案 v2：统一提交通道
 
 > 迁移自 `docs/agent-submission` 分支的 `2a6c940`，按当前 PR5 基线 `89014e3` 校正。
-> PR1~8 已实现：统一队列、飞书改道、凭证签发、Agent 提交 API、zd 命令行、zd-submit Skill。PR9 是本次文档整理。
+> PR1~8 已实现：统一队列、飞书改道、凭证签发、Agent 提交 API、zdd 命令行、zdd-submit Skill。PR9 是本次文档整理。
 > 「当前实现」后面的文件行号对应本基线；草案不构成已发布契约。公开契约以 `shared/src/api.ts` 和 `shared/src/routes.ts` 为准。
 
 ## 1. 核心转变
@@ -243,25 +243,25 @@ rateEligible 需要该模型至少 3 个站点报价；达标模型优先，再�
 
 历史「0.0001 会给无实测站点算出 30000 分」是错误论断：uptime=null 时 score 直接为 null。原来的问题在低价排序和模型榜低价加成，不能继续把已收紧的倍率和旧单报价规则写成当前漏洞（当前实现：`server/src/service.ts:71-76`）。这些规则约束排序，不证明报价本身真实，人工审核仍需核对公开条件。
 
-## 7. CLI zd
+## 7. CLI zdd
 
-以下保留原案的功能目标，当前没有 zd 命令实现：
+以下保留原案的功能目标，当前没有 zdd 命令实现：
 
 | 命令草案 | 目的 |
 |---|---|
-| zd login | 接入本人 Agent 凭证，安全输入和保存方式由 PR7 确定 |
-| zd whoami | 身份、准入和配额；当前没有对应已发布接口 |
-| zd catalog | 读取厂商、模型和站点目录 |
-| zd match | 匹配现有模型名，未知模型提示先由管理员收录 |
-| zd validate ./x.json | 本地字段校验，不能证明当前服务器模型是否存在 |
-| zd submit ./x.json | 提交数据，最终种类和批量参数随 PR6/7 确认 |
-| zd status | 查询审核状态与可对外反馈的 reason，契约待 PR6 |
+| zdd login | 接入本人 Agent 凭证，安全输入和保存方式由 PR7 确定 |
+| zdd whoami | 身份、准入和配额；当前没有对应已发布接口 |
+| zdd catalog | 读取厂商、模型和站点目录 |
+| zdd match | 匹配现有模型名，未知模型提示先由管理员收录 |
+| zdd validate ./x.json | 本地字段校验，不能证明当前服务器模型是否存在 |
+| zdd submit ./x.json | 提交数据，最终种类和批量参数随 PR6/7 确认 |
+| zdd status | 查询审核状态与可对外反馈的 reason，契约待 PR6 |
 
 原案的设计理由是用确定性 CLI 帮 Agent 匹配目录、预检、提交和自我修正。计划输出 JSON；CLI 与服务器复用同一份校验规则，避免双写。当前 schema 位于服务端，原稿提到的 shared/src/submission.ts 还不存在，共享校验和配置存储都属于 PR7 工作。运行时凭证从环境变量或密钥管理读取，不能写进提交 JSON、源码或日志。
 
 ## 8. Skill
 
-原案计划 `.claude/skills/zd-submit/SKILL.md`，尚未实施；最终位置由 PR8 确定。保留的工作流：
+原案计划 `.claude/skills/zdd-submit/SKILL.md`，尚未实施；最终位置由 PR8 确定。保留的工作流：
 
 1. 检查身份与提交资格。
 2. catalog -> match -> 构造公开信息 -> validate -> submit。
@@ -280,8 +280,8 @@ rateEligible 需要该模型至少 3 个站点报价；达标模型优先，再�
 | 4 | feat/feishu-to-queue | 飞书批次入队、人工下架、跨渠道版本保护和坏数据中止 | 已包含，663cf44、005174f、a0913e1 |
 | 5 | feat/agent-tokens | 凭证准入与管理、签发限流、补列迁移、阻止冒用 Agent 文章取得准入 | 已包含，ceffd69、89014e3 |
 | 6 | feat/agent-submit-api | /api/agent/*、Bearer、提交配额与重试契约 | 已实现 |
-| 7 | feat/zd-cli | CLI 与共享校验 | 已实现 |
-| 8 | feat/zd-submit-skill | Agent 提交 Skill | 已实现 |
+| 7 | feat/zdd-cli | CLI 与共享校验 | 已实现 |
+| 8 | feat/zdd-submit-skill | Agent 提交 Skill | 已实现 |
 | 9 | docs/agent-submission | README、规范、方案及审阅记录；实际工作分支 docs/agent-submission-pr9 | 本 PR 文档整理，待审阅，未提交 |
 
 PR1~5 状态依据本分支 `git log main..89014e3`；PR6~9 的任务状态来自本次派发，不代表远端已经合并或部署。原估算行数已由实际拆分替代，不用估算当验收结论。
