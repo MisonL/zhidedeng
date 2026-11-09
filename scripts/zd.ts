@@ -31,7 +31,7 @@ const NEXT_ACTION: Record<number, string> = {
   [EXIT.network]: '网络或服务端问题，可以稍后原样重试',
   [EXIT.validation]: '本地校验未通过，按 issues 修正数据后重试，不要原样重试',
   [EXIT.rejected]: '服务端拒绝，按 message 修正后再试；配额类错误需要等待',
-  [EXIT.unauthorized]: '凭证无效或已吊销，请让账号持有人重新签发并 zd login',
+  [EXIT.unauthorized]: '先运行 zd login --key <凭证>；若提示凭证无效，请让账号持有人重新签发',
 };
 
 /** CLI 自身抛出的、带退出码的错误。 */
