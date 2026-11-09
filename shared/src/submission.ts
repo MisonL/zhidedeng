@@ -1,0 +1,47 @@
+import { z } from 'zod';
+import { MAX_RATE, MIN_RATE } from './domain.ts';
+
+/**
+ * 投稿 payload 的校验规则。
+ * 服务端和 `zd` CLI 共用这一份定义，避免本地通过、服务端拒绝的漂移。
+ */
+
+/** 单行文本：非空，长度受限，去掉首尾后仍非空。 */
+export const text = (max: number) => z.string().min(1).max(max).refine(value => value.trim().length > 0, '内容不能为空');
+
+/** 价格倍率，范围来自领域常量。 */
+export const offerRate = z.number().refine(rate => rate >= MIN_RATE && rate <= MAX_RATE, {
+  error: issue => ({ message: `倍率 ${String(issue.input)} 超出 ${MIN_RATE}~${MAX_RATE} 范围` }),
+});
+
+/** 可入库的站点网址：http/https，不带查询串、片段和账号密码。 */
+export const httpUrl = z.string().max(300).refine(value => {
+  if (value.includes('?') || value.includes('#')) return false;
+  try {
+    const url = new URL(value);
+    return (url.protocol === 'http:' || url.protocol === 'https:') && !url.username && !url.password;
+  } catch {
+    return false;
+  }
+});
+
+/** 模型和厂商的 slug 共用同一套规则：小写字母、数字和连字符，最长 64。 */
+const slugPattern = /^[a-z0-9][a-z0-9-]{0,63}$/;
+export const adminSlug = z.string().trim().regex(slugPattern);
+
+export const stationSchema = z.object({
+  name: text(60),
+  description: text(300),
+  url: httpUrl,
+  rechargeThreshold: z.number().min(0).nullable(),
+  paymentMethods: z.array(text(20)).max(10),
+  offers: z.array(z.object({ modelSlug: text(200), rate: offerRate })).max(100),
+}).refine(station => new Set(station.offers.map(offer => offer.modelSlug)).size === station.offers.length, '存在重复的报价');
+
+export const postSchema = z.object({
+  title: text(100), summary: text(200), body: text(5000), authorName: text(30),
+  authorHandle: text(200).nullish(), hostname: text(253).nullish(), publishedAt: z.iso.datetime().nullish(),
+});
+
+export type StationPayload = z.infer<typeof stationSchema>;
+export type PostPayload = z.infer<typeof postSchema>;
