@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { isIP } from 'node:net';
 import { z } from 'zod';
 import type { AgentRateQuota, AgentSubmitResponse, GetAgentStatusResponse, SubmissionKind } from '@zhidedeng/shared';
+import { agentPostSchema, agentStationSchema, findForbiddenAgentField } from '@zhidedeng/shared/submission';
 import { activeAgentHandle } from './agent-auth.ts';
 import { AttemptLimiter } from './auth.ts';
 import type { Store } from './database.ts';
@@ -15,14 +16,7 @@ const IP_PER_HOUR = 20;
 const ACCOUNT_PENDING = 5;
 const HOSTNAME_PENDING = 2;
 const GLOBAL_PENDING = 200;
-const agentStationSchema = stationSchema.strict();
-const agentPostSchema = postSchema.omit({ authorHandle: true }).strict();
 const statusQuerySchema = z.strictObject({ limit: z.coerce.number().int().min(1).max(50).default(20) });
-const forbidden = new Set([
-  'uptime', 'firsttokenlatencyms', 'foundedat', 'status', 'score', 'lowestrate',
-  'apikey', 'token', 'password', 'secret', 'authorhandle',
-  'accesstoken', 'refreshtoken', 'clientsecret', 'privatekey', 'authorization', 'credentials',
-]);
 
 export interface AgentRequest {
   handle: string;
@@ -31,20 +25,10 @@ export interface AgentRequest {
   now: Date;
 }
 
-/** 在 schema 丢弃未知字段之前检查所有层级，不扫描纯文本内容。 */
+/** 在 schema 丢弃未知字段之前检查所有层级，不扫描纯文本内容。规则与 zd CLI 共用。 */
 function rejectForbiddenFields(input: unknown) {
-  const pending: { value: unknown; path: string }[] = [{ value: input, path: '' }];
-  while (pending.length > 0) {
-    const { value, path } = pending.pop()!;
-    if (typeof value !== 'object' || value === null) continue;
-    for (const [key, child] of Object.entries(value)) {
-      const field = path ? `${path}.${key}` : key;
-      if (forbidden.has(key.replace(/[_-]/g, '').toLowerCase())) {
-        throw new ApiError(400, 'FORBIDDEN_FIELD', `Agent 投稿不允许字段 ${field}`);
-      }
-      pending.push({ value: child, path: field });
-    }
-  }
+  const field = findForbiddenAgentField(input);
+  if (field !== null) throw new ApiError(400, 'FORBIDDEN_FIELD', `Agent 投稿不允许字段 ${field}`);
 }
 
 function objectPayload(input: unknown): Record<string, unknown> {

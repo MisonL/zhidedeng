@@ -11,7 +11,7 @@ import { chmod, mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'no
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { API_ROUTES, type AgentSubmitResponse, type GetAgentStatusResponse } from '@zhidedeng/shared';
-import { postSchema, stationSchema } from '@zhidedeng/shared/submission';
+import { agentPostSchema, agentStationSchema, findForbiddenAgentField } from '@zhidedeng/shared/submission';
 
 export const EXIT = {
   ok: 0,
@@ -286,12 +286,21 @@ export function validatePayload(input: unknown): { kind: 'station' | 'post' | nu
   if (kind === null) {
     return { kind: null, issues: [{ field: '', message: '无法判断种类：站点需要 url 字段，评价需要 title 字段' }] };
   }
-  const schema = kind === 'station' ? stationSchema : postSchema;
+  // 禁用字段要先查：schema 会把未知字段剥掉，剥完再查就查不到了，
+  // 而服务端是在剥之前拒的。
+  const forbidden = findForbiddenAgentField(input);
+  if (forbidden !== null) {
+    return { kind, issues: [{ field: forbidden, message: 'Agent 投稿不允许这个字段，实测指标由平台自己采集' }] };
+  }
+  const schema = kind === 'station' ? agentStationSchema : agentPostSchema;
   const result = schema.safeParse(input);
   if (result.success) return { kind, issues: [] };
   return {
     kind,
-    issues: result.error.issues.map(issue => ({ field: issue.path.join('.'), message: issue.message })),
+    issues: result.error.issues.map(issue => ({
+      field: issue.code === 'unrecognized_keys' ? [...issue.path, ...issue.keys].join('.') : issue.path.join('.'),
+      message: issue.code === 'unrecognized_keys' ? '不认识这个字段，Agent 投稿不接受多余字段' : issue.message,
+    })),
   };
 }
 
@@ -392,14 +401,24 @@ export function parseArgs(argv: string[]): ParsedArgs {
   const flags: Record<string, string | boolean> = {};
   for (let index = 0; index < rest.length; index++) {
     const token = rest[index]!;
+    // `--` 之后一律当位置参数，不再按 flag 解析。
+    if (token === '--') {
+      positional.push(...rest.slice(index + 1));
+      break;
+    }
     if (token.startsWith('--')) {
-      const name = token.slice(2);
+      const body = token.slice(2);
+      const eq = body.indexOf('=');
+      if (eq >= 0) {
+        flags[body.slice(0, eq)] = body.slice(eq + 1);
+        continue;
+      }
       const next = rest[index + 1];
       if (next !== undefined && !next.startsWith('--')) {
-        flags[name] = next;
+        flags[body] = next;
         index++;
       } else {
-        flags[name] = true;
+        flags[body] = true;
       }
     } else {
       positional.push(token);
