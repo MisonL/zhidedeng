@@ -22,7 +22,8 @@ afterEach(async () => {
   delete process.env.ZD_TOKEN;
 });
 
-const TOKEN = 'zd_' + 'a'.repeat(40);
+// 与服务端签发格式一致：zd_ + 32 字节 base64url，固定 43 个字符。
+const TOKEN = 'zd_' + 'a'.repeat(43);
 const station = { name: '测试站', description: '描述', url: 'https://a.com/', rechargeThreshold: null, paymentMethods: [], offers: [] };
 const post = { title: '标题', summary: '摘要', body: '正文', authorName: '昵称' };
 
@@ -195,6 +196,24 @@ describe('地址优先级', () => {
 });
 
 describe('凭证脱敏', () => {
+  it('长业务文本不会被误抹', () => {
+    // 早期用「zd_ 后至少 16 个字符」判断，会把这类正常标识抹成 zd_***。
+    expect(scrubSecret('zd_model_identifier_2026')).toBe('zd_model_identifier_2026');
+    expect(scrubSecret('zd_' + 'x'.repeat(44))).toBe('zd_' + 'x'.repeat(44));
+  });
+
+  it('批量结果走 emit 时脱敏，错误消息里的凭证不会进 stdout', async () => {
+    // 批量走的是成功路径，早先只在外层 catch 里脱敏，明文照样打出去。
+    const secret = 'zd_' + 'B'.repeat(43);
+    expect(JSON.stringify(scrubSecret({ failed: [{ message: `凭据 ${secret} 无效` }] })))
+      .not.toContain(secret);
+  });
+
+  it('对象键名里的凭证也被抹掉', () => {
+    const secret = 'zd_' + 'D'.repeat(43);
+    expect(JSON.stringify(scrubSecret({ [secret]: 'x' }))).not.toContain(secret);
+  });
+
   it('错误消息里的凭证被抹掉', () => {
     expect(scrubSecret(`令牌 ${TOKEN} 无效`)).toBe('令牌 zd_*** 无效');
   });

@@ -448,10 +448,14 @@ function emit(value: unknown): void {
 }
 
 /**
- * 凭证形态的字符串。真实凭证是 `zd_` + 43 个 base64url 字符，
- * 这里要求至少 32 个，避免把 `zd_model_identifier_2026` 这类正常标识误抹。
+ * 凭证形态的字符串。服务端签发的是 `zd_` + 32 字节随机数的 base64url
+ * （server/src/agent-tokens.ts:40），固定 43 个字符。
+ *
+ * 早先写成「至少 16 个」会把 `zd_model_identifier_2026` 这类正常标识误抹；
+ * 放宽到「至少 32 个」又误伤 45 字符的合法模型名。按精确长度匹配才能真正
+ * 区分凭证和普通文本——这是唯一确定凭证样子的地方。
  */
-const TOKEN_PATTERN = /zd_[A-Za-z0-9_-]{32,}/g;
+const TOKEN_PATTERN = /zd_[A-Za-z0-9_-]{43}(?![A-Za-z0-9_-])/g;
 
 /**
  * 抹掉凭证。服务端错误消息、fetch 异常、用户误传的文件名都可能把明文
