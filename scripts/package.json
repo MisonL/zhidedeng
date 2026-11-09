@@ -6,7 +6,7 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "zd": "node --experimental-strip-types zd.ts"
+    "zdd": "node --experimental-strip-types zdd.ts"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

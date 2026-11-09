@@ -244,17 +244,17 @@ const lowestRate = eligibleRates.length ? Math.min(...eligibleRates) : null;
 
 不足 3 个报价的模型不参与「最低倍率」计分，只计 `stationCount`。
 
-## 7. CLI `zd`
+## 7. CLI `zdd`
 
 ```
-zd login --key zd_xxx        保存凭证，~/.config/zd/config.json 权限 0600
-zd whoami                    身份 + 准入状态 + 配额余量
-zd catalog                   厂商、模型、已有站点（含 hostname 提示）
-zd match "Claude Sonnet 4.5" 模型名模糊匹配 → 已存在则给 slug，否则提示走 model 提交
-zd validate ./x.json         跑共享 schema，不联网
-zd submit ./x.json           提交（支持 station / model / post 三种 kind）
-zd submit --batch ./dir/     批量提交
-zd status [--id]             审核进度 + 拒绝原因
+zdd login --key zd_xxx        保存凭证，~/.config/zdd/config.json 权限 0600
+zdd whoami                    身份 + 准入状态 + 配额余量
+zdd catalog                   厂商、模型、已有站点（含 hostname 提示）
+zdd match "Claude Sonnet 4.5" 模型名模糊匹配 → 已存在则给 slug，否则提示走 model 提交
+zdd validate ./x.json         跑共享 schema，不联网
+zdd submit ./x.json           提交（支持 station / model / post 三种 kind）
+zdd submit --batch ./dir/     批量提交
+zdd status [--limit N]        审核进度 + 拒绝原因
 ```
 
 所有命令输出 JSON。`status` 必须返回 `reason` 字段，供 Agent 自我修正。
@@ -263,10 +263,10 @@ zd status [--id]             审核进度 + 拒绝原因
 
 ## 8. Skill
 
-`.claude/skills/zd-submit/SKILL.md`：
+`.claude/skills/zdd-submit/SKILL.md`：
 
 1. 触发条件
-2. 前置检查（`zd whoami`）
+2. 前置检查（`zdd whoami`）
 3. 必走流程：`catalog` → `match` → 构造 → `validate` → `submit`
 4. **禁止事项**：不得提交 `uptime`/`firstTokenLatencyMs`；不得编造未验证的倍率；不得重复提交同站
 5. 错误码 → 修复动作对照表
@@ -281,8 +281,8 @@ zd status [--id]             审核进度 + 拒绝原因
 | 4 | `feat/feishu-to-queue` | 飞书同步改走 submission 队列 | 3 | 250 行 |
 | 5 | `feat/agent-tokens` | `agent_tokens` 表 + 准入判定 + 凭证管理 + 设置页 | 3 | 220 行 |
 | 6 | `feat/agent-submit-api` | `/api/agent/*` + 速率/配额/幂等 | 3、5 | 300 行 |
-| 7 | `feat/zd-cli` | `scripts/zd.ts` + 共享 schema | 6 | 400 行 |
-| 8 | `feat/zd-submit-skill` | SKILL.md | 7 | 150 行 |
+| 7 | `feat/zdd-cli` | `scripts/zdd.ts` + 共享 schema | 6 | 400 行 |
+| 8 | `feat/zdd-submit-skill` | SKILL.md | 7 | 150 行 |
 | 9 | `docs/agent-submission` | README + `docs/spec.md` | 全部 | 100 行 |
 
 合计约 2100 行。比 v1 的 1500 行多，但 v1 是错的。
