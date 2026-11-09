@@ -12,4 +12,8 @@ playwright-report/
 test-results/
 docs/ref/
 assets-src/
-.claude/
+# 本地 Claude 配置不入库，但项目自带的 skill 要随仓库分发。
+.claude/*
+!.claude/skills/
+.claude/skills/*
+!.claude/skills/*/
