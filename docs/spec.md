@@ -173,3 +173,4 @@ channel 是队列的来源渠道，source 是物化内容的展示来源，二�
 - `GET /banners`
 - `GET /search?q=`（models、stations、posts 三组，各最多 10 条）
 - `GET /hot-searches`
+- `POST /agent/stations`、`POST /agent/posts`、`GET /agent/status?limit=1..50` —— Agent 提交通道，`Authorization: Bearer zd_...` 鉴权。请求体是扁平 JSON 对象，不接受多余字段；实测指标字段（uptime、firstTokenLatencyMs、foundedAt、status、score、lowestRate）和凭证类字段一律 400 FORBIDDEN_FIELD，`authorHandle` 同样拒绝。提交进待审队列，幂等重提返回 deduplicated。速率配额：单凭证 10 条/小时、单账号 20 条/小时、单 IP 20 条/小时、单账号待审 5 条、单 hostname 待审 2 条、全站待审 200 条，超限分别返回 429 RATE_LIMITED 和 409 TOO_MANY_PENDING。凭证无效或吊销返回 401 UNAUTHENTICATED
