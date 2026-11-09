@@ -6,11 +6,12 @@
 
 Claude Code 会自动读取 `.claude/skills/` 下的 skill。仓库里已经带了这个目录，克隆即可用。
 
-需要先装好 `zdd` 并登录：
+`zdd` 由仓库自带的 `scripts/zdd` 启动，不需要单独安装，目前也没有发布到 npm。
+在仓库根目录登录：
 
 ```sh
-zdd login --key zd_xxx
-zdd whoami
+./scripts/zdd login --key zd_xxx
+./scripts/zdd whoami
 ```
 
 ## 文件
