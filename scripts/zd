@@ -1,5 +1,14 @@
 #!/usr/bin/env bash
 # zd 的启动壳。Node 22 可以直接跑 .ts，不需要编译。
 # 真正的实现在同目录的 zd.ts。
+#
+# 要解析软链：装包后 node_modules/.bin/zd 是指向本文件的符号链接，
+# 直接用 dirname "$0" 会定位到 .bin/ 而不是 scripts/，找不到 zd.ts。
 set -euo pipefail
-exec node --experimental-strip-types "$(dirname "$0")/zd.ts" "$@"
+source_path="${BASH_SOURCE[0]}"
+while [ -L "$source_path" ]; do
+  dir="$(cd -P "$(dirname "$source_path")" && pwd)"
+  source_path="$(readlink "$source_path")"
+  case "$source_path" in /*) ;; *) source_path="$dir/$source_path" ;; esac
+done
+exec node --experimental-strip-types "$(cd -P "$(dirname "$source_path")" && pwd)/zd.ts" "$@"
