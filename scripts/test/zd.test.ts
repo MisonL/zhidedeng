@@ -185,16 +185,27 @@ describe('请求与错误映射', () => {
 });
 
 describe('catalog', () => {
-  it('从分页结构里取出列表', async () => {
+  it('按服务端真实形状取列表：顶层 items，没有外层包裹', async () => {
+    // 服务端 paginate() 直接返回 {items,total,page,pageSize}。
+    // 之前这里的 mock 写成 {data:{items}} 是错的，恰好掩盖了 catalog 恒返回空的问题。
     const { impl } = fakeFetch({
-      '/api/vendors': { body: { data: [{ slug: 'anthropic' }] } },
-      '/api/models': { body: { data: [{ slug: 'claude', name: 'Claude', vendor: 'anthropic' }] } },
-      '/api/stations': { body: { data: { items: [{ slug: 'sub-a-com', name: 'A', url: 'https://a.com/' }] } } },
+      '/api/vendors': { body: { items: [{ slug: 'anthropic' }], total: 1, page: 1, pageSize: 20 } },
+      '/api/models': { body: { items: [{ slug: 'claude', name: 'Claude', vendor: 'anthropic' }], total: 1, page: 1, pageSize: 20 } },
+      '/api/stations': { body: { items: [{ slug: 'sub-a-com', name: 'A', url: 'https://a.com/' }], total: 1, page: 1, pageSize: 20 } },
     });
     const result = await catalog({ fetchImpl: impl });
     expect(result.vendors).toHaveLength(1);
     expect(result.models[0]).toMatchObject({ slug: 'claude' });
     expect(result.stations[0]).toMatchObject({ slug: 'sub-a-com' });
+  });
+
+  it('也接受裸数组响应', async () => {
+    const { impl } = fakeFetch({
+      '/api/vendors': { body: [{ slug: 'anthropic' }] },
+      '/api/models': { body: [] },
+      '/api/stations': { body: { items: [], total: 0, page: 1, pageSize: 20 } },
+    });
+    expect((await catalog({ fetchImpl: impl })).vendors).toHaveLength(1);
   });
 });
 
