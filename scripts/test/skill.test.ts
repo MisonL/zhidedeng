@@ -94,13 +94,19 @@ describe('SKILL.md 与 CLI 一致', () => {
     expect(trulyMissing, `实现里有但文档没列的禁字段：${trulyMissing.join(', ')}`).toEqual([]);
   });
 
-  it('文档列出的禁字段在实现里真的被拒', async () => {
-    // 反向验证：文档说不能写的字段，实际提交确实会被挡。
-    const documented = ['uptime', 'firstTokenLatencyMs', 'foundedAt', 'status', 'score', 'lowestRate'];
+  it('实现里的每个禁字段都真的被拒，且文档都提到了', async () => {
+    // 从实现的集合动态取，不硬编码 —— 早先只验了六个指标字段，
+    // 服务端新增凭证类禁字段而文档漏写时，测试不会报。
     const base = { name: 'x', description: 'y', url: 'https://a.com/', rechargeThreshold: null, paymentMethods: [], offers: [] };
-    for (const field of documented) {
+    const text = (await skill()).toLowerCase();
+    for (const field of forbiddenAgentFields) {
       const { issues } = validatePayload({ ...base, [field]: 1 });
-      expect(issues.length, `${field} 文档说不能写，但实际能通过校验`).toBeGreaterThan(0);
+      expect(issues.length, `禁字段 ${field} 实际能通过校验`).toBeGreaterThan(0);
+      // 文档用各种大小写和分隔符写法列出它们，统一规范化后比较。
+      const normalized = field.replace(/[_-]/g, '');
+      const mentioned = [...text.matchAll(/[a-z][a-z0-9_-]*/g)]
+        .some(match => match[0].replace(/[_-]/g, '') === normalized);
+      expect(mentioned, `禁字段 ${field} 没写进文档`).toBe(true);
     }
   });
 
