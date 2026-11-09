@@ -1,11 +1,11 @@
 ---
-name: zd-submit
+name: zdd-submit
 description: 让 AI Agent 把分析完的 AI API 中转站数据提交到「什么值得蹬」，取代人工填表。当用户要求「把这个中转站提交到值得蹬」「录入这个站」「投稿评测」「更新站点倍率」，或 Agent 刚分析完一个中转站的模型报价、想把它录入社区数据库时使用。
 ---
 
 # 向「什么值得蹬」提交中转站数据
 
-「什么值得蹬」是一个 AI API 中转站点评社区，用 `zd` 命令行投稿。你分析完一个站点后，通过这套流程把结构化数据提交进去，人工审核后公开。
+「什么值得蹬」是一个 AI API 中转站点评社区，用 `zdd` 命令行投稿。你分析完一个站点后，通过这套流程把结构化数据提交进去，人工审核后公开。
 
 ## 最重要的一件事
 
@@ -18,42 +18,42 @@ description: 让 AI Agent 把分析完的 AI API 中转站数据提交到「什�
 
 留空永远比编造好。平台对缺失字段的显示是「未知」，对错误数据的显示是一个谎言。
 
-## 第 0 步：确认 zd 能用
+## 第 0 步：确认 zdd 能用
 
 先从两种方式里选一个，**并且在本次会话中始终用同一种**：
 
 ```sh
-# 方式 A：已全局安装（控制台里直接敲 zd 就能用）
-zd help
+# 方式 A：已全局安装（控制台里直接敲 zdd 就能用）
+zdd help
 
 # 方式 B：用仓库自带实现（在仓库根目录执行）
-./scripts/zd help
+./scripts/zdd help
 ```
 
-能打印出命令清单就可以往下走。如果两种都不行 —— **停下来告诉用户需要先配置 `zd`**，不要自己尝试别的路径或另写脚本。
+能打印出命令清单就可以往下走。如果两种都不行 —— **停下来告诉用户需要先配置 `zdd`**，不要自己尝试别的路径或另写脚本。
 
-`zd` 需要 Node 22.18 以上。仓库里已带实现，不需要额外安装。
+`zdd` 需要 Node 22.18 以上。仓库里已带实现，不需要额外安装。
 
-**下面所有命令都写成 `zd ...`。** 如果你选的是方式 B，把每个 `zd` 换成 `./scripts/zd` 即可（在仓库根目录执行）。
+**下面所有命令都写成 `zdd ...`。** 如果你选的是方式 B，把每个 `zdd` 换成 `./scripts/zdd` 即可（在仓库根目录执行）。
 
 ## 第 1 步：登录
 
 ```sh
-zd login --key zd_xxx
+zdd login --key zd_xxx
 ```
 
 凭证由账号持有人在站点的「账户设置 → AI Agent 凭证」里签发，形如 `zd_` 开头的一长串。
 
-- 登录成功会存到 `~/.config/zd/config.json`（权限 0600）
+- 登录成功会存到 `~/.config/zdd/config.json`（权限 0600）
 - 已经登录过就不用重复执行
 - **凭证无效或格式不对时不要重试** —— 这说明需要用户重新签发
 
-如果用户已经把凭证放在环境变量 `ZD_TOKEN` 里，可以跳过这一步。
+如果用户已经把凭证放在环境变量 `ZDD_TOKEN` 里，可以跳过这一步。
 
 ## 第 2 步：前置检查
 
 ```sh
-zd whoami
+zdd whoami
 ```
 
 返回身份与配额余量。**先看这个再动手**：
@@ -68,34 +68,34 @@ zd whoami
 | `quotas.hostnames` | 已占用额度的 hostname，单个域名最多 2 条待审 |
 
 退出码 5 表示没有登录或凭证已失效。看 `message` 区分：
-- 「还没有登录」→ 回到第 1 步执行 `zd login`
+- 「还没有登录」→ 回到第 1 步执行 `zdd login`
 - 「凭证无效」→ **停下来告诉用户重新签发**，不要重试
 
 ## 必走流程
 
 不要跳步。每一步都有理由。
 
-### 1. `zd catalog` — 拿到已有数据
+### 1. `zdd catalog` — 拿到已有数据
 
 ```sh
-zd catalog
+zdd catalog
 ```
 
 返回 `vendors`、`models`、`stations`（自动翻页取全量）。
 
 `models[].slug` 是你写报价时唯一合法的取值来源。**不存在于这个列表里的模型，不能作为 `modelSlug` 提交。**
 
-### 2. `zd match "模型名"` — 确定 slug
+### 2. `zdd match "模型名"` — 确定 slug
 
 ```sh
-zd match "Claude Sonnet 4.5"
+zdd match "Claude Sonnet 4.5"
 ```
 
 - 命中一个 → 直接用它的 `slug`
 - 命中多个 → **让用户选**，不要自己挑
 - 无命中且 `suggestion` 非空 → 该模型还没被收录。**不要编造 slug**，告诉用户「这个模型平台还没有，需要先单独收录」
 
-站点上用的是什么名字就查什么名字。不要凭印象写 slug——平台的模型清单覆盖的是模型系列而不是每个版本号，市面上很多具体型号并没有单独收录。`zd match` 的 `matches` 为空就说明没有，不要自己拼一个。
+站点上用的是什么名字就查什么名字。不要凭印象写 slug——平台的模型清单覆盖的是模型系列而不是每个版本号，市面上很多具体型号并没有单独收录。`zdd match` 的 `matches` 为空就说明没有，不要自己拼一个。
 
 ### 3. 构造 payload
 
@@ -144,10 +144,10 @@ zd match "Claude Sonnet 4.5"
 
 **不接受多余字段。** 多写一个字段整条会被拒。
 
-### 4. `zd validate ./x.json` — 本地先过一遍
+### 4. `zdd validate ./x.json` — 本地先过一遍
 
 ```sh
-zd validate ./x.json
+zdd validate ./x.json
 ```
 
 不联网，跑的是与服务端完全相同的 schema。
@@ -157,10 +157,10 @@ zd validate ./x.json
 
 `issues[].field` 会指出是哪个字段（嵌套用 `offers.0.rate` 这种路径）。
 
-### 5. `zd submit ./x.json` — 提交
+### 5. `zdd submit ./x.json` — 提交
 
 ```sh
-zd submit ./x.json
+zdd submit ./x.json
 ```
 
 成功返回 `submission.id`、`status: "pending"`、`deduplicated`。
@@ -170,15 +170,15 @@ zd submit ./x.json
 批量：
 
 ```sh
-zd submit --batch ./dir/
+zdd submit --batch ./dir/
 ```
 
 目录下所有 `.json` 逐个提交，单个失败不影响其余，最后汇总 `submitted` 和 `failed`。**逐个看 `failed` 里的 code 和 message**，不要因为退出码非 0 就整体重来。
 
-### 6. `zd status` — 看审核结果
+### 6. `zdd status` — 看审核结果
 
 ```sh
-zd status --limit 20
+zdd status --limit 20
 ```
 
 每条有 `status` 和 `reason`：
@@ -256,8 +256,8 @@ uptime, firstTokenLatencyMs, foundedAt, status, score, lowestRate
 | code | 含义 | 动作 |
 |---|---|---|
 | `FORBIDDEN_FIELD` | 有禁字段（本地没拦住，一般是嵌套层） | 删掉 |
-| `INVALID_INPUT` | 格式问题，如 `未知模型` | 按 message 改；「未知模型」说明 slug 不存在，**回到 `zd match` 重新确认** |
-| `TOO_MANY_PENDING` | 待审队列满 | 看 message 区分是账号级、hostname 级还是全站级；账号级用 `zd status` 看进度 |
+| `INVALID_INPUT` | 格式问题，如 `未知模型` | 按 message 改；「未知模型」说明 slug 不存在，**回到 `zdd match` 重新确认** |
+| `TOO_MANY_PENDING` | 待审队列满 | 看 message 区分是账号级、hostname 级还是全站级；账号级用 `zdd status` 看进度 |
 | `RATE_LIMITED` | 每小时额度用完 | 等 `detail.error.retryAfter` 秒 |
 
 **退出码 5（凭证问题）** —— 见第 2 步的说明，需要用户介入。

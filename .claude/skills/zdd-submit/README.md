@@ -1,22 +1,22 @@
-# zd-submit Skill
+# zdd-submit Skill
 
-给 AI Agent 用的 skill：分析完中转站后，通过 `zd` 命令行把数据提交到「什么值得蹬」。
+给 AI Agent 用的 skill：分析完中转站后，通过 `zdd` 命令行把数据提交到「什么值得蹬」。
 
 ## 安装
 
 Claude Code 会自动读取 `.claude/skills/` 下的 skill。仓库里已经带了这个目录，克隆即可用。
 
-需要先装好 `zd` 并登录：
+需要先装好 `zdd` 并登录：
 
 ```sh
-zd login --key zd_xxx
-zd whoami
+zdd login --key zd_xxx
+zdd whoami
 ```
 
 ## 文件
 
 ```
-.claude/skills/zd-submit/SKILL.md   给 Agent 读的完整流程说明
+.claude/skills/zdd-submit/SKILL.md   给 Agent 读的完整流程说明
 ```
 
 ## 设计取舍
@@ -28,7 +28,7 @@ zd whoami
 3. **把易混的地方讲透。** 退出码 2（可重试）和 3（改数据）的区别，是这套流程里最容易搞错的地方。
 4. **给出判断标准而非规则堆砌。** 最后那条「如果数据被公开展示、用户按它付费了，我担得起吗」比任何字段清单都管用。
 
-## 与 `zd` 的一致性
+## 与 `zdd` 的一致性
 
 `scripts/test/skill.test.ts` 比对文档与实现，覆盖：
 
@@ -47,6 +47,6 @@ zd whoami
 
 ## 相关
 
-- CLI 实现：`scripts/zd.ts`（PR7）
+- CLI 实现：`scripts/zdd.ts`（PR7）
 - Agent 接口：`server/src/agent-api.ts`（PR6）
 - 校验规则：`shared/src/submission.ts`
