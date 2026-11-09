@@ -1,0 +1,462 @@
+#!/usr/bin/env node
+/**
+ * zd —— 「什么值得蹬」的 Agent 命令行工具。
+ *
+ * 设计要点：
+ * - stdout 只输出 JSON，人类可读的提示一律走 stderr，方便 Agent 直接管道解析。
+ * - 校验规则从 @zhidedeng/shared 导入，与服务端共用同一份 schema，避免本地通过、服务端拒绝。
+ * - 退出码固定，Agent 据此判断该重试、该改数据，还是该重新登录。
+ */
+import { mkdir, readFile, writeFile, chmod, readdir } from 'node:fs/promises';
+import { homedir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
+import { API_ROUTES, type AgentSubmitResponse, type GetAgentStatusResponse } from '@zhidedeng/shared';
+import { postSchema, stationSchema } from '@zhidedeng/shared/submission';
+
+export const EXIT = {
+  ok: 0,
+  usage: 1,
+  network: 2,
+  validation: 3,
+  rejected: 4,
+  unauthorized: 5,
+} as const;
+
+const DEFAULT_BASE = 'https://zhidedeng.856685.xyz';
+
+/** 退出码对应的可重试建议，写给 Agent 看。 */
+const NEXT_ACTION: Record<number, string> = {
+  [EXIT.ok]: '成功',
+  [EXIT.usage]: '命令用法有误，检查参数后重试',
+  [EXIT.network]: '网络或服务端问题，可以稍后原样重试',
+  [EXIT.validation]: '本地校验未通过，按 issues 修正数据后重试，不要原样重试',
+  [EXIT.rejected]: '服务端拒绝，按 message 修正后再试；配额类错误需要等待',
+  [EXIT.unauthorized]: '凭证无效或已吊销，请让账号持有人重新签发并 zd login',
+};
+
+/** CLI 自身抛出的、带退出码的错误。 */
+export class ZdError extends Error {
+  constructor(readonly code: number, message: string, readonly detail?: unknown) {
+    super(message);
+  }
+}
+
+interface Config {
+  apiBase: string;
+  token: string;
+}
+
+/** 配置文件位置。测试通过 ZD_CONFIG_HOME 改写，避免污染真实 HOME。 */
+export function configPath(): string {
+  const base = process.env.ZD_CONFIG_HOME ?? join(homedir(), '.config');
+  return join(base, 'zd', 'config.json');
+}
+
+export function apiBase(): string {
+  return (process.env.ZD_API_BASE ?? DEFAULT_BASE).replace(/\/+$/, '');
+}
+
+export async function readConfig(path = configPath()): Promise<Config | null> {
+  try {
+    const raw = await readFile(path, 'utf8');
+    const parsed = JSON.parse(raw) as Partial<Config>;
+    if (typeof parsed.token !== 'string' || parsed.token.length === 0) return null;
+    return { apiBase: typeof parsed.apiBase === 'string' ? parsed.apiBase : apiBase(), token: parsed.token };
+  } catch {
+    return null;
+  }
+}
+
+/** 权限收紧到本人可读写；目录同理。Windows 上 chmod 是空操作，不报错。 */
+export async function writeConfig(config: Config, path = configPath()): Promise<void> {
+  const dir = dirname(path);
+  await mkdir(dir, { recursive: true, mode: 0o700 });
+  await writeFile(path, JSON.stringify(config, null, 2) + '\n', { mode: 0o600 });
+  await chmod(path, 0o600).catch(() => {});
+  await chmod(dir, 0o700).catch(() => {});
+}
+
+/** 解析出的凭证：环境变量优先，便于 CI 不用写盘。 */
+export async function resolveToken(path = configPath()): Promise<string> {
+  const fromEnv = process.env.ZD_TOKEN;
+  if (fromEnv && fromEnv.length > 0) return fromEnv;
+  const config = await readConfig(path);
+  if (!config) throw new ZdError(EXIT.unauthorized, '还没有登录，请先运行 zd login --key <凭证>');
+  return config.token;
+}
+
+export interface RequestOptions {
+  method?: 'GET' | 'POST' | 'DELETE';
+  body?: unknown;
+  token?: string;
+  base?: string;
+  fetchImpl?: typeof fetch;
+  timeoutMs?: number;
+}
+
+/** 统一发请求并把各种失败映射成带退出码的 ZdError。 */
+export async function request(path: string, options: RequestOptions = {}): Promise<unknown> {
+  const { method = 'GET', body, token, base = apiBase(), fetchImpl = fetch, timeoutMs = 20_000 } = options;
+  const headers: Record<string, string> = { accept: 'application/json' };
+  if (body !== undefined) headers['content-type'] = 'application/json';
+  if (token) headers.authorization = `Bearer ${token}`;
+
+  let response: Response;
+  try {
+    response = await fetchImpl(`${base}${path}`, {
+      method,
+      headers,
+      body: body === undefined ? undefined : JSON.stringify(body),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+  } catch (error) {
+    throw new ZdError(EXIT.network, `请求失败：${error instanceof Error ? error.message : String(error)}`);
+  }
+
+  const text = await response.text();
+  let payload: unknown;
+  try {
+    payload = text.length > 0 ? JSON.parse(text) : {};
+  } catch {
+    // 5xx 和网关错误不是 Agent 数据的问题，让调用方原样重试；
+    // 4xx 才可能是请求有问题。这里没有可解析的 error 字段，只能按状态码判断。
+    const code = response.status >= 500 ? EXIT.network : EXIT.rejected;
+    throw new ZdError(code, `服务端返回了非 JSON 响应（HTTP ${response.status}）`);
+  }
+
+  if (response.ok) return payload;
+  const message = (payload as { error?: { message?: string } })?.error?.message ?? `HTTP ${response.status}`;
+  if (response.status === 401) throw new ZdError(EXIT.unauthorized, message);
+  throw new ZdError(EXIT.rejected, message, payload);
+}
+
+/* ------------------------------------------------------------------ login */
+
+export async function login(key: string, options: { fetchImpl?: typeof fetch } = {}): Promise<{ handle: string; savedTo: string }> {
+  const token = key.trim();
+  if (!/^zd_[A-Za-z0-9_-]{16,}$/.test(token)) {
+    throw new ZdError(EXIT.validation, '凭证格式不对，应以 zd_ 开头');
+  }
+  // 先验证再用，避免把无效凭证写进配置。
+  const status = await request(API_ROUTES.getAgentStatus.path, { token, fetchImpl: options.fetchImpl }) as GetAgentStatusResponse;
+  const path = configPath();
+  await writeConfig({ apiBase: apiBase(), token }, path);
+  return { handle: status.handle, savedTo: path };
+}
+
+/* ----------------------------------------------------------------- whoami */
+
+export async function whoami(options: { token?: string; fetchImpl?: typeof fetch } = {}): Promise<GetAgentStatusResponse & { apiBase: string }> {
+  const token = options.token ?? (await resolveToken());
+  const status = await request(API_ROUTES.getAgentStatus.path, { token, fetchImpl: options.fetchImpl }) as GetAgentStatusResponse;
+  return { ...status, apiBase: apiBase() };
+}
+
+/* ---------------------------------------------------------------- catalog */
+
+export interface Catalog {
+  vendors: unknown[];
+  models: { slug: string; name: string; vendor: string }[];
+  stations: { slug: string; name: string; url: string }[];
+}
+
+export async function catalog(options: { fetchImpl?: typeof fetch } = {}): Promise<Catalog> {
+  const [vendors, models, stations] = await Promise.all([
+    request(API_ROUTES.getVendors.path, { fetchImpl: options.fetchImpl }),
+    request(API_ROUTES.getModels.path, { fetchImpl: options.fetchImpl }),
+    request(`${API_ROUTES.getStations.path}?pageSize=50`, { fetchImpl: options.fetchImpl }),
+  ]);
+  const list = (payload: unknown): unknown[] => {
+    const data = (payload as { data?: unknown }).data;
+    if (Array.isArray(data)) return data;
+    const items = (data as { items?: unknown[] })?.items;
+    return Array.isArray(items) ? items : [];
+  };
+  return {
+    vendors: list(vendors),
+    models: list(models) as Catalog['models'],
+    stations: list(stations) as Catalog['stations'],
+  };
+}
+
+/* ------------------------------------------------------------------ match */
+
+/** 归一化模型名：忽略大小写、空格、连字符、下划线、点号。 */
+export function normalizeModelName(value: string): string {
+  return value.toLowerCase().replace(/[\s\-_.]+/g, '');
+}
+
+export interface MatchResult {
+  query: string;
+  matches: { slug: string; name: string; vendor: string }[];
+  suggestion: string | null;
+}
+
+export function matchModel(query: string, models: { slug: string; name: string; vendor: string }[]): MatchResult {
+  const trimmed = query.trim();
+  const slugExact = models.filter(model => model.slug === trimmed.toLowerCase());
+  if (slugExact.length === 1) return { query: trimmed, matches: slugExact, suggestion: null };
+
+  const nameExact = models.filter(model => model.name.toLowerCase() === trimmed.toLowerCase());
+  if (nameExact.length === 1) return { query: trimmed, matches: nameExact, suggestion: null };
+
+  const normalized = normalizeModelName(trimmed);
+  if (normalized.length > 0) {
+    const fuzzy = models.filter(model => normalizeModelName(model.slug) === normalized || normalizeModelName(model.name) === normalized);
+    if (fuzzy.length > 0) return { query: trimmed, matches: fuzzy, suggestion: null };
+    const partial = models.filter(model => normalizeModelName(model.name).includes(normalized) || normalizeModelName(model.slug).includes(normalized));
+    if (partial.length > 0) return { query: trimmed, matches: partial, suggestion: null };
+  }
+  return { query: trimmed, matches: [], suggestion: '没有匹配的模型；报价里的 modelSlug 必须是已有模型，确认名称后再提交，不要编造 slug' };
+}
+
+/* --------------------------------------------------------------- validate */
+
+export interface ValidateResult {
+  path: string;
+  valid: boolean;
+  kind?: 'station' | 'post' | null;
+  issues?: { field: string; message: string }[];
+}
+
+/** 按 payload 的形状判断种类：有 url 当站点，有 title 当评价。 */
+export function inferKind(input: unknown): 'station' | 'post' | null {
+  if (typeof input !== 'object' || input === null || Array.isArray(input)) return null;
+  const record = input as Record<string, unknown>;
+  if ('url' in record) return 'station';
+  if ('title' in record) return 'post';
+  return null;
+}
+
+export function validatePayload(input: unknown): { kind: 'station' | 'post' | null; issues: { field: string; message: string }[] } {
+  const kind = inferKind(input);
+  if (kind === null) {
+    return { kind: null, issues: [{ field: '', message: '无法判断种类：站点需要 url 字段，评价需要 title 字段' }] };
+  }
+  const schema = kind === 'station' ? stationSchema : postSchema;
+  const result = schema.safeParse(input);
+  if (result.success) return { kind, issues: [] };
+  return {
+    kind,
+    issues: result.error.issues.map(issue => ({ field: issue.path.join('.'), message: issue.message })),
+  };
+}
+
+export async function validate(path: string): Promise<ValidateResult> {
+  const raw = await readFile(path, 'utf8').catch(() => {
+    throw new ZdError(EXIT.usage, `读不到文件：${path}`);
+  });
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    throw new ZdError(EXIT.validation, `不是合法 JSON：${error instanceof Error ? error.message : String(error)}`);
+  }
+  const { kind, issues } = validatePayload(parsed);
+  return issues.length === 0 ? { path, valid: true, kind } : { path, valid: false, kind, issues };
+}
+
+/* ----------------------------------------------------------------- submit */
+
+export async function submitOne(
+  input: unknown,
+  options: { token?: string; fetchImpl?: typeof fetch } = {},
+): Promise<AgentSubmitResponse> {
+  const { kind, issues } = validatePayload(input);
+  if (issues.length > 0 || kind === null) {
+    throw new ZdError(EXIT.validation, `本地校验未通过：${issues[0]!.field} ${issues[0]!.message}`, { issues });
+  }
+  const token = options.token ?? (await resolveToken());
+  const route = kind === 'station' ? API_ROUTES.createAgentStation : API_ROUTES.createAgentPost;
+  return await request(route.path, { method: 'POST', body: input, token, fetchImpl: options.fetchImpl }) as AgentSubmitResponse;
+}
+
+export async function submitFile(path: string, options: { token?: string; fetchImpl?: typeof fetch } = {}): Promise<AgentSubmitResponse> {
+  const raw = await readFile(path, 'utf8').catch(() => {
+    throw new ZdError(EXIT.usage, `读不到文件：${path}`);
+  });
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    throw new ZdError(EXIT.validation, `不是合法 JSON：${error instanceof Error ? error.message : String(error)}`);
+  }
+  return submitOne(parsed, options);
+}
+
+export interface BatchResult {
+  total: number;
+  submitted: { file: string; id: string; status: string; deduplicated: boolean }[];
+  failed: { file: string; code: number; message: string }[];
+}
+
+/** 批量提交：逐个文件，单个失败不影响其余，最后汇总。 */
+export async function submitBatch(
+  dir: string,
+  options: { token?: string; fetchImpl?: typeof fetch } = {},
+): Promise<BatchResult> {
+  const entries = await readdir(dir).catch(() => {
+    throw new ZdError(EXIT.usage, `读不到目录：${dir}`);
+  });
+  const files = entries.filter(name => name.endsWith('.json')).sort();
+  if (files.length === 0) throw new ZdError(EXIT.usage, `目录里没有 .json 文件：${dir}`);
+  const token = options.token ?? (await resolveToken());
+  const result: BatchResult = { total: files.length, submitted: [], failed: [] };
+  for (const name of files) {
+    try {
+      const response = await submitFile(join(dir, name), { token, fetchImpl: options.fetchImpl });
+      result.submitted.push({ file: name, id: response.submission.id, status: response.submission.status, deduplicated: response.deduplicated });
+    } catch (error) {
+      const zd = error instanceof ZdError ? error : new ZdError(EXIT.network, String(error));
+      result.failed.push({ file: name, code: zd.code, message: zd.message });
+    }
+  }
+  return result;
+}
+
+/* ----------------------------------------------------------------- status */
+
+export async function status(
+  limit?: number,
+  options: { token?: string; fetchImpl?: typeof fetch } = {},
+): Promise<GetAgentStatusResponse> {
+  const token = options.token ?? (await resolveToken());
+  const query = limit === undefined ? '' : `?limit=${encodeURIComponent(String(limit))}`;
+  return await request(`${API_ROUTES.getAgentStatus.path}${query}`, { token, fetchImpl: options.fetchImpl }) as GetAgentStatusResponse;
+}
+
+/* ------------------------------------------------------------------- main */
+
+export interface ParsedArgs {
+  command: string;
+  positional: string[];
+  flags: Record<string, string | boolean>;
+}
+
+export function parseArgs(argv: string[]): ParsedArgs {
+  const [command = '', ...rest] = argv;
+  const positional: string[] = [];
+  const flags: Record<string, string | boolean> = {};
+  for (let index = 0; index < rest.length; index++) {
+    const token = rest[index]!;
+    if (token.startsWith('--')) {
+      const name = token.slice(2);
+      const next = rest[index + 1];
+      if (next !== undefined && !next.startsWith('--')) {
+        flags[name] = next;
+        index++;
+      } else {
+        flags[name] = true;
+      }
+    } else {
+      positional.push(token);
+    }
+  }
+  return { command, positional, flags };
+}
+
+/** 输出到 stdout，保证是单行 JSON，方便 Agent 管道解析。 */
+function emit(value: unknown): void {
+  process.stdout.write(JSON.stringify(value) + '\n');
+}
+
+/** 人类可读提示一律走 stderr，不污染 stdout。 */
+function note(message: string): void {
+  process.stderr.write(message + '\n');
+}
+
+export async function run(argv: string[]): Promise<number> {
+  const { command, positional, flags } = parseArgs(argv);
+  try {
+    switch (command) {
+      case 'login': {
+        const key = typeof flags.key === 'string' ? flags.key : positional[0];
+        if (!key) throw new ZdError(EXIT.usage, '用法：zd login --key zd_xxx');
+        const result = await login(key);
+        note(`已登录 ${result.handle}，凭证保存在 ${result.savedTo}`);
+        emit(result);
+        return EXIT.ok;
+      }
+      case 'whoami': {
+        emit(await whoami());
+        return EXIT.ok;
+      }
+      case 'catalog': {
+        emit(await catalog());
+        return EXIT.ok;
+      }
+      case 'match': {
+        const query = positional.join(' ').trim();
+        if (!query) throw new ZdError(EXIT.usage, '用法：zd match "模型名"');
+        const { models } = await catalog();
+        emit(matchModel(query, models));
+        return EXIT.ok;
+      }
+      case 'validate': {
+        const path = positional[0];
+        if (!path) throw new ZdError(EXIT.usage, '用法：zd validate ./x.json');
+        const result = await validate(path);
+        emit(result);
+        return result.valid ? EXIT.ok : EXIT.validation;
+      }
+      case 'submit': {
+        const batch = typeof flags.batch === 'string' ? flags.batch : undefined;
+        if (batch !== undefined) {
+          const result = await submitBatch(batch);
+          emit(result);
+          return result.failed.length === 0 ? EXIT.ok : EXIT.rejected;
+        }
+        const path = positional[0];
+        if (!path) throw new ZdError(EXIT.usage, '用法：zd submit ./x.json 或 zd submit --batch ./dir/');
+        emit(await submitFile(path));
+        return EXIT.ok;
+      }
+      case 'status': {
+        const limit = typeof flags.limit === 'string' ? Number(flags.limit) : undefined;
+        if (limit !== undefined && (!Number.isInteger(limit) || limit < 1)) {
+          throw new ZdError(EXIT.usage, '--limit 需要是正整数');
+        }
+        emit(await status(limit));
+        return EXIT.ok;
+      }
+      case '':
+      case 'help':
+      case '--help':
+        note(
+          [
+            'zd —— 什么值得蹬 Agent 命令行',
+            '',
+            '  zd login --key zd_xxx        保存凭证',
+            '  zd whoami                    身份与配额余量',
+            '  zd catalog                   厂商、模型、已有站点',
+            '  zd match "模型名"            模型名模糊匹配',
+            '  zd validate ./x.json         本地校验，不联网',
+            '  zd submit ./x.json           提交单个',
+            '  zd submit --batch ./dir/     批量提交',
+            '  zd status [--limit N]        审核进度与拒绝原因',
+            '',
+            '所有命令输出 JSON 到 stdout，提示信息走 stderr。',
+          ].join('\n'),
+        );
+        emit({ ok: command === '' || command === 'help' || command === '--help' });
+        return EXIT.ok;
+      default:
+        throw new ZdError(EXIT.usage, `未知命令：${command}。运行 zd help 查看用法`);
+    }
+  } catch (error) {
+    const zd = error instanceof ZdError ? error : new ZdError(EXIT.network, error instanceof Error ? error.message : String(error));
+    note(`失败：${zd.message}`);
+    note(`建议：${NEXT_ACTION[zd.code] ?? '未知错误'}`);
+    emit({ ok: false, code: zd.code, message: zd.message, detail: zd.detail ?? null, nextAction: NEXT_ACTION[zd.code] ?? null });
+    return zd.code;
+  }
+}
+
+/** 只在被直接执行时跑，被测试 import 时不触发。 */
+const invokedPath = process.argv[1] ? resolve(process.argv[1]) : '';
+if (invokedPath.endsWith('zd.ts') || invokedPath.endsWith('zd.js')) {
+  run(process.argv.slice(2)).then(code => {
+    process.exitCode = code;
+  });
+}
+

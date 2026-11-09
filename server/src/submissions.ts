@@ -2,7 +2,8 @@ import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import type { AdminBatchSubmitRequest, AdminBatchSubmitResponse, AdminSubmissionStateResponse, SubmissionChannel, SubmissionKind, SubmissionRecord, SubmissionStatus } from '@zhidedeng/shared';
 import { feishuHostnameKey, STATION_SLUG_MAX, stationSlugBase, stationSlugSuffix } from '@zhidedeng/shared';
-import { adminSlug, httpUrl, offerRate } from './catalog.ts';
+import { adminSlug, httpUrl, postSchema, stationSchema, text } from '@zhidedeng/shared/submission';
+
 import type { SqlRow, SqlValue, StationRecord, Store } from './database.ts';
 import { ApiError } from './errors.ts';
 
@@ -10,7 +11,6 @@ const submissionKind = z.enum(['station', 'model', 'post']);
 const submissionChannel = z.enum(['feishu', 'agent', 'web']);
 const submissionAction = z.enum(['upsert', 'remove']);
 const submissionStatus = z.enum(['pending', 'approved', 'rejected', 'superseded']);
-const text = (max: number) => z.string().min(1).max(max).refine(value => value.trim().length > 0, '内容不能为空');
 const sourceByChannel = { agent: 'agent', feishu: 'submission', web: 'user' } as const;
 const batchIdentifier = z.string().trim().min(1).max(200);
 
@@ -49,20 +49,9 @@ const enqueueSchema = z.object({
   ip: z.string().min(1).max(100),
   now: z.date(),
 }).refine(input => input.action !== 'remove' || input.kind === 'station', '只有站点支持下架');
+export { postSchema, stationSchema };
 const modelSchema = z.object({ slug: adminSlug, vendor: adminSlug, name: text(60), description: text(200) });
 const stationUrlSchema = z.object({ url: httpUrl });
-export const stationSchema = z.object({
-  name: text(60),
-  description: text(300),
-  url: httpUrl,
-  rechargeThreshold: z.number().min(0).nullable(),
-  paymentMethods: z.array(text(20)).max(10),
-  offers: z.array(z.object({ modelSlug: text(200), rate: offerRate })).max(100),
-}).refine(station => new Set(station.offers.map(offer => offer.modelSlug)).size === station.offers.length, '存在重复的报价');
-export const postSchema = z.object({
-  title: text(100), summary: text(200), body: text(5000), authorName: text(30),
-  authorHandle: text(200).nullish(), hostname: text(253).nullish(), publishedAt: z.iso.datetime().nullish(),
-});
 const removalSchema = z.object({ slug: z.string().min(1).max(200), submissionId: batchIdentifier });
 
 export function parseSubmissionInput<T>(schema: z.ZodType<T>, input: unknown): T {

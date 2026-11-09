@@ -1,5 +1,6 @@
 import { z, ZodError } from 'zod';
 import { MAX_RATE, MIN_RATE } from '@zhidedeng/shared';
+import { adminSlug, httpUrl, offerRate } from '@zhidedeng/shared/submission';
 import type {
   AdminCreateModelRequest, AdminCreateVendorRequest, AdminDeleteModelResponse, AdminUpdateModelRequest,
   CatalogImportRequest, CatalogImportResponse, Model, Vendor,
@@ -13,18 +14,7 @@ const IS_SUBMISSION = "json_extract(data,'$.source') = 'submission'";
 const SUBMITTED_STATIONS = `(SELECT id FROM entities WHERE kind = 'station' AND ${IS_SUBMISSION})`;
 
 const singleLine = (max: number) => z.string().min(1).max(max);
-export const offerRate = z.number().refine(rate => rate >= MIN_RATE && rate <= MAX_RATE, {
-  error: issue => ({ message: `倍率 ${String(issue.input)} 超出 ${MIN_RATE}~${MAX_RATE} 范围` }),
-});
-export const httpUrl = z.string().max(300).refine(value => {
-  if (value.includes('?') || value.includes('#')) return false;
-  try {
-    const url = new URL(value);
-    return (url.protocol === 'http:' || url.protocol === 'https:') && !url.username && !url.password;
-  } catch {
-    return false;
-  }
-});
+export { httpUrl, offerRate };
 const importSchema: z.ZodType<CatalogImportRequest> = z.strictObject({
   allowNewModels: z.boolean().optional(),
   stations: z.array(z.strictObject({
@@ -131,9 +121,7 @@ export function importResponse(store: Store, rawBody: string) {
 /** 管理接口密钥的最短长度，短于它视为未配置。 */
 export const MIN_SYNC_TOKEN_LENGTH = 32;
 
-// 模型和厂商的 slug 共用同一套规则：小写字母、数字和连字符，最长 64。
-const slugPattern = /^[a-z0-9][a-z0-9-]{0,63}$/;
-export const adminSlug = z.string().trim().regex(slugPattern);
+export { adminSlug };
 
 export function createVendor(store: Store, input: AdminCreateVendorRequest): Vendor {
   return store.transaction(() => {
