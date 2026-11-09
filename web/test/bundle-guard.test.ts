@@ -1,24 +1,32 @@
 /**
- * 守卫：前端产物里不能出现 zod。
+ * 守卫：前端产物里不能混进 zod。
  *
- * 背景：schemas 通过 @zhidedeng/shared/submission 子路径导出，zod 一旦
- * 进入浏览器包，产物会从 521,690 涨到 606,576 字节（+83KB）。web 不需要
- * 运行时校验，只 import 类型就够了。
+ * 背景：schemas 通过 @zhidedeng/shared/submission 子路径导出，zod 一旦进了
+ * 浏览器包，产物会从 521,690 涨到 606,576 字节（+83KB）。web 不需要运行时
+ * 校验，只 import 类型就够了。
  *
- * 这里直接跑一次 esbuild 打包，检查真实依赖图里有没有 zod。前几版用正则
- * 扫源码，先后被注释前缀、常量拼接、无空白 import、正则字符类里的双斜杠
- * 绕过，又误伤了 import 后带注释的 type 写法 —— 静态匹配永远堵不完。
- * 依赖图是构建器算出来的，没有绕过的可能。
+ * 两道检查，缺一不可：
  *
- * 打包在子进程里跑：esbuild 在 jsdom 环境会报 TextEncoder 断言失败，而
- * web 的 vitest 全局 setup 依赖 window，两者不能共存于同一进程。
+ * 1. 依赖图检查 —— 跑 esbuild 打包，看真实依赖图里有没有 zod。构建器算出来
+ *    的结果，注释、字符串、正则里的双斜杠都干扰不了它。这是主防线。
+ *
+ * 2. 非字面量动态 import 探针 —— esbuild 的静态图看不见 import(变量)，
+ *    这类代码在它眼里只是一次运行时调用。实测 Vite 会把 submission 单独
+ *    打成 85KB 的 chunk 混进产物，而 esbuild 的图里 inputs=1、看不到 zod。
+ *    所以额外禁止一切非字面量的动态 import：这是条明确规则，也堵住了
+ *    静态分析的天生盲区。
+ *
+ * 打包放在子进程里跑：esbuild 在 jsdom 环境会报 TextEncoder 断言失败，
+ * 而 web 的 vitest 全局 setup 依赖 window，两者不能共存于同一进程。
  */
 import { describe, expect, it } from 'vitest';
 import { execFileSync } from 'node:child_process';
+import { readdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 const webRoot = process.cwd();
 const checker = join(webRoot, 'test/bundle-check.mjs');
+const submissionModule = '@zhidedeng/shared/submission';
 
 /** 打包并返回依赖图。contents 为空时打包真实入口 main.tsx。 */
 function bundle(contents?: string): { inputs: string[]; bytes: number } {
@@ -29,6 +37,50 @@ function bundle(contents?: string): { inputs: string[]; bytes: number } {
 }
 
 const zodFiles = (inputs: string[]) => inputs.filter(file => /[\\/]zod[\\/]/.test(file));
+
+/** 抹掉注释，避免把注释里的示例当成真的代码。 */
+function stripComments(source: string): string {
+  return source
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')
+    .replace(/(^|[^:\\])\/\/[^\n]*/g, '$1');
+}
+
+/**
+ * 找出所有「动态 import 但参数无法静态确定」的位置。
+ *
+ * 模板字符串里带 ${} 也算：Vite 同样解析不了，会退化成运行时拼接。
+ */
+export function findNonLiteralImports(source: string): number[] {
+  const clean = stripComments(source);
+  const hits: number[] = [];
+  const re = /\bimport\s*\(/g;
+  let match: RegExpExecArray | null;
+  while ((match = re.exec(clean)) !== null) {
+    let index = match.index + match[0].length;
+    while (index < clean.length && /\s/.test(clean[index]!)) index++;
+    const quote = clean[index];
+    let literal = false;
+    if (quote === "'" || quote === '"') {
+      literal = clean.indexOf(quote, index + 1) > index;
+    } else if (quote === '`') {
+      const end = clean.indexOf('`', index + 1);
+      literal = end > index && !clean.slice(index + 1, end).includes('${');
+    }
+    if (!literal) hits.push(match.index);
+  }
+  return hits;
+}
+
+async function sourceFiles(dir: string): Promise<string[]> {
+  const entries = await readdir(dir, { withFileTypes: true });
+  const files: string[] = [];
+  for (const entry of entries) {
+    const full = join(dir, entry.name);
+    if (entry.isDirectory()) files.push(...await sourceFiles(full));
+    else if (/\.(ts|tsx)$/.test(entry.name)) files.push(full);
+  }
+  return files;
+}
 
 describe('前端产物不含 zod', () => {
   it('真实入口打包后的依赖图里没有 zod', () => {
@@ -41,22 +93,50 @@ describe('前端产物不含 zod', () => {
     // 养一条能抓人的狗。这段故意运行时引入 schema，依赖图里必须有 zod；
     // 如果这里也报「没有 zod」，说明守卫失效了，上一条的绿灯毫无意义。
     const { inputs } = bundle(
-      "import { stationSchema } from '@zhidedeng/shared/submission';\nexport const s = stationSchema;",
+      `import { stationSchema } from '${submissionModule}';\nexport const s = stationSchema;`,
     );
     expect(zodFiles(inputs).length, '守卫失效：引入 schema 后依赖图里竟然没有 zod').toBeGreaterThan(0);
   }, 180_000);
 
   it('只引类型时不把 zod 带进产物', () => {
-    // import type 编译期擦除，是 web 唯一该用的形式。
     const { inputs } = bundle(
-      "import type { StationPayload } from '@zhidedeng/shared/submission';\nexport const s: StationPayload | null = null;",
+      `import type { StationPayload } from '${submissionModule}';\nexport const s: StationPayload | null = null;`,
     );
     expect(zodFiles(inputs)).toEqual([]);
   }, 180_000);
 
-  it('常量拼接引入也能被发现', () => {
-    // 纯正则扫源码时这条能绕过，依赖图不会。
-    const { inputs } = bundle("const m = await import('@zhidedeng/' + 'shared/submission');\nexport const s = m;");
-    expect(zodFiles(inputs).length).toBeGreaterThan(0);
-  }, 180_000);
+  it('源码里没有非字面量的动态 import', async () => {
+    // esbuild 的静态图看不见 import(变量)，这类写法整片是盲区。
+    const offenders: string[] = [];
+    for (const file of await sourceFiles(join(webRoot, 'src'))) {
+      if (findNonLiteralImports(await readFile(file, 'utf8')).length > 0) {
+        offenders.push(file.replace(join(webRoot, 'src') + '/', 'src/'));
+      }
+    }
+    expect(offenders).toEqual([]);
+  });
+
+  it('探针能分辨字面量和非字面量的动态 import', () => {
+    expect(findNonLiteralImports('const m = await import(p)')).toHaveLength(1);
+    expect(findNonLiteralImports('const m = await import( path )')).toHaveLength(1);
+    // 模板里带插值同样无法静态解析
+    expect(findNonLiteralImports('const m = await import(`./${name}`)')).toHaveLength(1);
+    expect(findNonLiteralImports("const m = await import('x')")).toHaveLength(0);
+    expect(findNonLiteralImports('const m = await import(`x`)')).toHaveLength(0);
+    expect(findNonLiteralImports("const m = await import( 'x' )")).toHaveLength(0);
+    expect(findNonLiteralImports('const m = await import("./x")')).toHaveLength(0);
+    // 注释里的不算
+    expect(findNonLiteralImports('// import(p)')).toHaveLength(0);
+    expect(findNonLiteralImports('/* import(p) */')).toHaveLength(0);
+  });
+
+  it('没有源码直接引入 zod', async () => {
+    const offenders: string[] = [];
+    for (const file of await sourceFiles(join(webRoot, 'src'))) {
+      if (/from\s+['"]zod['"]/.test(await readFile(file, 'utf8'))) {
+        offenders.push(file.replace(join(webRoot, 'src') + '/', 'src/'));
+      }
+    }
+    expect(offenders).toEqual([]);
+  });
 });
