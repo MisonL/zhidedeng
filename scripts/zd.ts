@@ -36,8 +36,14 @@ const NEXT_ACTION: Record<number, string> = {
 
 /** CLI 自身抛出的、带退出码的错误。 */
 export class ZdError extends Error {
-  constructor(readonly code: number, message: string, readonly detail?: unknown) {
+  // 不用 TS 参数属性：node --experimental-strip-types 的 strip-only 模式不支持，会直接崩。
+  readonly code: number;
+  readonly detail: unknown;
+
+  constructor(code: number, message: string, detail?: unknown) {
     super(message);
+    this.code = code;
+    this.detail = detail;
   }
 }
 
@@ -54,6 +60,13 @@ export function configPath(): string {
 
 export function apiBase(): string {
   return (process.env.ZD_API_BASE ?? DEFAULT_BASE).replace(/\/+$/, '');
+}
+
+/** 请求实际使用的地址：环境变量优先于登录时记住的地址。 */
+export async function resolveBase(path = configPath()): Promise<string> {
+  if (process.env.ZD_API_BASE) return apiBase();
+  const config = await readConfig(path);
+  return config ? config.apiBase.replace(/\/+$/, '') : DEFAULT_BASE;
 }
 
 export async function readConfig(path = configPath()): Promise<Config | null> {
@@ -96,14 +109,16 @@ export interface RequestOptions {
 
 /** 统一发请求并把各种失败映射成带退出码的 ZdError。 */
 export async function request(path: string, options: RequestOptions = {}): Promise<unknown> {
-  const { method = 'GET', body, token, base = apiBase(), fetchImpl = fetch, timeoutMs = 20_000 } = options;
+  const { method = 'GET', body, token, base, fetchImpl = fetch, timeoutMs = 20_000 } = options;
+  // 优先级：显式传入 > 环境变量 > 配置文件里记住的地址 > 线上默认。
+  const target = (base ?? (await resolveBase())).replace(/\/+$/, '');
   const headers: Record<string, string> = { accept: 'application/json' };
   if (body !== undefined) headers['content-type'] = 'application/json';
   if (token) headers.authorization = `Bearer ${token}`;
 
   let response: Response;
   try {
-    response = await fetchImpl(`${base}${path}`, {
+    response = await fetchImpl(`${target}${path}`, {
       method,
       headers,
       body: body === undefined ? undefined : JSON.stringify(body),
@@ -149,7 +164,7 @@ export async function login(key: string, options: { fetchImpl?: typeof fetch } =
 export async function whoami(options: { token?: string; fetchImpl?: typeof fetch } = {}): Promise<GetAgentStatusResponse & { apiBase: string }> {
   const token = options.token ?? (await resolveToken());
   const status = await request(API_ROUTES.getAgentStatus.path, { token, fetchImpl: options.fetchImpl }) as GetAgentStatusResponse;
-  return { ...status, apiBase: apiBase() };
+  return { ...status, apiBase: await resolveBase() };
 }
 
 /* ---------------------------------------------------------------- catalog */
@@ -166,10 +181,11 @@ export async function catalog(options: { fetchImpl?: typeof fetch } = {}): Promi
     request(API_ROUTES.getModels.path, { fetchImpl: options.fetchImpl }),
     request(`${API_ROUTES.getStations.path}?pageSize=50`, { fetchImpl: options.fetchImpl }),
   ]);
+  // 服务端分页接口直接返回 {items,total,page,pageSize}，没有外层包裹；
+  // 少数接口返回裸数组。两种都认，但不猜别的形状——猜错会静默返回空。
   const list = (payload: unknown): unknown[] => {
-    const data = (payload as { data?: unknown }).data;
-    if (Array.isArray(data)) return data;
-    const items = (data as { items?: unknown[] })?.items;
+    if (Array.isArray(payload)) return payload;
+    const items = (payload as { items?: unknown })?.items;
     return Array.isArray(items) ? items : [];
   };
   return {
