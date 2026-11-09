@@ -103,6 +103,51 @@ export type GetAgentTokensRequest = EmptyRequest;
 export type GetAgentTokensResponse = AgentToken[];
 export interface RevokeAgentTokenRequest { id: string }
 export interface RevokeAgentTokenResponse { id: string; revokedAt: string }
+
+// Agent 提交直接接收投稿 payload，不接受 channel、actorHandle、batchId 或审核字段。
+export interface CreateAgentStationRequest {
+  name: string;
+  description: string;
+  url: string;
+  rechargeThreshold: number | null;
+  paymentMethods: string[];
+  offers: { modelSlug: string; rate: number }[];
+}
+export interface CreateAgentPostRequest {
+  title: string;
+  summary: string;
+  body: string;
+  authorName: string;
+  hostname?: string | null;
+  publishedAt?: string | null;
+}
+export interface AgentSubmitResponse {
+  submission: SubmissionRecord;
+  deduplicated: boolean;
+  autoApproved: false;
+}
+export type CreateAgentStationResponse = AgentSubmitResponse;
+export type CreateAgentPostResponse = AgentSubmitResponse;
+export interface GetAgentStatusRequest {
+  // 默认最近 20 条，最多 50 条。
+  limit?: number;
+}
+export interface AgentPendingQuota { limit: number; remaining: number }
+export interface AgentRateQuota extends AgentPendingQuota { retryAfter: number }
+export interface GetAgentStatusResponse {
+  handle: string;
+  pendingCount: number;
+  quotas: {
+    token: AgentRateQuota;
+    account: AgentRateQuota;
+    ip: AgentRateQuota;
+    pending: AgentPendingQuota;
+    globalPending: AgentPendingQuota;
+    // 本人待审内容涉及的 hostname；remaining 计入所有渠道关联该 hostname 的待审记录。
+    hostnames: (AgentPendingQuota & { hostname: string; pendingCount: number })[];
+  };
+  submissions: Pick<SubmissionRecord, 'id' | 'kind' | 'status' | 'createdAt' | 'reason'>[];
+}
 // 未登录时 HTTP 401，错误码 UNAUTHENTICATED；我的收藏、我的分享和所有写接口同样如此。
 export type GetMeRequest = EmptyRequest;
 export type GetMeResponse = CurrentUser;
@@ -289,6 +334,9 @@ export interface ApiContracts {
   createAgentToken: { request: CreateAgentTokenRequest; response: ApiResponse<CreateAgentTokenResponse> };
   getAgentTokens: { request: GetAgentTokensRequest; response: ApiResponse<GetAgentTokensResponse> };
   revokeAgentToken: { request: RevokeAgentTokenRequest; response: ApiResponse<RevokeAgentTokenResponse> };
+  createAgentStation: { request: CreateAgentStationRequest; response: ApiResponse<CreateAgentStationResponse> };
+  createAgentPost: { request: CreateAgentPostRequest; response: ApiResponse<CreateAgentPostResponse> };
+  getAgentStatus: { request: GetAgentStatusRequest; response: ApiResponse<GetAgentStatusResponse> };
   getMe: { request: GetMeRequest; response: ApiResponse<GetMeResponse> };
   updateMe: { request: UpdateMeRequest; response: ApiResponse<UpdateMeResponse> };
   checkIn: { request: CheckInRequest; response: ApiResponse<CheckInResponse> };

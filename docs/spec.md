@@ -14,6 +14,7 @@ Slogan：我们的AI中转指南。
 
 - 种子里的中转站都是虚构样例，名称、倍率、可用率、延迟、评论、评测均为演示数据，严禁在种子里使用真实中转站名称
 - 群友经飞书表单提交、审核状态为「通过」的内容，页面标明「群友提交，未经平台核实」，正文按纯文本显示
+- Agent 的站点和评价进入 submissions 队列、人工审核后公开，新内容标明「AI 采集，未经平台核实」；更新站点保留原来源
 - 没有实测数据的可用率、延迟等指标一律为 null，页面显示「暂无」，不当 0 分也不编造；综合得分随可用率为 null，排序时排在最后
 - 全站页脚常驻声明，同时说清演示数据和群友提交；中转站详情页顶部按来源显示对应声明
 - 价格只用「相对官方价的倍率」（如 0.6x），不写任何官方绝对价格
@@ -37,6 +38,8 @@ Slogan：我们的AI中转指南。
 - 登录和注册进程内限流（IP + 用户名、用户名、IP 三层，失败次数在校验密码前预占），错误文案不区分用户名不存在、密码错和账号被禁用；拒绝常见弱密码；写接口要求 Content-Type: application/json
 - 未登录只读，写接口和个人接口返回 401 UNAUTHENTICATED。新用户初始 120 Token
 - AI Agent 凭证由本人使用会话管理。注册满 7 天、已有至少一篇审核通过的非演示投稿、持有有效邀请码三选一即可签发；邀请码从环境变量 INVITE_CODES 读取，逗号分隔。每账号最多 5 个未吊销凭证，明文只签发时返回，库中只存 SHA-256 和前八字符的展示前缀；签发、吊销记录不含秘密的审计日志
+- Agent 提交和状态接口使用 Bearer 凭证，校验吊销状态及 accounts.disabledAt，失败统一 401 UNAUTHENTICATED。鉴权成功更新 lastUsedAt/useCount；Agent 新增提交每 token 10 条/小时、账号 20 条/小时、IP 20 条/小时（IPv6 /64），失败及 pending 幂等重试不扣额度，状态查询不扣额度。队列 pending 限制为单账号 5 条、单 hostname 的站点和关联评价合计 2 条、全局 200 条，数量计入其他渠道；速率超限 429 RATE_LIMITED 带 retry-after，数量超限 409 TOO_MANY_PENDING
+- Agent 内容沿用投稿校验：name 60 字、description 300 字、评价正文 5000 字；rate 使用共享 MIN_RATE/MAX_RATE。任意层级的实测/派生指标和敏感字段明确拒绝并指出字段；URL 只允许 http/https，去 query/fragment/账号密码，拒绝内网、回环及本地主机，评价 hostname 同样检查。缺失指标由审核物化写 null，Agent 接口始终 pending
 - 投票数和收藏数对所有人公开累计；评论登录后发布即公开，每账号每分钟 5 条
 - 投稿每账号每小时 10 篇、待审最多 20 篇。提交后是 pending，只有作者能在我的分享和详情页看到，通过后才公开。种子文章公开；飞书内容先进入投稿队列，默认待人工审核
 
@@ -85,6 +88,8 @@ Slogan：我们的AI中转指南。
 
 - `POST /auth/register`（username、password、nickname?）、`POST /auth/login`、`POST /auth/logout`、`POST /auth/password`（currentPassword、newPassword）
 - `POST /account/agent-tokens`（label、inviteCode?）签发；`GET /account/agent-tokens` 列出本人凭证元数据；`DELETE /account/agent-tokens/:id` 软吊销，重复吊销保留首次 revokedAt。均需会话，不需要管理员权限；准入不足返回 403 ELIGIBILITY_REQUIRED，活跃凭证超限返回 409 TOKEN_LIMIT
+- `POST /agent/stations`（name、description、url、rechargeThreshold、paymentMethods、offers），`POST /agent/posts`（title、summary、body、authorName、hostname?、publishedAt?）；直接传 payload，返回 submission、deduplicated、autoApproved: false，channel 固定 agent，账号由凭证确定
+- `GET /agent/status?limit=20`（最多 50 条）返回本人队列 pendingCount、各维度 quotas 和最近 submissions（id、kind、status、createdAt、reason）；不返回其他账号内容或凭证秘密
 - `GET /me`、`PATCH /me`（nickname、bio）
 - `POST /me/checkin`（当天重复调用返回 409 ALREADY_CHECKED_IN）；`GET /me` 含 tokens、checkedInToday、streak、favoriteCount、shareCount
 - `GET /me/favorites`、`GET /me/posts`
