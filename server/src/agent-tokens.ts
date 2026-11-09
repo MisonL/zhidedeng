@@ -13,12 +13,17 @@ export const agentTokenSchema: z.ZodType<CreateAgentTokenRequest> = z.strictObje
 });
 
 function requireEligibility(store: Store, handle: string, now: Date, inviteCode: string | undefined, inviteCodes: readonly string[]) {
+  // 占位作者名不是真账号，不能用来满足准入。
+  if (handle === 'anonymous-submission') throw new ApiError(403, 'ELIGIBILITY_REQUIRED', '这个账号不能申请 Agent 凭证');
   const account = store.db.prepare('SELECT createdAt, disabledAt FROM accounts WHERE handle = ?').get(handle);
   if (!account || account.disabledAt !== null) throw new ApiError(401, 'UNAUTHENTICATED', '请先登录');
   const createdAt = typeof account.createdAt === 'string' ? Date.parse(account.createdAt) : NaN;
   if (now.getTime() - createdAt >= MIN_ACCOUNT_AGE_MS) return;
-  // 普通站内投稿省略 source，读取时视为 user；作者字段是 authorHandle。
-  const approved = store.db.prepare("SELECT 1 FROM entities WHERE kind = 'post' AND json_extract(data, '$.authorHandle') = ? AND json_extract(data, '$.status') = 'approved' AND COALESCE(json_extract(data, '$.source'), 'user') <> 'demo' LIMIT 1").get(handle);
+  // 只认站内投稿：只有它的 authorHandle 来自登录会话，无法伪造。
+  // agent 和 feishu 通道的 authorHandle 取自 payload，任何能写这两个通道的人都能
+  // 冒用别人的名字挂一篇 approved 投稿，从而绕过整个准入。
+  // 普通站内投稿不写 source，读取时视为 user。
+  const approved = store.db.prepare("SELECT 1 FROM entities WHERE kind = 'post' AND json_extract(data, '$.authorHandle') = ? AND json_extract(data, '$.status') = 'approved' AND COALESCE(json_extract(data, '$.source'), 'user') = 'user' LIMIT 1").get(handle);
   if (approved || (inviteCode !== undefined && inviteCodes.includes(inviteCode))) return;
   throw new ApiError(403, 'ELIGIBILITY_REQUIRED', '账号注册未满 7 天或缺少有效注册时间，且没有通过的非演示投稿；请等待注册满 7 天、完成至少一篇审核通过的投稿，或填写有效邀请码');
 }

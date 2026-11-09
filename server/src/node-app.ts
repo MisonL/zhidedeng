@@ -4,7 +4,7 @@ import { dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildApp } from './app.ts';
 import { MIN_SYNC_TOKEN_LENGTH } from './catalog.ts';
-import { ensureSubmissionColumns, SCHEMA, Store } from './database.ts';
+import { ensureAgentTokenColumns, ensureSubmissionColumns, SCHEMA, Store } from './database.ts';
 import type { SqlDatabase } from './database.ts';
 import { seed } from './seed.ts';
 import { mountWeb } from './static.ts';
@@ -25,6 +25,7 @@ export function openDatabase(path: string) {
     if (hasSubmissions) ensureSubmissionColumns(openStore(db));
     db.exec(SCHEMA);
     if (!hasSubmissions) ensureSubmissionColumns(openStore(db));
+    ensureAgentTokenColumns(openStore(db));
   } catch (error) {
     db.close();
     throw error;
