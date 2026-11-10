@@ -94,7 +94,9 @@ function importCatalog(store: Store, input: CatalogImportRequest): CatalogImport
       }
     }
     store.db.prepare(`DELETE FROM offers WHERE stationSlug IN ${SUBMITTED_STATIONS}`).run();
-    store.db.prepare(`DELETE FROM entities WHERE ${IS_SUBMISSION}`).run();
+    // 只清在线的：已下架的行留着，恢复接口还要用。
+    // 全量导入再干净也不该把「可恢复」变成「永久没了」。
+    store.db.prepare(`DELETE FROM entities WHERE ${IS_SUBMISSION} AND removedAt IS NULL`).run();
     for (const { offers: _offers, ...station } of accepted) {
       store.put('station', station.slug, { ...station, uptime: null, firstTokenLatencyMs: null, foundedAt: null, status: null, source: 'submission' });
     }
@@ -171,7 +173,7 @@ export function deleteModel(store: Store, slug: string): AdminDeleteModelRespons
     const offers = store.db.prepare('SELECT COUNT(DISTINCT stationSlug) AS count FROM offers WHERE modelSlug = ?').get(slug)!;
     const stationCount = Number(offers.count);
     // 文章也会关联模型，直接删会留下指向不存在模型的引用。
-    const posts = store.db.prepare("SELECT COUNT(*) AS count FROM entities WHERE kind = 'post' AND json_extract(data,'$.modelSlug') = ?").get(slug)!;
+    const posts = store.db.prepare("SELECT COUNT(*) AS count FROM entities WHERE kind = 'post' AND removedAt IS NULL AND json_extract(data,'$.modelSlug') = ?").get(slug)!;
     const postCount = Number(posts.count);
     if (stationCount + postCount > 0) {
       const used = [stationCount && `${stationCount} 个站点的报价`, postCount && `${postCount} 篇文章`].filter(Boolean).join('和');
