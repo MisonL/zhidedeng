@@ -137,25 +137,20 @@ export class Service {
 
   /** 该账号最近一小时提交的文章数（已物化 + 队列里的）。 */
   private postsInLastHour(): number {
+    // 只数 submissions：站内投稿无论待审还是已物化都有一行，
+    // 再把 entities 加进来会把同一篇算两次，10 篇/小时实际只剩 5 篇。
     const hourAgo = new Date(this.now().getTime() - 3_600_000).toISOString();
-    const materialized = Number(this.store.db.prepare(
-      "SELECT count(*) AS count FROM entities WHERE kind = 'post' AND json_extract(data,'$.authorHandle') = ? AND json_extract(data,'$.publishedAt') > ?",
+    return Number(this.store.db.prepare(
+      "SELECT count(*) AS count FROM submissions WHERE kind = 'post' AND channel = 'web' AND actorHandle = ? AND createdAt > ?",
     ).get(this.user, hourAgo)!.count);
-    const queued = Number(this.store.db.prepare(
-      "SELECT count(*) AS count FROM submissions WHERE kind = 'post' AND actorHandle = ? AND createdAt > ?",
-    ).get(this.user, hourAgo)!.count);
-    return materialized + queued;
   }
 
   /** 该账号当前待审的文章数（已物化的 pending + 队列里的）。 */
   private pendingOwnPosts(): number {
-    const materialized = Number(this.store.db.prepare(
-      "SELECT count(*) AS count FROM entities WHERE kind = 'post' AND json_extract(data,'$.authorHandle') = ? AND json_extract(data,'$.status') = 'pending'",
+    // 同上：pending 只可能出现在队列里，物化后的状态就是 approved。
+    return Number(this.store.db.prepare(
+      "SELECT count(*) AS count FROM submissions WHERE kind = 'post' AND channel = 'web' AND actorHandle = ? AND status = 'pending'",
     ).get(this.user)!.count);
-    const queued = Number(this.store.db.prepare(
-      "SELECT count(*) AS count FROM submissions WHERE kind = 'post' AND actorHandle = ? AND status = 'pending'",
-    ).get(this.user)!.count);
-    return materialized + queued;
   }
 
   /** 投稿限流校验。站内投稿走队列后，路由层要先调这个再入队。 */
