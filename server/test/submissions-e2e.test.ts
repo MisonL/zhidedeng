@@ -93,11 +93,13 @@ describe('投稿全链路（HTTP 层）', () => {
     expect(detail.source).toBe('submission');
   });
 
-  it('未知模型导致审核失败并回滚，记录保持 pending', async () => {
+  it('未知模型导致审核失败并回滚，记录落成 rejected 终态', async () => {
     const { submission } = queue('agent', { offers: [{ modelSlug: 'no-such-model', rate: 0.5 }] });
     const response = await review(submission.id, { status: 'approved' });
     expect(response.status).toBe(400);
-    expect((await list('?status=pending')).items.map(item => item.id)).toContain(submission.id);
+    // 物化失败必须离开待审队列，否则批次永远审不完、待审配额被永久占用。
+    expect((await list('?status=rejected')).items.map(item => item.id)).toContain(submission.id);
+    expect((await list('?status=pending')).items.map(item => item.id)).not.toContain(submission.id);
     expect((await server.app.request('/api/stations/sub-route-example-com')).status).toBe(404);
   });
 
