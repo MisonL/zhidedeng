@@ -55,11 +55,21 @@ function objectPayload(input: unknown): Record<string, unknown> {
   return input as Record<string, unknown>;
 }
 
+/** 把 IPv6 的两个 16 位分组还原成点分 IPv4，用于识别内嵌 IPv4 的转换前缀。 */
+function wordsToIpv4(high: number, low: number): number[] {
+  return [high >> 8, high & 255, low >> 8, low & 255];
+}
+
 function privateIpv4(parts: number[]): boolean {
   const [first, second] = parts;
   return first === 0 || first === 10 || first === 127
     || (first === 172 && second >= 16 && second <= 31)
-    || (first === 192 && second === 168) || (first === 169 && second === 254);
+    || (first === 192 && second === 168) || (first === 169 && second === 254)
+    // 运营商级 NAT、基准测试网段、文档保留段、组播与保留段都不能作为公开站点目标。
+    || (first === 100 && second >= 64 && second <= 127)
+    || (first === 198 && (second === 18 || second === 19))
+    || (first === 192 && second === 0) || (first === 198 && second === 51) || (first === 203 && second === 113)
+    || first >= 224;
 }
 
 function privateHostname(hostname: string): boolean {
@@ -79,8 +89,15 @@ function privateHostname(hostname: string): boolean {
   // 未指定、回环和旧 IPv4-compatible 地址都不能作为公网目标。
   if (words.slice(0, 6).every(word => word === 0)) return true;
   if (words.slice(0, 5).every(word => word === 0) && words[5] === 0xffff) {
-    return privateIpv4([words[6] >> 8, words[6] & 255, words[7] >> 8, words[7] & 255]);
+    return privateIpv4(wordsToIpv4(words[6]!, words[7]!));
   }
+  // NAT64 `64:ff9b::/96`：末尾 32 位是 IPv4。`[64:ff9b::7f00:1]` 经 NAT64 网关
+  // 到达的就是 127.0.0.1，只看字面前缀会把它当成公网地址放行。
+  if (words[0] === 0x64 && words[1] === 0xff9b && words.slice(2, 6).every(word => word === 0)) {
+    return privateIpv4(wordsToIpv4(words[6]!, words[7]!));
+  }
+  // 6to4 `2002::/16`：第 2、3 个分组嵌入 IPv4。
+  if (words[0] === 0x2002) return privateIpv4(wordsToIpv4(words[1]!, words[2]!));
   return false;
 }
 

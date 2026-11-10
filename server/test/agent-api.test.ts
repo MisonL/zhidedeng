@@ -694,3 +694,27 @@ describe('幂等和状态', () => {
     await error(await request(API_ROUTES.getAgentStatus.path + query, 'GET', key.token), 400, 'INVALID_INPUT');
   });
 });
+
+describe('私网地址黑名单的转换前缀', () => {
+  it.each([
+    ['NAT64 指向回环', 'http://[64:ff9b::7f00:1]/'],
+    ['NAT64 指向云元数据', 'http://[64:ff9b::a9fe:a9fe]/'],
+    ['NAT64 指向私网', 'http://[64:ff9b::c0a8:101]/'],
+    ['6to4 指向回环', 'http://[2002:7f00:1::]/'],
+    ['IPv4 映射回环', 'http://[::ffff:127.0.0.1]/'],
+    ['运营商级 NAT', 'http://100.64.0.1/'],
+    ['基准测试网段', 'http://198.18.0.1/'],
+    ['文档保留段', 'http://192.0.2.1/'],
+    ['组播', 'http://224.0.0.1/'],
+    ['保留段', 'http://240.0.0.1/'],
+  ])('%s 被拒绝', async (_name, url) => {
+    const key = credential();
+    // 这些字面形态经网关后会落到内网或云元数据，必须和直接写内网地址同等对待。
+    await error(await submitStation(key, station(0, { url })), 400, 'INVALID_INPUT');
+  });
+
+  it('正常公网地址仍然接受', async () => {
+    const key = credential();
+    await submitted(await submitStation(key, station(0, { url: 'https://public.example.org/' })));
+  });
+});
