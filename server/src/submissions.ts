@@ -458,8 +458,14 @@ function materialize(store: Store, submission: SubmissionRecord, reviewedAt: str
     const slug = mine?.slug ?? stationSlug(store, payload.url, submission.originKey);
     const previous = store.get('station', slug);
     // 更新已有 slug 时保留最初来源，不能把飞书站点改标成 AI 采集。
+    // 指标字段（可用率、首字延迟、成立时间、运行状态）投稿 payload 里根本没有，
+    // 全站也没有别的写入入口。这里必须沿用旧值：写 null 等于「每次同步都把
+    // 种子站点的可用率清空，且没有任何途径填回来」，前端可用率和评分会一起消失。
     store.put('station', slug, {
-      ...payload, slug, uptime: null, firstTokenLatencyMs: null, foundedAt: null, status: null,
+      ...payload, slug, status: previous?.status ?? null,
+      uptime: previous?.uptime ?? null,
+      firstTokenLatencyMs: previous?.firstTokenLatencyMs ?? null,
+      foundedAt: previous?.foundedAt ?? null,
       source: previous ? previous.source : sourceByChannel[submission.channel],
     });
     store.db.prepare('DELETE FROM offers WHERE stationSlug = ?').run(slug);
