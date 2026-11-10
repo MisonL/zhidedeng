@@ -235,16 +235,28 @@ export function reviewSubmission(store: Store, now: Date, id: string, decision: 
 }): SubmissionRecord {
   const { status, reason } = parse(submissionReviewSchema, decision);
   const reviewedAt = parse(z.date(), now).toISOString();
-  return store.transaction(() => {
-    const row = store.db.prepare('SELECT * FROM submissions WHERE id = ?').get(id);
-    if (!row) throw new ApiError(404, 'NOT_FOUND', '投稿不存在');
-    const submission = submissionRecord(row);
-    if (submission.status !== 'pending') throw new ApiError(409, 'ALREADY_REVIEWED', '投稿已审核或被新版本替代');
+  try {
+    return store.transaction(() => {
+      const row = store.db.prepare('SELECT * FROM submissions WHERE id = ?').get(id);
+      if (!row) throw new ApiError(404, 'NOT_FOUND', '投稿不存在');
+      const submission = submissionRecord(row);
+      if (submission.status !== 'pending') throw new ApiError(409, 'ALREADY_REVIEWED', '投稿已审核或被新版本替代');
 
-    if (status === 'approved') materialize(store, submission, reviewedAt);
+      if (status === 'approved') materialize(store, submission, reviewedAt);
 
-    store.db.prepare('UPDATE submissions SET status = ?, reason = ?, reviewedAt = ? WHERE id = ?').run(status, reason ?? null, reviewedAt, id);
-    if (status === 'approved') supersedePending(store, submission, reviewedAt);
-    return { ...submission, status, reason: reason ?? null, reviewedAt };
-  });
+      store.db.prepare('UPDATE submissions SET status = ?, reason = ?, reviewedAt = ? WHERE id = ?').run(status, reason ?? null, reviewedAt, id);
+      if (status === 'approved') supersedePending(store, submission, reviewedAt);
+      return { ...submission, status, reason: reason ?? null, reviewedAt };
+    });
+  } catch (error) {
+    // 物化失败时事务已回滚。记录要是留在 pending 就再没人能动它：
+    // 批次永远「还有待审的」，同批重跑被静默吞掉；
+    // Agent 的待审配额统计全部 pending 行，几条必然失败的记录就能锁死一个账号，
+    // 全局吃满后所有 Agent 投稿停摆。所以物化失败必须落终态。
+    if (error instanceof ApiError && error.status !== 409 && error.status !== 404) {
+      store.db.prepare("UPDATE submissions SET status = 'rejected', reason = ?, reviewedAt = ? WHERE id = ? AND status = 'pending'")
+        .run(`审核时无法物化：${error.message}`.slice(0, 1000), reviewedAt, id);
+    }
+    throw error;
+  }
 }
