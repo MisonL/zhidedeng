@@ -56,6 +56,9 @@ export function parseRecordPage(stdout: string): { records: RawRecord[]; columns
     if (ids.length !== data.data.length) throw new Error('记录 ID 与数据行数量不一致');
     const records = data.data.map((row: unknown, index): RawRecord => {
       if (!Array.isArray(row)) throw new Error('数据行不是数组');
+      // 行比列短意味着这一页字段对不齐：按列名取「审核状态」会拿到 undefined，
+      // 被当成未通过，进而生成下架请求。宁可中止。
+      if (row.length !== columns.length) throw new Error(`第 ${index + 1} 行有 ${row.length} 个值，但列有 ${columns.length} 个`);
       return { recordId: String(ids[index]), fields: Object.fromEntries(columns.map((column, cell) => [column, row[cell]])) };
     });
     return { records, columns, hasMore };
@@ -348,6 +351,15 @@ async function readAllRecords(config: Config) {
   const columns = new Set<string>();
   for (;;) {
     const page = parseRecordPage(await runLark(['base', '+record-list', '--as', 'bot', '--base-token', config.baseToken, '--table-id', config.tableId, '--offset', String(records.length), '--limit', String(PAGE_SIZE)], config.configDir));
+    // 每页单独校验必填字段。只在读完后查一次是不够的：
+    // 分页里混入列式与对象式结构时，某一页的字段会解析成空，
+    // 那些记录读不到「审核状态」就被当成未通过——结果静默生成下架请求，
+    // 日志里看不出任何异常。
+    const pageColumns = new Set(page.columns);
+    const missingOnPage = REQUIRED_COLUMNS.filter(column => !pageColumns.has(column));
+    if (page.records.length > 0 && missingOnPage.length > 0) {
+      throw new Error(`第 ${records.length / PAGE_SIZE + 1} 页缺少字段：${missingOnPage.join('、')}，中止同步`);
+    }
     records.push(...page.records);
     page.columns.forEach(column => columns.add(column));
     if (page.records.length === 0 || !(page.hasMore ?? page.records.length === PAGE_SIZE)) break;
