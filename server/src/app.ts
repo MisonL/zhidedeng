@@ -181,6 +181,18 @@ export function buildApp(store: Store, now: () => Date, options: AppOptions = {}
     const query = submissionQuerySchema.parse({ ...c.req.query(), status: c.req.query('status') ?? 'pending' });
     return c.json(listSubmissions(store, query));
   });
+  // 恢复误下架的站点。下架是软删除，数据一直都在，这里只把标记清掉。
+  // 自动运行需要这个回退手段。
+  app.post('/api/admin/stations/:slug/restore', c => {
+    const { slug } = z.strictObject({ slug: z.string().trim().min(1).max(200) }).parse(c.req.param());
+    if (!store.getWithRemoved('station', slug)) throw new ApiError(404, 'NOT_FOUND', '站点不存在');
+    if (!store.restore('station', slug)) throw new ApiError(409, 'ALREADY_ONLINE', '该站点当前在线，不需要恢复');
+    return c.json({ slug, restored: true });
+  });
+  app.get('/api/admin/stations/removed', c => {
+    const rows = store.db.prepare("SELECT id, removedAt FROM entities WHERE kind = 'station' AND removedAt IS NOT NULL ORDER BY removedAt DESC").all();
+    return c.json({ items: rows.map(row => ({ slug: row.id as string, removedAt: row.removedAt as string })) });
+  });
   app.post('/api/admin/submissions/:id/review', async c => {
     const decision = submissionReviewSchema.parse(await c.req.json());
     return c.json(reviewSubmission(store, now(), c.req.param('id'), decision));
