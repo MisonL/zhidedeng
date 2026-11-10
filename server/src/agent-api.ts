@@ -208,7 +208,6 @@ export class AgentApi {
       const result = enqueueSubmission(this.store, {
         kind, channel: 'agent', originKey, batchId: null, payload, actorHandle: request.handle, ip: request.ip, now: request.now,
       }, {
-        pendingOnly: true,
         deduplicateByActor: true,
         // 去重早退发生在 beforeInsert 之后，预占要在这里退掉。
         onDeduplicated: () => { this.refundAsDedupe(request, release); },
@@ -226,7 +225,8 @@ export class AgentApi {
           release = this.reserve(request);
         },
       });
-      return { ...result, autoApproved: false };
+      // 自动通过开启时如实返回 true，此时 submission.status 已经是 approved。
+      return { ...result, autoApproved: result.autoApproved };
     } catch (error) {
       release?.();
       throw error;
