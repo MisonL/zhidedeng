@@ -149,14 +149,33 @@ describe('审核物化', () => {
     ['倍率高于范围', { ...stationPayload, offers: [{ modelSlug: 'o3', rate: 20.01 }] }],
     ['未知模型', { ...stationPayload, offers: [{ modelSlug: 'missing-model', rate: 0.5 }] }],
     ['重复报价', { ...stationPayload, offers: [stationPayload.offers[0], stationPayload.offers[0]] }],
-  ])('拒绝%s，投稿仍 pending，旧站点和报价不变', (_name, payload) => {
+  ])('拒绝%s，落成 rejected 终态，旧站点和报价不变', (_name, payload) => {
     store.put('station', 'sub-api-example-com', existingStation('submission'));
     server.db.prepare('INSERT INTO offers (stationSlug, modelSlug, rate) VALUES (?, ?, ?)').run('sub-api-example-com', 'o3', 0.7);
     const before = entities();
     const previousOffers = offers();
     const submission = queue({ payload }).submission;
     expect(() => approve(submission.id)).toThrow(expect.objectContaining({ status: 400, code: 'INVALID_INPUT' }));
-    expect(record(submission.id)).toEqual(submission);
+    // 物化失败必须落终态：留 pending 会让该批次永远审不完，并永久占用待审配额。
+    const failed = record(submission.id);
+    expect(failed.status).toBe('rejected');
+    expect(failed.reason).toMatch(/^审核时无法物化：/);
+    expect(entities()).toEqual(before);
+    expect(offers()).toEqual(previousOffers);
+  });
+
+  it.each([
+    ['非 HTTP URL', 'javascript:alert(1)'],
+    ['URL 带 query', 'https://api.example.com/?aff=1'],
+    ['URL 带 fragment', 'https://api.example.com/#aff'],
+    ['URL 带凭证', 'https://user:pass@api.example.com/'],
+  ])('入队前拒绝%s，不能规范化的内容不留下记录或改写旧站点', (_name, url) => {
+    store.put('station', 'sub-api-example-com', existingStation('submission'));
+    server.db.prepare('INSERT INTO offers (stationSlug, modelSlug, rate) VALUES (?, ?, ?)').run('sub-api-example-com', 'o3', 0.7);
+    const before = entities();
+    const previousOffers = offers();
+    expect(() => queue({ payload: { ...stationPayload, url } })).toThrow(expect.objectContaining({ status: 400, code: 'INVALID_INPUT' }));
+    expect(listSubmissions(store, {}).total).toBe(0);
     expect(entities()).toEqual(before);
     expect(offers()).toEqual(previousOffers);
   });
@@ -183,13 +202,13 @@ describe('审核物化', () => {
     expect(store.get('model', modelPayload.slug)).toEqual({ ...modelPayload, tags: [] });
   });
 
-  it('model 的厂商不存在时返回可定位错误，投稿仍 pending，entities 不变', () => {
+  it('model 的厂商不存在时返回可定位错误，落成 rejected 终态，entities 不变', () => {
     const before = entities();
     const submission = queue({ kind: 'model', originKey: modelPayload.slug, payload: { ...modelPayload, vendor: 'missing-vendor' } }).submission;
     expect(() => approve(submission.id)).toThrow(expect.objectContaining({
       status: 400, code: 'INVALID_INPUT', message: '厂商 missing-vendor 不存在，请先新增厂商',
     }));
-    expect(record(submission.id)).toEqual(submission);
+    expect(record(submission.id).status).toBe('rejected');
     expect(entities()).toEqual(before);
     expect(store.get('model', modelPayload.slug)).toBeUndefined();
   });
@@ -318,7 +337,8 @@ describe('投稿管理接口', () => {
       { id: 'missing-id', error: { status: 404, code: 'NOT_FOUND' } },
       { id: valid.id, submission: { id: valid.id, status: 'approved' } },
     ] });
-    expect(record(invalid.id).status).toBe('pending');
+    // 失败的那条落成 rejected，不再卡在待审队列里占配额。
+    expect(record(invalid.id).status).toBe('rejected');
     expect(record(valid.id).status).toBe('approved');
     expect(store.get('station', 'sub-api-example-com')).toBeDefined();
   });

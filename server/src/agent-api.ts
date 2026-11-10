@@ -16,6 +16,9 @@ const IP_PER_HOUR = 20;
 const ACCOUNT_PENDING = 5;
 const HOSTNAME_PENDING = 2;
 const GLOBAL_PENDING = 200;
+// 幂等命中单独记一个宽松额度。重试不该把 Agent 的常规额度吃光，
+// 但无脑重放同一个请求同样要能被限住。
+const DEDUPE_PER_HOUR = 100;
 const statusQuerySchema = z.strictObject({ limit: z.coerce.number().int().min(1).max(50).default(20) });
 
 export interface AgentRequest {
@@ -39,11 +42,21 @@ function objectPayload(input: unknown): Record<string, unknown> {
   return input as Record<string, unknown>;
 }
 
+/** 把 IPv6 的两个 16 位分组还原成点分 IPv4，用于识别内嵌 IPv4 的转换前缀。 */
+function wordsToIpv4(high: number, low: number): number[] {
+  return [high >> 8, high & 255, low >> 8, low & 255];
+}
+
 function privateIpv4(parts: number[]): boolean {
   const [first, second] = parts;
   return first === 0 || first === 10 || first === 127
     || (first === 172 && second >= 16 && second <= 31)
-    || (first === 192 && second === 168) || (first === 169 && second === 254);
+    || (first === 192 && second === 168) || (first === 169 && second === 254)
+    // 运营商级 NAT、基准测试网段、文档保留段、组播与保留段都不能作为公开站点目标。
+    || (first === 100 && second >= 64 && second <= 127)
+    || (first === 198 && (second === 18 || second === 19))
+    || (first === 192 && second === 0) || (first === 198 && second === 51) || (first === 203 && second === 113)
+    || first >= 224;
 }
 
 function privateHostname(hostname: string): boolean {
@@ -63,8 +76,15 @@ function privateHostname(hostname: string): boolean {
   // 未指定、回环和旧 IPv4-compatible 地址都不能作为公网目标。
   if (words.slice(0, 6).every(word => word === 0)) return true;
   if (words.slice(0, 5).every(word => word === 0) && words[5] === 0xffff) {
-    return privateIpv4([words[6] >> 8, words[6] & 255, words[7] >> 8, words[7] & 255]);
+    return privateIpv4(wordsToIpv4(words[6]!, words[7]!));
   }
+  // NAT64 `64:ff9b::/96`：末尾 32 位是 IPv4。`[64:ff9b::7f00:1]` 经 NAT64 网关
+  // 到达的就是 127.0.0.1，只看字面前缀会把它当成公网地址放行。
+  if (words[0] === 0x64 && words[1] === 0xff9b && words.slice(2, 6).every(word => word === 0)) {
+    return privateIpv4(wordsToIpv4(words[6]!, words[7]!));
+  }
+  // 6to4 `2002::/16`：第 2、3 个分组嵌入 IPv4。
+  if (words[0] === 0x2002) return privateIpv4(wordsToIpv4(words[1]!, words[2]!));
   return false;
 }
 
@@ -100,6 +120,7 @@ export class AgentApi {
   private readonly byToken = new AttemptLimiter(TOKEN_PER_HOUR, HOUR_MS);
   private readonly byAccount = new AttemptLimiter(ACCOUNT_PER_HOUR, HOUR_MS);
   private readonly byIp = new AttemptLimiter(IP_PER_HOUR, HOUR_MS);
+  private readonly byDedupe = new AttemptLimiter(DEDUPE_PER_HOUR, HOUR_MS);
 
   constructor(store: Store) { this.store = store; }
 
@@ -149,6 +170,20 @@ export class AgentApi {
     return () => { for (const { limiter, key } of dimensions) limiter.release(key); };
   }
 
+  /**
+   * 命中幂等：把刚预占的常规额度退回去，改记一次去重额度。
+   * 去重额度用尽才返回 429——这样正常重试不受影响，反复探测被限住。
+   */
+  private refundAsDedupe(request: AgentRequest, release?: () => void): void {
+    const time = request.now.getTime();
+    release?.();
+    const retryAfter = this.byDedupe.retryAfter(request.tokenHash, time);
+    if (retryAfter > 0) {
+      throw new ApiError(429, 'RATE_LIMITED', '重复提交次数过多，请稍后重试', { retryAfter });
+    }
+    this.byDedupe.record(request.tokenHash, time);
+  }
+
   private enqueue(kind: SubmissionKind, payload: unknown, originKey: string, hostname: string | null, request: AgentRequest): AgentSubmitResponse {
     // JSON 正文读取期间可能发生禁用或吊销，不能仅依赖读取前的校验。
     activeAgentHandle(this.store, request.tokenHash);
@@ -157,8 +192,9 @@ export class AgentApi {
       const result = enqueueSubmission(this.store, {
         kind, channel: 'agent', originKey, batchId: null, payload, actorHandle: request.handle, ip: request.ip, now: request.now,
       }, {
-        pendingOnly: true,
         deduplicateByActor: true,
+        // 去重早退发生在 beforeInsert 之后，预占要在这里退掉。
+        onDeduplicated: () => { this.refundAsDedupe(request, release); },
         beforeInsert: () => {
           activeAgentHandle(this.store, request.tokenHash);
           if (this.pendingCount(request.handle) >= ACCOUNT_PENDING) {
@@ -173,7 +209,8 @@ export class AgentApi {
           release = this.reserve(request);
         },
       });
-      return { ...result, autoApproved: false };
+      // 自动通过开启时如实返回 true，此时 submission.status 已经是 approved。
+      return { ...result, autoApproved: result.autoApproved };
     } catch (error) {
       release?.();
       throw error;

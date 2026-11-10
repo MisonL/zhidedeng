@@ -136,14 +136,15 @@ describe('Bearer 凭证校验', () => {
     expect(server.db.prepare('SELECT useCount FROM agent_tokens WHERE id = ?').get(key.id)!.useCount).toBe(2);
   });
 
-  it('禁用在已使用凭证上立即生效，恢复账号后可再次使用', async () => {
+  it('禁用会吊销凭证，恢复账号后旧凭证也不再生效', async () => {
     const key = credential();
     await status(key);
     setAccountDisabled(store, 'Alice', true, clock);
     await error(await submitStation(key), 401, 'UNAUTHENTICATED');
+    // 恢复账号只解除禁用，不复活已吊销的凭证：必须重新签发。
     setAccountDisabled(store, 'Alice', false, clock);
-    await submitted(await submitStation(key));
-    expect(server.db.prepare('SELECT useCount FROM agent_tokens WHERE id = ?').get(key.id)!.useCount).toBe(2);
+    await error(await submitStation(key), 401, 'UNAUTHENTICATED');
+    expect(server.db.prepare('SELECT revokedAt FROM agent_tokens WHERE id = ?').get(key.id)!.revokedAt).toBe(clock.toISOString());
   });
 
   it.each(['吊销', '禁用'])('读取正文期间%s也不能继续入队', async action => {
@@ -231,16 +232,25 @@ describe('提交和审核', () => {
     });
   });
 
-  it('管理员开启自动通过后，Agent 两种提交仍必须人工审核', async () => {
+  it('管理员开启自动通过后，Agent 两种提交也直接上架', async () => {
     const key = credential();
     setAutoApprove(store, true, clock);
     const results = [await submitted(await submitStation(key)), await submitted(await submitPost(key))];
     for (const result of results) {
-      expect(result.autoApproved).toBe(false);
-      expect(result.submission.status).toBe('pending');
-      expect(server.db.prepare('SELECT autoApproved FROM submissions WHERE id = ?').get(result.submission.id)!.autoApproved).toBe(0);
+      // 站点以自动运行为主：开了自动通过就不该再卡在人工审核。
+      expect(result.autoApproved).toBe(true);
+      expect(result.submission.status).toBe('approved');
+      expect(server.db.prepare('SELECT autoApproved FROM submissions WHERE id = ?').get(result.submission.id)!.autoApproved).toBe(1);
     }
-    expect(pendingCount()).toBe(2);
+    expect(pendingCount()).toBe(0);
+  });
+
+  it('关闭自动通过时，Agent 提交仍进待审队列', async () => {
+    const key = credential();
+    setAutoApprove(store, false, clock);
+    const result = await submitted(await submitStation(key));
+    expect(result.autoApproved).toBe(false);
+    expect(result.submission.status).toBe('pending');
   });
 
   it('未知模型和重复报价在入队前拒绝', async () => {
@@ -691,5 +701,47 @@ describe('幂等和状态', () => {
   it.each(['?limit=0', '?limit=51', '?limit=1.5', '?limit=bad', '?handle=Bobby'])('status 拒绝无效或越权筛选参数 %s', async query => {
     const key = credential();
     await error(await request(API_ROUTES.getAgentStatus.path + query, 'GET', key.token), 400, 'INVALID_INPUT');
+  });
+});
+
+describe('私网地址黑名单的转换前缀', () => {
+  it.each([
+    ['NAT64 指向回环', 'http://[64:ff9b::7f00:1]/'],
+    ['NAT64 指向云元数据', 'http://[64:ff9b::a9fe:a9fe]/'],
+    ['NAT64 指向私网', 'http://[64:ff9b::c0a8:101]/'],
+    ['6to4 指向回环', 'http://[2002:7f00:1::]/'],
+    ['IPv4 映射回环', 'http://[::ffff:127.0.0.1]/'],
+    ['运营商级 NAT', 'http://100.64.0.1/'],
+    ['基准测试网段', 'http://198.18.0.1/'],
+    ['文档保留段', 'http://192.0.2.1/'],
+    ['组播', 'http://224.0.0.1/'],
+    ['保留段', 'http://240.0.0.1/'],
+  ])('%s 被拒绝', async (_name, url) => {
+    const key = credential();
+    // 这些字面形态经网关后会落到内网或云元数据，必须和直接写内网地址同等对待。
+    await error(await submitStation(key, station(0, { url })), 400, 'INVALID_INPUT');
+  });
+
+  it('正常公网地址仍然接受', async () => {
+    const key = credential();
+    await submitted(await submitStation(key, station(0, { url: 'https://public.example.org/' })));
+  });
+});
+
+describe('幂等命中不消耗常规额度', () => {
+  it('重复提交同一个请求不扣常规配额，但计入去重配额', async () => {
+    const key = credential();
+    const body = station(0);
+    const first = await submitted(await submitStation(key, body));
+    // 常规额度上限是 10 次/小时。同一个请求重放 20 次，
+    // 如果每次都扣常规额度，第 11 次就会 429——而这只是网络重试。
+    for (let index = 0; index < 20; index++) {
+      const again = await submitted(await submitStation(key, body));
+      expect(again.deduplicated).toBe(true);
+      expect(again.submission.id).toBe(first.submission.id);
+    }
+    const quota = (await status(key)).quotas.token.remaining;
+    // 只消耗了首次提交的那一次。
+    expect(quota).toBe(9);
   });
 });
