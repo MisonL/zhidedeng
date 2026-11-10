@@ -837,7 +837,7 @@ describe('批次自动通过', () => {
     expect(listSubmissions(store, { batchId: batch.batchId }).items[0].status).toBe('pending');
   });
 
-  it('自动通过允许已下架的相同内容在新批次重新上架', async () => {
+  it('自动通过允许已下架的相同内容在新批次重新上架，且不覆盖下架前的行', async () => {
     await send('/api/admin/settings', { autoApprove: true });
     await submit([stationItem()]);
     const removal = await submit([removalItem(store.get('station', 'sub-batch-example-com')!)]);
@@ -845,7 +845,10 @@ describe('批次自动通过', () => {
     expect(store.get('station', 'sub-batch-example-com')).toBeUndefined();
     const restored = await submit([stationItem()]);
     expect(restored.results[0]).toMatchObject({ status: 'approved', autoApproved: true });
-    expect(store.get('station', 'sub-batch-example-com')).toBeDefined();
+    // 已下架的 slug 不释放：新记录走哈希后缀，下架前那行仍留在库里可恢复。
+    // 否则同一 hostname 的两次上架会争用同一个 slug，后者把前者整行顶掉。
+    expect(store.getWithRemoved('station', 'sub-batch-example-com')).toBeDefined();
+    expect(store.all('station').filter(station => station.name === 'batch.example.com')).toHaveLength(1);
   });
 
   it('切换自动通过后重试 pending remove 仍复用 id 并保持待人工审', async () => {
