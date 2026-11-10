@@ -366,7 +366,21 @@ async function readAllRecords(config: Config) {
     }
     records.push(...page.records);
     page.columns.forEach(column => columns.add(column));
-    if (page.records.length === 0 || !(page.hasMore ?? page.records.length === PAGE_SIZE)) break;
+    // 没有 has_more 时，不能只用「本页行数是否等于 PAGE_SIZE」判断结束。
+    // 服务端若把 limit 截断成更小的值（或返回比请求少的行），第一页就 break，
+    // 解析失败数为 0、有效站点数 > 0，两道闸门都不触发，
+    // 而 planBatch 会把第一页之外的全部站点计划下架。
+    if (page.records.length === 0) break;
+    if (page.hasMore !== null) {
+      if (!page.hasMore) break;
+      continue;
+    }
+    if (page.records.length < PAGE_SIZE) {
+      // 拿不到 has_more 且本页没满：只在第一页就遇到短页时信任它（表格本来就不足一页），
+      // 否则说明分页被截断，中止比猜安全。
+      if (records.length === page.records.length) break;
+      throw new Error(`分页结果不完整：本页 ${page.records.length} 行，请求上限 ${PAGE_SIZE} 行，且返回里没有 has_more。中止同步`);
+    }
   }
   // 字段被改名时所有记录都会变成「未通过」，会生成错误的下架请求，所以这里中止。
   const missing = REQUIRED_COLUMNS.filter(column => !columns.has(column));
@@ -430,6 +444,14 @@ async function main(dryRun: boolean, allowSkipped: boolean, allowRemoval: boolea
   else console.log('跳过下架检测：未配置 SYNC_TOKEN');
   if (validStations === 0 && state !== null && state.stations.length > 0) {
     throw new UnsafeBatchError(`成功解析的站点数为 0，线上仍有 ${state.stations.length} 个站点，为避免误下架已中止。请确认表格内容和读取结果后重试`);
+  }
+  // 只拦「0 个」不够：读表只读到一小部分时，剩余站点会被当成已删除。
+  // 线上规模足够大时，解析出的站点数不足一半就停下来让人确认。
+  if (state !== null && state.stations.length >= 10 && validStations * 2 < state.stations.length) {
+    throw new UnsafeBatchError(
+      `本次只解析出 ${validStations} 个站点，线上有 ${state.stations.length} 个，差距过大，为避免批量误下架已中止。`
+      + '请核对表格内容与分页读取结果；确认无误后可用 --no-removal 只同步新增和更新',
+    );
   }
   const { payload, removals, added, updated } = planBatch(batch, state, allowSkipped, allowRemoval);
   console.log(state === null
