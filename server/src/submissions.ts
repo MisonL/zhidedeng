@@ -392,8 +392,15 @@ export function submissionState(store: Store): AdminSubmissionStateResponse {
   for (const row of feishuRows) {
     const submission = submissionRecord(row);
     const origin = feishuHostnameKey(submission.originKey);
-    const payload = parse(stationSchema, submission.payload);
-    const hostname = hostnameOf(payload.url);
+    // 历史行的 payload 可能是旧格式（比如缺 description）。整条接口因此返回 400，
+    // 同步脚本会把它当失败中止——一条老数据就能让整条同步链路停摆，只能靠人改库。
+    // 这里逐行跳过并记警告：宁可漏掉一个 hostname 的下架判定，也不要全停。
+    const parsedPayload = stationSchema.safeParse(submission.payload);
+    if (!parsedPayload.success) {
+      console.error(`投稿 ${submission.id} 的 payload 格式不符合当前 schema，已跳过：${parsedPayload.error.issues[0]?.message ?? '未知原因'}`);
+      continue;
+    }
+    const hostname = hostnameOf(parsedPayload.data.url);
     if (hostname !== null && origin === feishuHostnameKey(hostname)) feishuHosts.add(origin);
   }
 
