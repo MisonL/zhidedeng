@@ -260,6 +260,23 @@ describe('改密码', () => {
   }, 30_000);
 });
 
+describe('签到限流', () => {
+  it('连续签到超限后返回 429，冷却后恢复', async () => {
+    // 签到一天只能成功一次，但每次调用都要走事务和写库。
+    // 没有闸门时脚本可以循环打点压库，这里补上 5 次/小时的限制。
+    await register('alice');
+    const session = await login('alice', PASSWORD);
+    const cookie = session.headers.getSetCookie().map(value => value.split(';')[0]).join('; ');
+    for (let index = 0; index < 5; index++) {
+      const response = await server.app.request('/api/me/checkin', { method: 'POST', headers: { cookie, 'content-type': 'application/json' } });
+      expect(response.status).toBeLessThan(500);
+    }
+    const blocked = await server.app.request('/api/me/checkin', { method: 'POST', headers: { cookie, 'content-type': 'application/json' } });
+    expect(blocked.status).toBe(429);
+    expect(await blocked.json()).toMatchObject({ error: { code: 'RATE_LIMITED', retryAfter: expect.any(Number) } });
+  });
+});
+
 describe('禁用账号', () => {
   const disable = (handle: string, disabled: boolean, headers: Record<string, string> = admin) =>
     server.app.request(`/api/admin/users/${handle}/disable`, { method: 'POST', headers, body: JSON.stringify({ disabled }) });
