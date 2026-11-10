@@ -29,7 +29,16 @@ export function setAccountDisabled(store: Store, handle: string, disabled: boole
   const found = account.handle as string;
   return store.transaction(() => {
     store.db.prepare('UPDATE accounts SET disabledAt = ? WHERE handle = ?').run(disabled ? now.toISOString() : null, found);
-    if (disabled) store.db.prepare('DELETE FROM sessions WHERE handle = ?').run(found);
+    if (disabled) {
+      store.db.prepare('DELETE FROM sessions WHERE handle = ?').run(found);
+      // Agent 凭证必须一并吊销。禁用期间它被 accounts.disabledAt IS NULL 挡住，
+      // 但只删会话不吊销凭证的话，账号恢复那一刻旧 token 就原样复活了——
+      // 攻击者不用重新认证，而管理员以为「禁用」已经切断了他的访问。
+      // 只吊销没吊销过的，保留首次吊销时间供审计。
+      // agent_tokens 表在凭证分支才引入，这里按表存在与否决定是否执行。
+      const hasTokens = store.db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'agent_tokens'").get();
+      if (hasTokens) store.db.prepare('UPDATE agent_tokens SET revokedAt = ? WHERE handle = ? AND revokedAt IS NULL').run(now.toISOString(), found);
+    }
     return { handle: found, disabled };
   });
 }
