@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { API_ROUTES } from '@zhidedeng/shared';
 import type { ApiContracts, ApiRouteName, Post } from '@zhidedeng/shared';
-import { createApp } from '../src/node-app.ts';
+import { createApp, openStore } from '../src/node-app.ts';
+import { reviewSubmission } from '../src/submissions.ts';
 
 let clock = new Date('2026-11-03T15:59:00Z');
 let server: ReturnType<typeof createApp>;
@@ -183,13 +184,14 @@ describe('seed and read endpoints', () => {
   it('hot sorting promotes a fresh upvoted post and penalizes its changed downvote', async () => {
     await signIn();
     const input = { kind: 'community' as const, summary: '排序行为测试', body: '虚构测试内容' };
-    const approve = (id: string) => server.db.prepare("UPDATE entities SET data = json_set(data, '$.status', 'approved') WHERE kind = 'post' AND id = ?").run(id);
+    // 站内发帖现在先进投稿队列，审核通过才物化到 entities。
+    const approve = (id: string) => reviewSubmission(openStore(server.db), clock, id, { status: 'approved' });
     const older = await ok('createPost', { ...input, title: '较早的热门讨论' });
-    approve(older.id);
+    expect(approve(older.id).status).toBe('approved');
     await ok('putVote', { targetType: 'post', targetId: older.id, value: 'up' });
     clock = new Date(clock.getTime() + 2 * 86400000);
     const fresh = await ok('createPost', { ...input, title: '新的热门讨论' });
-    approve(fresh.id);
+    expect(approve(fresh.id).status).toBe('approved');
     await ok('putVote', { targetType: 'post', targetId: fresh.id, value: 'up' });
     expect((await ok('getPosts', { sort: 'hot' })).items[0].id).toBe(fresh.id);
     await ok('putVote', { targetType: 'post', targetId: fresh.id, value: 'down' });
