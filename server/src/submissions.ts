@@ -350,14 +350,19 @@ function validatePayload(store: Store, kind: SubmissionKind, payload: unknown, a
 export function removeStation(store: Store, slug: string, expectedSubmissionId: string): string | null {
   const station = store.get('station', slug);
   if (!station) return null;
-  if (station.source !== 'submission') throw new ApiError(409, 'STATION_SOURCE_CONFLICT', '只能下架群友提交的站点');
+  // 种子和演示数据不能被下架覆盖。其余来源都该能下线：
+  // 飞书同步来的是 submission，Agent 提交的是 agent，
+  // 只认 submission 会让 Agent 自动上架的站点永远删不掉。
+  if (station.source === 'demo') throw new ApiError(409, 'STATION_SOURCE_CONFLICT', '演示数据不能下架');
   const originKey = new URL(parse(httpUrl, station.url)).hostname;
   const key = feishuHostnameKey(originKey);
   const current = store.db.prepare("SELECT id, originKey FROM submissions WHERE kind = 'station' AND action = 'upsert' AND status = 'approved' ORDER BY reviewedAt DESC, rowid DESC")
     .all().find(row => feishuHostnameKey(row.originKey as string) === key);
   if (current?.id !== expectedSubmissionId) throw new ApiError(409, 'STALE_REMOVAL', '该站点在读取后已被更新，请重新同步');
-  store.db.prepare('DELETE FROM offers WHERE stationSlug = ?').run(slug);
-  store.db.prepare("DELETE FROM entities WHERE kind = 'station' AND id = ?").run(slug);
+  // 软删除而不是真删：站点以自动运行为主，一次误读不该丢整批数据。
+  // 报价保留（它们记的是这个站曾提供过什么），恢复时原样拿回来。
+  // 同一个 slug 再上架时 put 会清掉标记，也就是自动恢复。
+  store.markRemoved('station', slug, new Date().toISOString());
   return slug;
 }
 

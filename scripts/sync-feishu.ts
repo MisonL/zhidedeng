@@ -7,7 +7,7 @@
 //   SITE_URL                  站点地址。管理接口不对公网开放，在服务器本机运行，用 http://127.0.0.1:PORT
 //   SYNC_TOKEN                管理接口密钥，至少 32 位。dry-run 缺省时跳过下架检测
 //
-//   node scripts/sync-feishu.ts [--dry-run] [--allow-skipped]
+//   node scripts/sync-feishu.ts [--dry-run] [--allow-skipped] [--no-removal]
 //
 // 任何读取失败都中止且不入队：把读取失败当成空表会生成错误的下架请求。
 import { execFile } from 'node:child_process';
@@ -298,11 +298,15 @@ export function buildBatch(records: RawRecord[], models: SiteModel[]) {
 }
 
 /** 按飞书分组的 hostname 比较，slug 只取服务端返回的值，不在脚本里派生。 */
-export function planBatch(batch: AdminBatchSubmitRequest, state: AdminSubmissionStateResponse | null, allowSkipped = false) {
+export function planBatch(batch: AdminBatchSubmitRequest, state: AdminSubmissionStateResponse | null, allowSkipped = false, allowRemoval = true) {
   const upserts = batch.items.filter(item => item.kind === 'station' && (item.action ?? 'upsert') === 'upsert');
   const incoming = new Set(upserts.map(item => feishuHostnameKey(item.originKey)));
   const current = new Set(state?.stations.map(station => feishuHostnameKey(station.originKey)));
-  const removals: RemovalItem[] = allowSkipped ? [] : state?.stations.filter(station => !incoming.has(feishuHostnameKey(station.originKey))).map(station => ({
+  // 默认自动下架：表格里删掉的站点就该下线，这是自动运行的前提。
+  // 防误删靠的是读取阶段的闸门（逐页字段校验、行长度校验、解析失败即中止、
+  // 有效站点数为 0 即中止）和下架本身的软删除——站点只是标记下线，随时能恢复。
+  // --no-removal 留作手动关闭的口子。
+  const removals: RemovalItem[] = allowSkipped || !allowRemoval ? [] : state?.stations.filter(station => !incoming.has(feishuHostnameKey(station.originKey))).map(station => ({
     kind: 'station', originKey: feishuHostnameKey(station.originKey), action: 'remove', payload: { slug: station.slug, submissionId: station.submissionId },
   })) ?? [];
   return {
@@ -408,7 +412,7 @@ function batchResult(body: unknown, items: AdminBatchSubmitRequest['items']): Ad
   return body as unknown as AdminBatchSubmitResponse;
 }
 
-async function main(dryRun: boolean, allowSkipped: boolean, config: Config) {
+async function main(dryRun: boolean, allowSkipped: boolean, allowRemoval: boolean, config: Config) {
   const records = await readAllRecords(config);
   const models = await readModels(config.site);
   const { payload: batch, skipped, notes, validStations } = buildBatch(records, models);
@@ -427,7 +431,7 @@ async function main(dryRun: boolean, allowSkipped: boolean, config: Config) {
   if (validStations === 0 && state !== null && state.stations.length > 0) {
     throw new UnsafeBatchError(`成功解析的站点数为 0，线上仍有 ${state.stations.length} 个站点，为避免误下架已中止。请确认表格内容和读取结果后重试`);
   }
-  const { payload, removals, added, updated } = planBatch(batch, state, allowSkipped);
+  const { payload, removals, added, updated } = planBatch(batch, state, allowSkipped, allowRemoval);
   console.log(state === null
     ? `同步计划：上架/更新 ${stationCount}，评价 ${postCount}，下架未检测`
     : `同步计划：新增 ${added}，更新 ${updated}，下架 ${removals.length}，评价 ${postCount}`);
@@ -471,9 +475,11 @@ async function main(dryRun: boolean, allowSkipped: boolean, config: Config) {
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const dryRun = process.argv.includes('--dry-run');
   const allowSkipped = process.argv.includes('--allow-skipped');
+  // 默认自动下架；--no-removal 只同步新增和更新。
+  const allowRemoval = !process.argv.includes('--no-removal');
   const secrets = () => ['FEISHU_BASE_TOKEN', 'SYNC_TOKEN'].map(name => process.env[name]).filter((value): value is string => Boolean(value));
   try {
-    await main(dryRun, allowSkipped, readConfig(dryRun));
+    await main(dryRun, allowSkipped, allowRemoval, readConfig(dryRun));
   } catch (error) {
     // lark-cli 的错误输出可能回显命令行参数，打印前抹掉 token。
     const message = secrets().reduce((text, secret) => text.replaceAll(secret, '***'), error instanceof Error ? error.message : String(error));
