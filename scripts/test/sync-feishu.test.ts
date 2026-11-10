@@ -610,3 +610,20 @@ describe('分页结构不一致时的保护', () => {
     expect(parsed.columns).not.toContain('审核状态');
   });
 });
+
+describe('分页截断保护', () => {
+  it('缺 has_more 且非首页出现短页时判为分页不完整', () => {
+    // 服务端把 limit 200 截断成更小的值，第一页就拿到短页。
+    // 旧逻辑直接 break，第一页之外的站点会被当成已删除而全部下架。
+    const page = JSON.stringify({
+      data: {
+        fields: ['中转站名称', '网址', '提交类型', '审核状态', '提交时间'],
+        record_id_list: ['rec1'],
+        data: [['站点A', 'https://a.example.com/', '站点', '通过', '2026-11-01']],
+      },
+    });
+    const parsed = parseRecordPage(page);
+    expect(parsed.hasMore).toBeNull();
+    expect(parsed.records.length).toBeLessThan(200);
+  });
+});
