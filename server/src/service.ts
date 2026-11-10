@@ -93,7 +93,11 @@ export class Service {
   // 每个站都要用，同一请求内只读一次。
   private cachedOffers?: StationOffer[];
   private offers(): StationOffer[] {
-    return this.cachedOffers ??= this.store.db.prepare('SELECT stationSlug, modelSlug, rate FROM offers').all() as unknown as StationOffer[];
+    // 只算在线站点的报价。下架是软删除，报价行仍在库里（恢复时要原样拿回来），
+    // 但不能让它们继续参与最低倍率、榜单和模型页的统计。
+    return this.cachedOffers ??= this.store.db.prepare(
+      "SELECT offer.stationSlug, offer.modelSlug, offer.rate FROM offers AS offer JOIN entities AS station ON station.kind = 'station' AND station.id = offer.stationSlug WHERE station.removedAt IS NULL",
+    ).all() as unknown as StationOffer[];
   }
 
   private hasEnoughOffersForRate(offers: StationOffer[]): boolean {
@@ -242,7 +246,9 @@ export class Service {
     const model = this.store.get('model', slug);
     if (!model) throw new ApiError(404, 'NOT_FOUND', '模型不存在');
     const offers = this.offers().filter(o => o.modelSlug === slug).sort((a, b) => a.rate - b.rate)
-      .map(o => ({ ...o, station: this.station(this.store.get('station', o.stationSlug)!) }));
+      // 站点已被下架时报价不该出现；用 filter 兜底而不是非空断言，
+      // 一条孤儿报价不能把整个模型页变成 500。
+      .flatMap(o => { const station = this.store.get('station', o.stationSlug); return station ? [{ ...o, station: this.station(station) }] : []; });
     return { ...model, offers };
   }
 
@@ -270,7 +276,7 @@ export class Service {
     const station = this.store.get('station', slug);
     if (!station) throw new ApiError(404, 'NOT_FOUND', '中转站不存在');
     return { ...this.station(station), offers: this.offers().filter(o => o.stationSlug === slug).sort((a, b) => a.rate - b.rate)
-      .map(o => ({ ...o, model: this.store.get('model', o.modelSlug)! })) };
+      .flatMap(o => { const model = this.store.get('model', o.modelSlug); return model ? [{ ...o, model }] : []; }) };
   }
 
   private hotScore(post: Post): number {
