@@ -1,6 +1,7 @@
 import type { AdminDisableUserResponse, PostStatus } from '@zhidedeng/shared';
 import type { Store } from './database.ts';
 import { ApiError } from './errors.ts';
+import { reviewSubmission } from './submissions.ts';
 
 // 管理接口的动作，由 app.ts 在 Bearer 校验之后调用。没有后台页面，运维用 curl。
 
@@ -8,12 +9,27 @@ export function listPosts(store: Store, status: PostStatus) {
   const items = store.all('post').filter(post => post.status === status)
     .sort((a, b) => a.publishedAt.localeCompare(b.publishedAt))
     .map(({ id, kind, title, summary, body, authorHandle, stationSlug, modelSlug, publishedAt, status: current }) => ({ id, kind, title, summary, body, authorHandle, stationSlug, modelSlug, publishedAt, status: current }));
-  return { items };
+  // 站内投稿已进统一队列，物化前只在 submissions 里，不列出来审核员就看不到。
+  const queued = store.db.prepare(
+    "SELECT * FROM submissions WHERE kind = 'post' AND channel = 'web' AND status = ? ORDER BY createdAt",
+  ).all(status).map(row => {
+    const payload = JSON.parse(row.payload as string) as { kind: string; title: string; summary: string; body: string; stationSlug: string | null; modelSlug: string | null };
+    return { id: row.id as string, ...payload, authorHandle: row.actorHandle as string | null, publishedAt: row.createdAt as string, status };
+  });
+  return { items: [...items, ...queued].sort((a, b) => a.publishedAt.localeCompare(b.publishedAt)) };
 }
 
-export function reviewPost(store: Store, id: string, status: PostStatus) {
+export function reviewPost(store: Store, now: () => Date, id: string, status: PostStatus) {
   const post = store.get('post', id);
-  if (!post) throw new ApiError(404, 'NOT_FOUND', '文章不存在');
+  if (!post) {
+    // 站内投稿还在队列里：交给统一的审核函数，物化和状态推进都在那里。
+    const row = store.db.prepare(
+      "SELECT 1 FROM submissions WHERE id = ? AND kind = 'post' AND channel = 'web' AND status = 'pending'",
+    ).get(id);
+    if (!row) throw new ApiError(404, 'NOT_FOUND', '文章不存在');
+    const reviewed = reviewSubmission(store, now(), id, { status: status === 'approved' ? 'approved' : 'rejected' });
+    return { id, status: reviewed.status as PostStatus };
+  }
   // 群友提交的文章由飞书全量同步写入，这里改了下次同步又会恢复。
   // agent 和用户自己的投稿不受此限：前者没有二次同步，后者本来就归站内管，
   // 而且这里是它们唯一的下架路径（队列只处理待审记录）。
