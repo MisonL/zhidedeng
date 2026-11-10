@@ -124,7 +124,8 @@ export interface CreateAgentPostRequest {
 export interface AgentSubmitResponse {
   submission: SubmissionRecord;
   deduplicated: boolean;
-  autoApproved: false;
+  // 管理员开启自动通过时为 true，此时 submission.status 已经是 approved。
+  autoApproved: boolean;
 }
 export type CreateAgentStationResponse = AgentSubmitResponse;
 export type CreateAgentPostResponse = AgentSubmitResponse;

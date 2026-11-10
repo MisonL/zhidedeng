@@ -486,16 +486,21 @@ describe('批次入队与审核', () => {
 });
 
 describe('下架请求', () => {
-  it('人工通过下架后删除站点和全部 offers，入队本身不删除', async () => {
+  it('人工通过下架后站点被软删除，数据保留可恢复，入队本身不动', async () => {
     const station = approveStation();
     const batch = await submit([removalItem(station)]);
     expect(listSubmissions(store, { batchId: batch.batchId }).items[0].action).toBe('remove');
     expect(store.get('station', station.slug)).toEqual(station);
     const result = await batchReview(batch.batchId);
     expect(result.results[0].submission?.status).toBe('approved');
+    // 对外读取都当作已删除。
     expect(store.get('station', station.slug)).toBeUndefined();
-    expect(server.db.prepare('SELECT * FROM offers WHERE stationSlug = ?').all(station.slug)).toEqual([]);
     expect((await state()).stations).toEqual([]);
+    // 但原始行和报价还在：自动运行需要能恢复误下架的站点。
+    expect(store.getWithRemoved('station', station.slug)).toEqual(station);
+    expect(server.db.prepare('SELECT * FROM offers WHERE stationSlug = ?').all(station.slug).length).toBeGreaterThan(0);
+    expect(store.restore('station', station.slug)).toBe(true);
+    expect(store.get('station', station.slug)).toEqual(station);
   });
 
   it('目标已被其他操作删除时，将下架幂等地审核为 approved', async () => {
@@ -522,15 +527,25 @@ describe('下架请求', () => {
     expect(server.db.prepare('SELECT rate FROM offers WHERE stationSlug = ?').get(station.slug)).toEqual({ rate: 0.5 });
   });
 
-  it.each(['agent', 'demo', 'user'] as const)('不能下架 source=%s 的站点，返回 409 并保留所有内容', async source => {
+  it('只有演示数据受下架保护，返回 409 并保留所有内容', async () => {
     const station = approveStation('protected.example.com', 'agent');
-    store.transaction(() => store.put('station', station.slug, { ...station, source }));
+    store.transaction(() => store.put('station', station.slug, { ...station, source: 'demo' }));
     const batch = await submit([removalItem(station)]);
     const response = await send(`/api/admin/submissions/${batch.results[0].id}/review`, { status: 'approved' });
     expect(response.status).toBe(409);
-    expect(store.get('station', station.slug)?.source).toBe(source);
+    expect(store.get('station', station.slug)?.source).toBe('demo');
     expect(server.db.prepare('SELECT rate FROM offers WHERE stationSlug = ?').get(station.slug)).toEqual({ rate: 0.5 });
     expect(listSubmissions(store, { batchId: batch.batchId }).items[0].status).toBe('pending');
+  });
+
+  it.each(['agent', 'user'] as const)('source=%s 的站点可以下架，只是要经过审核', async source => {
+    const station = approveStation(`removable-${source}.example.com`, 'agent');
+    store.transaction(() => store.put('station', station.slug, { ...station, source }));
+    const batch = await submit([removalItem(station)]);
+    const result = await batchReview(batch.batchId);
+    expect(result.results[0].submission?.status).toBe('approved');
+    expect(store.get('station', station.slug)).toBeUndefined();
+    expect(store.getWithRemoved('station', station.slug)?.source).toBe(source);
   });
 
   it('remove payload 缺少 slug 时单条和批次返回 400，不入队其他条目', async () => {
@@ -801,15 +816,25 @@ describe('批次自动通过', () => {
     expect(listSubmissions(store, { batchId: batch.batchId, status: 'pending' }).total).toBe(1);
   });
 
-  it('自动通过不审受保护来源的下架，人工审核报错，其余 upsert 正常生效', async () => {
-    const protectedStation = approveStation('agent.example.com', 'agent');
+  it('自动通过只作用于上架；Agent 来源的站点可以下架但要审核', async () => {
+    const agentStation = approveStation('agent.example.com', 'agent');
     await send('/api/admin/settings', { autoApprove: true });
-    const batch = await submit([removalItem(protectedStation), stationItem()]);
+    const batch = await submit([removalItem(agentStation), stationItem()]);
+    // 下架始终要审核：误删的代价比误上架大得多，自动通过只管新增和更新。
     expect(batch.results[0]).toMatchObject({ status: 'pending', autoApproved: false });
     expect(batch.results[1]).toMatchObject({ status: 'approved', autoApproved: true });
-    expect(store.get('station', protectedStation.slug)?.source).toBe('agent');
-    expect(listSubmissions(store, { batchId: batch.batchId }).total).toBe(2);
-    expect((await batchReview(batch.batchId)).results[0].error).toMatchObject({ status: 409, code: 'STATION_SOURCE_CONFLICT' });
+    // 但来源不是障碍：审核通过就能下线。
+    expect((await batchReview(batch.batchId)).results[0].submission?.status).toBe('approved');
+    expect(store.get('station', agentStation.slug)).toBeUndefined();
+  });
+
+  it('自动通过下演示数据的下架仍被拒绝', async () => {
+    const demoStation = approveStation('demo.example.com', 'agent');
+    store.transaction(() => store.put('station', demoStation.slug, { ...demoStation, source: 'demo' }));
+    await send('/api/admin/settings', { autoApprove: true });
+    const batch = await submit([removalItem(demoStation)]);
+    expect(store.get('station', demoStation.slug)?.source).toBe('demo');
+    expect(listSubmissions(store, { batchId: batch.batchId }).items[0].status).toBe('pending');
   });
 
   it('自动通过允许已下架的相同内容在新批次重新上架', async () => {
@@ -918,5 +943,27 @@ describe('旧投稿表迁移', () => {
       db?.close();
       rmSync(directory, { recursive: true });
     }
+  });
+});
+
+describe('下架与恢复', () => {
+  it('下架后站点可以恢复，数据原样回来', async () => {
+    const station = approveStation();
+    const offersBefore = server.db.prepare('SELECT * FROM offers WHERE stationSlug = ? ORDER BY modelSlug').all(station.slug);
+    const batch = await submit([removalItem(station)]);
+    await batchReview(batch.batchId);
+    expect(store.get('station', station.slug)).toBeUndefined();
+    const removed = await server.app.request('/api/admin/stations/removed', { headers: admin });
+    expect((await removed.json() as { items: { slug: string }[] }).items.map(item => item.slug)).toContain(station.slug);
+    const restored = await server.app.request(`/api/admin/stations/${station.slug}/restore`, { method: 'POST', headers: admin });
+    expect(restored.status).toBe(200);
+    expect(store.get('station', station.slug)).toEqual(station);
+    expect(server.db.prepare('SELECT * FROM offers WHERE stationSlug = ? ORDER BY modelSlug').all(station.slug)).toEqual(offersBefore);
+  });
+
+  it('恢复在线站点返回 409，恢复不存在的返回 404', async () => {
+    const station = approveStation();
+    expect((await server.app.request(`/api/admin/stations/${station.slug}/restore`, { method: 'POST', headers: admin })).status).toBe(409);
+    expect((await server.app.request('/api/admin/stations/no-such-station/restore', { method: 'POST', headers: admin })).status).toBe(404);
   });
 });

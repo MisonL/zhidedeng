@@ -2,7 +2,8 @@ import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import type { AdminBatchSubmitRequest, AdminBatchSubmitResponse, AdminSubmissionStateResponse, SubmissionChannel, SubmissionKind, SubmissionRecord, SubmissionStatus } from '@zhidedeng/shared';
 import { feishuHostnameKey, STATION_SLUG_MAX, stationSlugBase, stationSlugSuffix } from '@zhidedeng/shared';
-import { adminSlug, httpUrl, offerRate } from './catalog.ts';
+import { adminSlug, httpUrl, postSchema, stationSchema, text } from '@zhidedeng/shared/submission';
+
 import type { SqlRow, SqlValue, StationRecord, Store } from './database.ts';
 import { ApiError } from './errors.ts';
 
@@ -10,7 +11,6 @@ const submissionKind = z.enum(['station', 'model', 'post']);
 const submissionChannel = z.enum(['feishu', 'agent', 'web']);
 const submissionAction = z.enum(['upsert', 'remove']);
 const submissionStatus = z.enum(['pending', 'approved', 'rejected', 'superseded']);
-const text = (max: number) => z.string().min(1).max(max).refine(value => value.trim().length > 0, '内容不能为空');
 const sourceByChannel = { agent: 'agent', feishu: 'submission', web: 'user' } as const;
 const batchIdentifier = z.string().trim().min(1).max(200);
 
@@ -49,20 +49,9 @@ const enqueueSchema = z.object({
   ip: z.string().min(1).max(100),
   now: z.date(),
 }).refine(input => input.action !== 'remove' || input.kind === 'station', '只有站点支持下架');
+export { postSchema, stationSchema };
 const modelSchema = z.object({ slug: adminSlug, vendor: adminSlug, name: text(60), description: text(200) });
 const stationUrlSchema = z.object({ url: httpUrl });
-export const stationSchema = z.object({
-  name: text(60),
-  description: text(300),
-  url: httpUrl,
-  rechargeThreshold: z.number().min(0).nullable(),
-  paymentMethods: z.array(text(20)).max(10),
-  offers: z.array(z.object({ modelSlug: text(200), rate: offerRate })).max(100),
-}).refine(station => new Set(station.offers.map(offer => offer.modelSlug)).size === station.offers.length, '存在重复的报价');
-export const postSchema = z.object({
-  title: text(100), summary: text(200), body: text(5000), authorName: text(30),
-  authorHandle: text(200).nullish(), hostname: text(253).nullish(), publishedAt: z.iso.datetime().nullish(),
-});
 const removalSchema = z.object({ slug: z.string().min(1).max(200), submissionId: batchIdentifier });
 
 export function parseSubmissionInput<T>(schema: z.ZodType<T>, input: unknown): T {
@@ -155,6 +144,11 @@ export function enqueueSubmission(store: Store, input: {
   deduplicateByActor?: boolean;
   // 在查重之后、插入之前执行，复用本函数的 BEGIN IMMEDIATE，不能另开事务。
   beforeInsert?: () => void;
+  /**
+   * 命中幂等去重时的回调。调用方可以退掉常规额度、改记到单独的宽松配额上：
+   * 重试不该扣光额度，无限探测又必须被限住。
+   */
+  onDeduplicated?: () => void;
 } = {}): { submission: SubmissionRecord; deduplicated: boolean; autoApproved: boolean } {
   const validated = parse(enqueueSchema, input);
   let payload: string | undefined;
@@ -199,6 +193,7 @@ export function enqueueSubmission(store: Store, input: {
         supersedePending(store, submission, reviewedAt);
         return { submission: { ...submission, status: 'approved', reason: AUTO_APPROVE_REASON, reviewedAt }, deduplicated: true, autoApproved: true };
       }
+      options.onDeduplicated?.();
       return { submission, deduplicated: true, autoApproved: false };
     }
     options.beforeInsert?.();
@@ -361,14 +356,19 @@ function validatePayload(store: Store, kind: SubmissionKind, payload: unknown, a
 export function removeStation(store: Store, slug: string, expectedSubmissionId: string): string | null {
   const station = store.get('station', slug);
   if (!station) return null;
-  if (station.source !== 'submission') throw new ApiError(409, 'STATION_SOURCE_CONFLICT', '只能下架群友提交的站点');
+  // 种子和演示数据不能被下架覆盖。其余来源都该能下线：
+  // 飞书同步来的是 submission，Agent 提交的是 agent，
+  // 只认 submission 会让 Agent 自动上架的站点永远删不掉。
+  if (station.source === 'demo') throw new ApiError(409, 'STATION_SOURCE_CONFLICT', '演示数据不能下架');
   const originKey = new URL(parse(httpUrl, station.url)).hostname;
   const key = feishuHostnameKey(originKey);
   const current = store.db.prepare("SELECT id, originKey FROM submissions WHERE kind = 'station' AND action = 'upsert' AND status = 'approved' ORDER BY reviewedAt DESC, rowid DESC")
     .all().find(row => feishuHostnameKey(row.originKey as string) === key);
   if (current?.id !== expectedSubmissionId) throw new ApiError(409, 'STALE_REMOVAL', '该站点在读取后已被更新，请重新同步');
-  store.db.prepare('DELETE FROM offers WHERE stationSlug = ?').run(slug);
-  store.db.prepare("DELETE FROM entities WHERE kind = 'station' AND id = ?").run(slug);
+  // 软删除而不是真删：站点以自动运行为主，一次误读不该丢整批数据。
+  // 报价保留（它们记的是这个站曾提供过什么），恢复时原样拿回来。
+  // 同一个 slug 再上架时 put 会清掉标记，也就是自动恢复。
+  store.markRemoved('station', slug, new Date().toISOString());
   return slug;
 }
 
@@ -490,24 +490,36 @@ export function reviewSubmission(store: Store, now: Date, id: string, decision: 
 }): SubmissionRecord {
   const { status, reason } = parse(submissionReviewSchema, decision);
   const reviewedAt = parse(z.date(), now).toISOString();
-  return store.transaction(() => {
-    const row = store.db.prepare('SELECT * FROM submissions WHERE id = ?').get(id);
-    if (!row) throw new ApiError(404, 'NOT_FOUND', '投稿不存在');
-    const submission = submissionRecord(row);
-    if (submission.status !== 'pending') throw new ApiError(409, 'ALREADY_REVIEWED', '投稿已审核或被新版本替代');
+  try {
+    return store.transaction(() => {
+      const row = store.db.prepare('SELECT * FROM submissions WHERE id = ?').get(id);
+      if (!row) throw new ApiError(404, 'NOT_FOUND', '投稿不存在');
+      const submission = submissionRecord(row);
+      if (submission.status !== 'pending') throw new ApiError(409, 'ALREADY_REVIEWED', '投稿已审核或被新版本替代');
 
-    let resolvedReason = reason ?? null;
-    let materializationReason: string | undefined;
-    if (status === 'approved') {
-      // 历史 pending 也采用 URL 身份，避免审核后仍用旧 key 绕过下架版本校验。
-      if (submission.kind === 'station' && submission.action === 'upsert') submission.originKey = submissionOriginKey(store, submission);
-      materializationReason = materialize(store, submission, reviewedAt);
-      resolvedReason = materializationReason ?? resolvedReason;
+      let resolvedReason = reason ?? null;
+      let materializationReason: string | undefined;
+      if (status === 'approved') {
+        // 历史 pending 也采用 URL 身份，避免审核后仍用旧 key 绕过下架版本校验。
+        if (submission.kind === 'station' && submission.action === 'upsert') submission.originKey = submissionOriginKey(store, submission);
+        materializationReason = materialize(store, submission, reviewedAt);
+        resolvedReason = materializationReason ?? resolvedReason;
+      }
+
+      store.db.prepare('UPDATE submissions SET status = ?, autoApproved = 0, originKey = ?, reason = ?, reviewedAt = ? WHERE id = ?').run(status, submission.originKey, resolvedReason, reviewedAt, id);
+      // 已不存在的目标没有产生新版本，不能借清理旧下架请求替代新的待审投稿。
+      if (status === 'approved' && materializationReason === undefined) supersedePending(store, submission, reviewedAt);
+      return { ...submission, status, reason: resolvedReason, reviewedAt };
+    });
+  } catch (error) {
+    // 物化失败时事务已回滚。记录要是留在 pending 就再没人能动它：
+    // 批次永远「还有待审的」，同批重跑被静默吞掉；
+    // Agent 的待审配额统计全部 pending 行，几条必然失败的记录就能锁死一个账号，
+    // 全局吃满后所有 Agent 投稿停摆。所以物化失败必须落终态。
+    if (error instanceof ApiError && error.status !== 409 && error.status !== 404) {
+      store.db.prepare("UPDATE submissions SET status = 'rejected', reason = ?, reviewedAt = ? WHERE id = ? AND status = 'pending'")
+        .run(`审核时无法物化：${error.message}`.slice(0, 1000), reviewedAt, id);
     }
-
-    store.db.prepare('UPDATE submissions SET status = ?, autoApproved = 0, originKey = ?, reason = ?, reviewedAt = ? WHERE id = ?').run(status, submission.originKey, resolvedReason, reviewedAt, id);
-    // 已不存在的目标没有产生新版本，不能借清理旧下架请求替代新的待审投稿。
-    if (status === 'approved' && materializationReason === undefined) supersedePending(store, submission, reviewedAt);
-    return { ...submission, status, reason: resolvedReason, reviewedAt };
-  });
+    throw error;
+  }
 }
