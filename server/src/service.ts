@@ -76,6 +76,14 @@ export class Service {
     return { ...record, ...interaction, lowestRate, score };
   }
 
+  /** 刚入队的站内投稿：先拼出与 Post 一致的结构，审核通过后才从 entities 读。 */
+  pendingPost(submission: { id: string; payload: unknown; actorHandle: string | null; createdAt: string }): Post {
+    return this.post(this.queuedPost({
+      id: submission.id, payload: submission.payload,
+      actorHandle: submission.actorHandle ?? this.user, createdAt: submission.createdAt,
+    }));
+  }
+
   private post(record: PostRecord): Post {
     const { authorHandle, authorNickname, source, ...fields } = record;
     const author = authorNickname ? { handle: authorHandle, nickname: authorNickname, avatar: '' } : this.author(authorHandle);
@@ -99,7 +107,12 @@ export class Service {
 
   private readablePost(id: string) {
     const post = this.store.get('post', id);
-    return post && (post.status === 'approved' || post.authorHandle === this.handle) ? post : undefined;
+    if (post) return post.status === 'approved' || post.authorHandle === this.handle ? post : undefined;
+    // 站内投稿现在先进队列，物化前只在 submissions 里。作者要能看到自己的待审稿。
+    const row = this.store.db.prepare(
+      "SELECT * FROM submissions WHERE id = ? AND kind = 'post' AND channel = 'web' AND status IN ('pending','rejected') AND actorHandle = ?",
+    ).get(id, this.handle ?? '');
+    return row ? this.queuedPost(row) : undefined;
   }
 
   requireTarget(target: Target) {
@@ -113,8 +126,54 @@ export class Service {
     return favorites.filter(favorite => favorite.targetType === 'post' ? this.readablePost(favorite.targetId) : this.store.get('station', favorite.targetId));
   }
 
-  private countOwnPosts(condition: string, ...params: string[]) {
-    return Number(this.store.db.prepare(`SELECT count(*) AS count FROM entities WHERE ${POST_AUTHOR} ${condition}`).get(this.user, ...params)!.count);
+  /** 该账号一共投过多少篇（已物化 + 队列里待审的）。 */
+  private countOwnPosts(): number {
+    const materialized = Number(this.store.db.prepare(`SELECT count(*) AS count FROM entities WHERE ${POST_AUTHOR}`).get(this.user)!.count);
+    const queued = Number(this.store.db.prepare(
+      "SELECT count(*) AS count FROM submissions WHERE kind = 'post' AND channel = 'web' AND actorHandle = ? AND status = 'pending'",
+    ).get(this.user)!.count);
+    return materialized + queued;
+  }
+
+  /** 该账号最近一小时提交的文章数（已物化 + 队列里的）。 */
+  private postsInLastHour(): number {
+    const hourAgo = new Date(this.now().getTime() - 3_600_000).toISOString();
+    const materialized = Number(this.store.db.prepare(
+      "SELECT count(*) AS count FROM entities WHERE kind = 'post' AND json_extract(data,'$.authorHandle') = ? AND json_extract(data,'$.publishedAt') > ?",
+    ).get(this.user, hourAgo)!.count);
+    const queued = Number(this.store.db.prepare(
+      "SELECT count(*) AS count FROM submissions WHERE kind = 'post' AND actorHandle = ? AND createdAt > ?",
+    ).get(this.user, hourAgo)!.count);
+    return materialized + queued;
+  }
+
+  /** 该账号当前待审的文章数（已物化的 pending + 队列里的）。 */
+  private pendingOwnPosts(): number {
+    const materialized = Number(this.store.db.prepare(
+      "SELECT count(*) AS count FROM entities WHERE kind = 'post' AND json_extract(data,'$.authorHandle') = ? AND json_extract(data,'$.status') = 'pending'",
+    ).get(this.user)!.count);
+    const queued = Number(this.store.db.prepare(
+      "SELECT count(*) AS count FROM submissions WHERE kind = 'post' AND actorHandle = ? AND status = 'pending'",
+    ).get(this.user)!.count);
+    return materialized + queued;
+  }
+
+  /** 投稿限流校验。站内投稿走队列后，路由层要先调这个再入队。 */
+  assertCanSubmitPost(): void {
+    if (this.postsInLastHour() >= POSTS_PER_HOUR) throw new ApiError(429, 'RATE_LIMITED', '投稿太频繁了，请稍后再试');
+    if (this.pendingOwnPosts() >= MAX_PENDING_POSTS) throw new ApiError(429, 'PENDING_LIMIT', '待审核的投稿太多了，请等审核后再提交');
+  }
+
+  /** 队列里的站内投稿转成 PostRecord 形状，物化前也要能读。 */
+  private queuedPost(row: Record<string, unknown>): PostRecord {
+    // 从库读出来是 JSON 字符串，从 enqueueSubmission 返回时已经是对象。
+    const raw = row.payload;
+    const payload = (typeof raw === 'string' ? JSON.parse(raw) : raw) as { kind: PostRecord['kind']; title: string; summary: string; body: string; stationSlug?: string | null; modelSlug?: string | null };
+    return {
+      ...payload, stationSlug: payload.stationSlug ?? null, modelSlug: payload.modelSlug ?? null,
+      id: row.id as string, authorHandle: row.actorHandle as string, cover: null,
+      publishedAt: row.createdAt as string, status: (row.status as string) === 'rejected' ? 'rejected' : 'pending',
+    } as PostRecord;
   }
 
   getMe(): CurrentUser {
@@ -125,7 +184,7 @@ export class Service {
       ...this.store.get('user', this.user)!, checkedInToday: last?.date === today,
       streak: last && (last.date === today || last.date === yesterday) ? Number(last.streak) : 0,
       favoriteCount: this.myFavorites().length,
-      shareCount: this.countOwnPosts(''),
+      shareCount: this.countOwnPosts(),
     };
   }
 
@@ -157,7 +216,14 @@ export class Service {
   }
 
   getMyPosts(query: PaginationQuery) {
-    const posts = this.store.all('post').filter(p => p.authorHandle === this.user)
+    const approved = this.store.all('post').filter(p => p.authorHandle === this.user);
+    // 加上还在队列里的待审稿：站内发帖已走统一队列，
+    // 不列出来作者会以为投稿丢了。
+    // 待审与被拒的都列出来：被拒也是作者的记录，他要能看到状态和原因。
+    const pending = this.store.db.prepare(
+      "SELECT * FROM submissions WHERE kind = 'post' AND channel = 'web' AND actorHandle = ? AND status IN ('pending','rejected')",
+    ).all(this.user).map(row => this.queuedPost(row));
+    const posts = [...approved, ...pending]
       .sort((a, b) => b.publishedAt.localeCompare(a.publishedAt)).map(p => this.post(p));
     return paginate(posts, query);
   }
@@ -231,9 +297,7 @@ export class Service {
   createPost(input: CreatePostRequest): Post {
     if (input.stationSlug && !this.store.get('station', input.stationSlug)) throw new ApiError(400, 'INVALID_INPUT', '关联中转站不存在');
     if (input.modelSlug && !this.store.get('model', input.modelSlug)) throw new ApiError(400, 'INVALID_INPUT', '关联模型不存在');
-    const hourAgo = new Date(this.now().getTime() - 3_600_000).toISOString();
-    if (this.countOwnPosts("AND json_extract(data,'$.publishedAt') > ?", hourAgo) >= POSTS_PER_HOUR) throw new ApiError(429, 'RATE_LIMITED', '投稿太频繁了，请稍后再试');
-    if (this.countOwnPosts("AND json_extract(data,'$.status') = 'pending'") >= MAX_PENDING_POSTS) throw new ApiError(429, 'PENDING_LIMIT', '待审核的投稿太多了，请等审核后再提交');
+    this.assertCanSubmitPost();
     const post: PostRecord = {
       ...input, id: crypto.randomUUID(), authorHandle: this.user, stationSlug: input.stationSlug ?? null,
       modelSlug: input.modelSlug ?? null, cover: null, publishedAt: this.now().toISOString(), status: 'pending',

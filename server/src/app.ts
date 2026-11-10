@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { Hono } from 'hono';
 import type { Context } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
@@ -187,7 +188,7 @@ export function buildApp(store: Store, now: () => Date, options: AppOptions = {}
   app.get('/api/admin/posts', c => c.json(listPosts(store, postStatus.parse(c.req.query('status')))));
   app.post('/api/admin/posts/:id/review', async c => {
     const { status } = z.strictObject({ status: postStatus }).parse(await c.req.json());
-    return c.json(reviewPost(store, c.req.param('id'), status));
+    return c.json(reviewPost(store, now, c.req.param('id'), status));
   });
   app.post('/api/admin/users/:handle/disable', async c => {
     const { disabled } = z.strictObject({ disabled: z.boolean() }).parse(await c.req.json());
@@ -198,14 +199,14 @@ export function buildApp(store: Store, now: () => Date, options: AppOptions = {}
     return c.json(setCommentHidden(store, c.req.param('id'), hidden));
   });
 
-  function route<K extends ApiRouteName>(name: K, schema: z.ZodType<ApiContracts[K]['request']>, handler: (service: Service, input: ApiContracts[K]['request']) => ApiContracts[K]['response']) {
+  function route<K extends ApiRouteName>(name: K, schema: z.ZodType<ApiContracts[K]['request']>, handler: (service: Service, input: ApiContracts[K]['request'], ip: string) => ApiContracts[K]['response']) {
     const { method, path } = API_ROUTES[name];
     app.on(method, path, async c => {
       const handle = sessionHandle(store, c.req.header('cookie'), now());
       if (!handle && (method !== 'GET' || PERSONAL_READS.has(name))) throw new ApiError(401, 'UNAUTHENTICATED', '请先登录');
       const body = method === 'GET' ? '' : await c.req.text();
       const raw: unknown = method === 'GET' ? { ...c.req.query(), ...c.req.param() } : JSON.parse(body || '{}');
-      return c.json(handler(new Service(store, now, handle), schema.parse(raw)));
+      return c.json(handler(new Service(store, now, handle), schema.parse(raw), clientIp(c)));
     });
   }
 
@@ -326,7 +327,22 @@ export function buildApp(store: Store, now: () => Date, options: AppOptions = {}
   route('getStation', z.strictObject({ slug: identifier }), (service, input) => service.getStation(input.slug));
   route('getPosts', z.strictObject({ ...pagination, kind: kind.optional(), vendor: identifier.optional(), station: identifier.optional(), model: identifier.optional(), sort: z.enum(['latest', 'hot']).optional(), q: queryText }), (service, input) => service.getPosts(input));
   route('getPost', z.strictObject({ id: identifier }), (service, input) => service.getPost(input.id));
-  route('createPost', z.strictObject({ kind, title: z.string().trim().min(1).max(200), summary: z.string().trim().min(1).max(1000), body: z.string().min(1).max(100_000).refine(body => body.trim().length > 0), stationSlug: identifier.optional(), modelSlug: identifier.optional() }), (service, input) => service.createPost(input));
+  route('createPost', z.strictObject({ kind, title: z.string().trim().min(1).max(200), summary: z.string().trim().min(1).max(1000), body: z.string().min(1).max(100_000).refine(body => body.trim().length > 0), stationSlug: identifier.optional(), modelSlug: identifier.optional() }), (service, input, ip) => {
+    // 站内发帖也进统一队列：飞书和 Agent 都走 submission，只有站内另写 entities，
+    // 管理员就得在两个地方看待审。内容来源标成「用户投稿」。
+    service.assertCanSubmitPost();
+    if (input.stationSlug && !store.get('station', input.stationSlug)) throw new ApiError(400, 'INVALID_INPUT', '关联中转站不存在');
+    if (input.modelSlug && !store.get('model', input.modelSlug)) throw new ApiError(400, 'INVALID_INPUT', '关联模型不存在');
+    const payload = {
+      kind: input.kind, title: input.title, summary: input.summary, body: input.body,
+      stationSlug: input.stationSlug ?? null, modelSlug: input.modelSlug ?? null,
+    };
+    const originKey = `web:${service.handle}:${createHash('sha256').update(JSON.stringify(payload)).digest('hex')}`;
+    const result = enqueueSubmission(store, {
+      kind: 'post', channel: 'web', originKey, payload, actorHandle: service.handle, ip, now: now(),
+    });
+    return service.pendingPost(result.submission);
+  });
   route('putVote', z.strictObject({ ...target, value: z.enum(['up', 'down']).nullable() }), (service, input) => service.putVote(input));
   route('putFavorite', z.strictObject({ ...target, favorited: z.boolean() }), (service, input) => service.putFavorite(input));
   route('getComments', z.strictObject({ ...pagination, ...target }), (service, input) => service.getComments(input));
