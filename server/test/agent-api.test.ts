@@ -136,14 +136,15 @@ describe('Bearer 凭证校验', () => {
     expect(server.db.prepare('SELECT useCount FROM agent_tokens WHERE id = ?').get(key.id)!.useCount).toBe(2);
   });
 
-  it('禁用在已使用凭证上立即生效，恢复账号后可再次使用', async () => {
+  it('禁用会吊销凭证，恢复账号后旧凭证也不再生效', async () => {
     const key = credential();
     await status(key);
     setAccountDisabled(store, 'Alice', true, clock);
     await error(await submitStation(key), 401, 'UNAUTHENTICATED');
+    // 恢复账号只解除禁用，不复活已吊销的凭证：必须重新签发。
     setAccountDisabled(store, 'Alice', false, clock);
-    await submitted(await submitStation(key));
-    expect(server.db.prepare('SELECT useCount FROM agent_tokens WHERE id = ?').get(key.id)!.useCount).toBe(2);
+    await error(await submitStation(key), 401, 'UNAUTHENTICATED');
+    expect(server.db.prepare('SELECT revokedAt FROM agent_tokens WHERE id = ?').get(key.id)!.revokedAt).toBe(clock.toISOString());
   });
 
   it.each(['吊销', '禁用'])('读取正文期间%s也不能继续入队', async action => {
