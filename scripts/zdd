@@ -11,4 +11,20 @@ while [ -L "$source_path" ]; do
   source_path="$(readlink "$source_path")"
   case "$source_path" in /*) ;; *) source_path="$dir/$source_path" ;; esac
 done
-exec node --experimental-strip-types "$(cd -P "$(dirname "$source_path")" && pwd)/zdd.ts" "$@"
+target="$(cd -P "$(dirname "$source_path")" && pwd)"
+
+# 依赖没装时 Node 只会抛 ERR_MODULE_NOT_FOUND，退出码 1——
+# 在 zdd 的约定里 1 是「用法错误」，Agent 会去改参数而不是去装依赖。
+# 先探一次，给出能照着做的结构化提示。
+if ! command -v node >/dev/null 2>&1; then
+  printf '%s\n' '{"ok":false,"code":1,"message":"找不到 node，需要 Node 22.18 以上","detail":null,"nextAction":"安装 Node 22.x 后重试"}'
+  exit 1
+fi
+# 必须在脚本所在目录探测：zdd.ts 的模块解析从 scripts/ 开始，
+# 从仓库根探测会误判（@zhidedeng/shared 是 scripts 的依赖）。
+if ! (cd "$target" && node --experimental-strip-types -e 'import("@zhidedeng/shared/submission").then(()=>{},()=>process.exit(1))') >/dev/null 2>&1; then
+  printf '%s\n' '{"ok":false,"code":1,"message":"依赖未安装，找不到 @zhidedeng/shared","detail":null,"nextAction":"在仓库根目录执行 pnpm install 后重试"}'
+  exit 1
+fi
+
+exec node --experimental-strip-types "$target/zdd.ts" "$@"
