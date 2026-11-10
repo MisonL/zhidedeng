@@ -172,7 +172,8 @@ describe('三选一准入', () => {
     });
     expect(created.status).toBe(200);
     const submitted = await created.json() as { id: string };
-    expect(openStore(server.db).get('post', submitted.id)).toMatchObject({ authorHandle: 'Alice', status: 'pending' });
+    // 站内投稿现在先进队列，审核通过才物化到 entities。
+    expect(openStore(server.db).get('post', submitted.id)).toBeUndefined();
     expect((await issue(cookie)).status).toBe(403);
     const adminToken = 'agent-test-admin-0123456789abcdef';
     const app = buildApp(openStore(server.db), () => clock, { syncToken: adminToken });
