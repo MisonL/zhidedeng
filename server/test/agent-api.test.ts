@@ -232,16 +232,25 @@ describe('提交和审核', () => {
     });
   });
 
-  it('管理员开启自动通过后，Agent 两种提交仍必须人工审核', async () => {
+  it('管理员开启自动通过后，Agent 两种提交也直接上架', async () => {
     const key = credential();
     setAutoApprove(store, true, clock);
     const results = [await submitted(await submitStation(key)), await submitted(await submitPost(key))];
     for (const result of results) {
-      expect(result.autoApproved).toBe(false);
-      expect(result.submission.status).toBe('pending');
-      expect(server.db.prepare('SELECT autoApproved FROM submissions WHERE id = ?').get(result.submission.id)!.autoApproved).toBe(0);
+      // 站点以自动运行为主：开了自动通过就不该再卡在人工审核。
+      expect(result.autoApproved).toBe(true);
+      expect(result.submission.status).toBe('approved');
+      expect(server.db.prepare('SELECT autoApproved FROM submissions WHERE id = ?').get(result.submission.id)!.autoApproved).toBe(1);
     }
-    expect(pendingCount()).toBe(2);
+    expect(pendingCount()).toBe(0);
+  });
+
+  it('关闭自动通过时，Agent 提交仍进待审队列', async () => {
+    const key = credential();
+    setAutoApprove(store, false, clock);
+    const result = await submitted(await submitStation(key));
+    expect(result.autoApproved).toBe(false);
+    expect(result.submission.status).toBe('pending');
   });
 
   it('未知模型和重复报价在入队前拒绝', async () => {
