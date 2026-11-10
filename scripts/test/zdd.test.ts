@@ -600,3 +600,18 @@ describe('凭证不外泄', () => {
     expect(JSON.parse(raw)).toEqual({ apiBase: 'https://api.test', token: TOKEN });
   });
 });
+
+describe('启动壳的错误路径', () => {
+  it('依赖缺失时输出结构化 JSON 而不是静默退出', async () => {
+    // Agent 只能看退出码和 stdout。空输出会让它以为参数写错了，
+    // 于是反复改参数，而真正该做的是 pnpm install。
+    const root = join(import.meta.dirname, '..', '..');
+    const script = await readFile(join(root, 'scripts', 'zdd'), 'utf8');
+    expect(script).toContain('ERR_MODULE_NOT_FOUND');
+    expect(script).toContain('pnpm install');
+    // 结构化结果走 stdout，不是 stderr。
+    expect(script).toMatch(/printf '%s\\n' '\{"ok":false/);
+    // 探测必须在 scripts/ 目录内进行，否则解析不到 scripts 的依赖。
+    expect(script).toContain('cd "$target"');
+  });
+});
