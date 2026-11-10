@@ -15,6 +15,9 @@ const IP_PER_HOUR = 20;
 const ACCOUNT_PENDING = 5;
 const HOSTNAME_PENDING = 2;
 const GLOBAL_PENDING = 200;
+// 幂等命中单独记一个宽松额度。重试不该把 Agent 的常规额度吃光，
+// 但无脑重放同一个请求同样要能被限住。
+const DEDUPE_PER_HOUR = 100;
 const agentStationSchema = stationSchema.strict();
 const agentPostSchema = postSchema.omit({ authorHandle: true }).strict();
 const statusQuerySchema = z.strictObject({ limit: z.coerce.number().int().min(1).max(50).default(20) });
@@ -133,6 +136,7 @@ export class AgentApi {
   private readonly byToken = new AttemptLimiter(TOKEN_PER_HOUR, HOUR_MS);
   private readonly byAccount = new AttemptLimiter(ACCOUNT_PER_HOUR, HOUR_MS);
   private readonly byIp = new AttemptLimiter(IP_PER_HOUR, HOUR_MS);
+  private readonly byDedupe = new AttemptLimiter(DEDUPE_PER_HOUR, HOUR_MS);
 
   constructor(store: Store) { this.store = store; }
 
@@ -182,6 +186,20 @@ export class AgentApi {
     return () => { for (const { limiter, key } of dimensions) limiter.release(key); };
   }
 
+  /**
+   * 命中幂等：把刚预占的常规额度退回去，改记一次去重额度。
+   * 去重额度用尽才返回 429——这样正常重试不受影响，反复探测被限住。
+   */
+  private refundAsDedupe(request: AgentRequest, release?: () => void): void {
+    const time = request.now.getTime();
+    release?.();
+    const retryAfter = this.byDedupe.retryAfter(request.tokenHash, time);
+    if (retryAfter > 0) {
+      throw new ApiError(429, 'RATE_LIMITED', '重复提交次数过多，请稍后重试', { retryAfter });
+    }
+    this.byDedupe.record(request.tokenHash, time);
+  }
+
   private enqueue(kind: SubmissionKind, payload: unknown, originKey: string, hostname: string | null, request: AgentRequest): AgentSubmitResponse {
     // JSON 正文读取期间可能发生禁用或吊销，不能仅依赖读取前的校验。
     activeAgentHandle(this.store, request.tokenHash);
@@ -192,6 +210,8 @@ export class AgentApi {
       }, {
         pendingOnly: true,
         deduplicateByActor: true,
+        // 去重早退发生在 beforeInsert 之后，预占要在这里退掉。
+        onDeduplicated: () => { this.refundAsDedupe(request, release); },
         beforeInsert: () => {
           activeAgentHandle(this.store, request.tokenHash);
           if (this.pendingCount(request.handle) >= ACCOUNT_PENDING) {

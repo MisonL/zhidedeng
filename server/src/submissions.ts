@@ -155,6 +155,11 @@ export function enqueueSubmission(store: Store, input: {
   deduplicateByActor?: boolean;
   // 在查重之后、插入之前执行，复用本函数的 BEGIN IMMEDIATE，不能另开事务。
   beforeInsert?: () => void;
+  /**
+   * 命中幂等去重时的回调。调用方可以退掉常规额度、改记到单独的宽松配额上：
+   * 重试不该扣光额度，无限探测又必须被限住。
+   */
+  onDeduplicated?: () => void;
 } = {}): { submission: SubmissionRecord; deduplicated: boolean; autoApproved: boolean } {
   const validated = parse(enqueueSchema, input);
   let payload: string | undefined;
@@ -199,6 +204,7 @@ export function enqueueSubmission(store: Store, input: {
         supersedePending(store, submission, reviewedAt);
         return { submission: { ...submission, status: 'approved', reason: AUTO_APPROVE_REASON, reviewedAt }, deduplicated: true, autoApproved: true };
       }
+      options.onDeduplicated?.();
       return { submission, deduplicated: true, autoApproved: false };
     }
     options.beforeInsert?.();

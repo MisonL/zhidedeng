@@ -718,3 +718,21 @@ describe('私网地址黑名单的转换前缀', () => {
     await submitted(await submitStation(key, station(0, { url: 'https://public.example.org/' })));
   });
 });
+
+describe('幂等命中不消耗常规额度', () => {
+  it('重复提交同一个请求不扣常规配额，但计入去重配额', async () => {
+    const key = credential();
+    const body = station(0);
+    const first = await submitted(await submitStation(key, body));
+    // 常规额度上限是 10 次/小时。同一个请求重放 20 次，
+    // 如果每次都扣常规额度，第 11 次就会 429——而这只是网络重试。
+    for (let index = 0; index < 20; index++) {
+      const again = await submitted(await submitStation(key, body));
+      expect(again.deduplicated).toBe(true);
+      expect(again.submission.id).toBe(first.submission.id);
+    }
+    const quota = (await status(key)).quotas.token.remaining;
+    // 只消耗了首次提交的那一次。
+    expect(quota).toBe(9);
+  });
+});
