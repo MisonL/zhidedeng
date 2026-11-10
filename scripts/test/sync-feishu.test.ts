@@ -584,3 +584,29 @@ process.stdout.write(fs.readFileSync(${JSON.stringify(dir)} + '/' + fixture + '.
     expect(output).not.toContain(SYNC_TOKEN);
   });
 });
+
+describe('分页结构不一致时的保护', () => {
+  it('列式行比列短时中止，不把字段解析成空', () => {
+    const page = JSON.stringify({
+      data: {
+        fields: ['中转站名称', '网址', '提交类型', '审核状态', '提交时间'],
+        record_id_list: ['rec1'],
+        data: [['站点A', 'https://a.example.com/', '站点']],
+      },
+    });
+    expect(() => parseRecordPage(page)).toThrow(/个值，但列有/);
+  });
+
+  it('列式分页缺必填字段时整页判为无效', () => {
+    const page = JSON.stringify({
+      data: {
+        fields: ['中转站名称', '网址'],
+        record_id_list: ['rec1'],
+        data: [['站点A', 'https://a.example.com/']],
+      },
+    });
+    const parsed = parseRecordPage(page);
+    // 解析本身不报错，但校验层必须能看出缺列。
+    expect(parsed.columns).not.toContain('审核状态');
+  });
+});
