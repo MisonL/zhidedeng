@@ -3,7 +3,7 @@ import type { Post } from '@zhidedeng/shared';
 import type { StationRecord, Store } from '../src/database.ts';
 import { ApiError } from '../src/errors.ts';
 import { createApp, openStore } from '../src/node-app.ts';
-import { enqueueSubmission, listSubmissions, reviewSubmission } from '../src/submissions.ts';
+import { enqueueSubmission, listSubmissions, reviewSubmission, setAutoApprove } from '../src/submissions.ts';
 
 const TOKEN = 'submission-admin-tests-0123456789abcdef';
 const admin = { 'content-type': 'application/json', authorization: `Bearer ${TOKEN}` };
@@ -185,8 +185,10 @@ describe('审核物化', () => {
     expect(store.get('model', modelPayload.slug)).toBeUndefined();
   });
 
+  // web 渠道现在专用于站内发帖，payload 是作者直接填的表单，
+  // 不走飞书那种带 hostname 的投稿结构，单独在下面测。
   it.each([
-    ['agent', 'agent'], ['feishu', 'submission'], ['web', 'user'],
+    ['agent', 'agent'], ['feishu', 'submission'],
   ] as const)('%s 文章通过后 source=%s，按 hostname 找到已有的任意 station slug', async (channel, source) => {
     store.put('station', 'legacy-station', { ...existingStation('submission'), slug: 'legacy-station' });
     const submission = queue({ kind: 'post', channel, originKey: 'rec001', payload: { ...postPayload, publishedAt: '2026-11-06T08:00:00.000Z' } }).submission;
@@ -335,5 +337,26 @@ describe('投稿管理接口', () => {
   ])('拒绝非法批量审核正文 %j', async body => {
     const response = await server.app.request('/api/admin/submissions/batch-review', { method: 'POST', headers: admin, body: JSON.stringify(body) });
     expect(response.status).toBe(400);
+  });
+});
+
+describe('站内发帖统一入队', () => {
+  it('提交后进待审队列，作者能查看，审核通过后物化并公开', () => {
+    const payload = { kind: 'review', title: '站内标题', summary: '站内摘要', body: '站内正文', stationSlug: null, modelSlug: null };
+    const { submission } = queue({ kind: 'post', channel: 'web', originKey: 'web:test:hash', payload, actorHandle: 'alice' });
+    expect(submission.status).toBe('pending');
+    expect(store.get('post', submission.id)).toBeUndefined();
+    approve(submission.id);
+    expect(store.get('post', submission.id)).toMatchObject({
+      id: submission.id, kind: 'review', title: '站内标题', status: 'approved', source: 'user', authorHandle: 'alice',
+    });
+  });
+
+  it('自动通过时站内发帖也直接物化，payload 校验按 web 结构', () => {
+    setAutoApprove(store, true, new Date('2026-11-10T00:00:00Z'));
+    const payload = { kind: 'guide', title: '自动上架', summary: '摘要', body: '正文', stationSlug: null, modelSlug: null };
+    const { submission } = queue({ kind: 'post', channel: 'web', originKey: 'web:auto:hash', payload, actorHandle: 'alice' });
+    expect(submission.status).toBe('approved');
+    expect(store.get('post', submission.id)?.status).toBe('approved');
   });
 });

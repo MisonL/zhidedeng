@@ -21,6 +21,12 @@ export const submissionReviewSchema = z.strictObject({
   reason: z.string().trim().max(1000).optional(),
 });
 
+// 站内发帖的表单结构：与飞书投稿不同，作者直接给标题、摘要、正文。
+const webPostSchema = z.strictObject({
+  kind: z.enum(['deal', 'review', 'community', 'guide']),
+  title: z.string().min(1), summary: z.string().min(1), body: z.string().min(1),
+  stationSlug: z.string().nullish(), modelSlug: z.string().nullish(),
+});
 const enqueueSchema = z.object({
   kind: submissionKind,
   channel: z.enum(['feishu', 'agent', 'web']),
@@ -90,7 +96,8 @@ export function enqueueSubmission(store: Store, input: {
 }): { submission: SubmissionRecord; deduplicated: boolean; autoApproved: boolean } {
   const validated = parse(enqueueSchema, input);
   // 自动通过时先校验 payload 格式，避免把一条注定审核失败的记录写进队列。
-  if (autoApproveEnabled(store)) validatePayload(validated.kind, validated.payload);
+  // 站内发帖的表单结构与飞书投稿不同，按渠道分开校验。
+  if (autoApproveEnabled(store)) validatePayload(validated.kind, validated.payload, validated.channel);
   let payload: string | undefined;
   try {
     payload = JSON.stringify(validated.payload);
@@ -178,9 +185,11 @@ function stationSlug(store: Store, url: string | null, originKey: string): strin
 }
 
 /** 只校验 payload 的形状，不写入。自动通过时先跑一遍，避免把注定失败的记录塞进队列。 */
-function validatePayload(kind: SubmissionKind, payload: unknown): void {
+function validatePayload(kind: SubmissionKind, payload: unknown, channel: SubmissionChannel): void {
   if (kind === 'model') parse(modelSchema, payload);
   else if (kind === 'station') parse(stationSchema, payload);
+  // 站内发帖给的是标题/摘要/正文，不涉及 hostname。
+  else if (channel === 'web') parse(webPostSchema, payload);
   else parse(postSchema, payload);
 }
 
@@ -207,6 +216,18 @@ function materialize(store: Store, submission: SubmissionRecord, reviewedAt: str
     store.db.prepare('DELETE FROM offers WHERE stationSlug = ?').run(slug);
     const insert = store.db.prepare('INSERT INTO offers (stationSlug, modelSlug, rate) VALUES (?, ?, ?)');
     for (const offer of offers) insert.run(slug, offer.modelSlug, offer.rate);
+  } else if (submission.channel === 'web') {
+    // 站内发帖：payload 是作者填的表单，不是飞书那种带 hostname 的结构。
+    const payload = parse(webPostSchema, submission.payload);
+    for (const [slug, label] of [[payload.stationSlug, '关联中转站'], [payload.modelSlug, '关联模型']] as const) {
+      if (!slug) continue;
+      if (!store.get(label === '关联中转站' ? 'station' : 'model', slug)) throw new ApiError(400, 'INVALID_INPUT', `${label} ${slug} 不存在`);
+    }
+    store.put('post', submission.id, {
+      id: submission.id, kind: payload.kind, title: payload.title, summary: payload.summary, body: payload.body,
+      authorHandle: submission.actorHandle ?? 'unknown', stationSlug: payload.stationSlug ?? null, modelSlug: payload.modelSlug ?? null,
+      cover: null, publishedAt: reviewedAt, status: 'approved', source: 'user',
+    });
   } else {
     const payload = parse(postSchema, submission.payload);
     const hostname = payload.hostname?.toLowerCase();
