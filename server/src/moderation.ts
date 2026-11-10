@@ -10,8 +10,9 @@ export function listPosts(store: Store, status: PostStatus) {
     .sort((a, b) => a.publishedAt.localeCompare(b.publishedAt))
     .map(({ id, kind, title, summary, body, authorHandle, stationSlug, modelSlug, publishedAt, status: current }) => ({ id, kind, title, summary, body, authorHandle, stationSlug, modelSlug, publishedAt, status: current }));
   // 站内投稿已进统一队列，物化前只在 submissions 里，不列出来审核员就看不到。
+  // 排除已物化的：物化时 post id 就是 submission id，两边都查会列出同一条两次。
   const queued = store.db.prepare(
-    "SELECT * FROM submissions WHERE kind = 'post' AND channel = 'web' AND status = ? ORDER BY createdAt",
+    "SELECT * FROM submissions WHERE kind = 'post' AND channel = 'web' AND status = ? AND NOT EXISTS (SELECT 1 FROM entities WHERE kind = 'post' AND entities.id = submissions.id) ORDER BY createdAt",
   ).all(status).map(row => {
     const payload = JSON.parse(row.payload as string) as { kind: string; title: string; summary: string; body: string; stationSlug: string | null; modelSlug: string | null };
     return { id: row.id as string, ...payload, authorHandle: row.actorHandle as string | null, publishedAt: row.createdAt as string, status };
