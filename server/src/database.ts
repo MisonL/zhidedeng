@@ -20,6 +20,9 @@ export interface Entities {
 export const SCHEMA = `
   CREATE TABLE IF NOT EXISTS entities (
     kind TEXT NOT NULL, id TEXT NOT NULL, data TEXT NOT NULL CHECK(json_valid(data)),
+    -- 软删除标记。下架不真删，恢复只需把这一列清空：
+    -- 站点以自动运行为主，一次误读不该让整批数据消失。
+    removedAt TEXT,
     PRIMARY KEY (kind, id)
   );
   CREATE TABLE IF NOT EXISTS offers (
@@ -101,18 +104,39 @@ export class Store {
     this.transaction = transaction;
   }
 
+  /** 在线条目。已下架的不出现，所有对外读取路径都走这里。 */
   all<K extends keyof Entities>(kind: K): Entities[K][] {
-    return this.db.prepare('SELECT data FROM entities WHERE kind = ? ORDER BY rowid').all(kind)
+    return this.db.prepare('SELECT data FROM entities WHERE kind = ? AND removedAt IS NULL ORDER BY rowid').all(kind)
       .map(row => JSON.parse(row.data as string) as Entities[K]);
   }
 
+  /** 按 id 取在线条目；已下架的视为不存在。 */
   get<K extends keyof Entities>(kind: K, id: string): Entities[K] | undefined {
+    const row = this.db.prepare('SELECT data FROM entities WHERE kind = ? AND id = ? AND removedAt IS NULL').get(kind, id);
+    return row ? JSON.parse(row.data as string) as Entities[K] : undefined;
+  }
+
+  /** 含已下架的全部条目，只给需要判重和恢复的内部逻辑用。 */
+  getWithRemoved<K extends keyof Entities>(kind: K, id: string): Entities[K] | undefined {
     const row = this.db.prepare('SELECT data FROM entities WHERE kind = ? AND id = ?').get(kind, id);
     return row ? JSON.parse(row.data as string) as Entities[K] : undefined;
   }
 
+  /** 恢复：把 removedAt 清空。返回是否真的恢复了一个已下架条目。 */
+  restore(kind: keyof Entities, id: string): boolean {
+    const result = this.db.prepare('UPDATE entities SET removedAt = NULL WHERE kind = ? AND id = ? AND removedAt IS NOT NULL').run(kind, id) as { changes?: number };
+    return Number(result?.changes ?? 0) > 0;
+  }
+
+  /** 软删除：标记下架时间，数据保留。 */
+  markRemoved(kind: keyof Entities, id: string, at: string): boolean {
+    const result = this.db.prepare('UPDATE entities SET removedAt = ? WHERE kind = ? AND id = ? AND removedAt IS NULL').run(at, kind, id) as { changes?: number };
+    return Number(result?.changes ?? 0) > 0;
+  }
+
   put<K extends keyof Entities>(kind: K, id: string, value: Entities[K]) {
-    this.db.prepare('INSERT INTO entities (kind, id, data) VALUES (?, ?, ?) ON CONFLICT(kind,id) DO UPDATE SET data=excluded.data')
+    // 重新写入等于恢复：同一个 slug 再次上架时，软删除标记要一并清掉。
+    this.db.prepare('INSERT INTO entities (kind, id, data, removedAt) VALUES (?, ?, ?, NULL) ON CONFLICT(kind,id) DO UPDATE SET data=excluded.data, removedAt=NULL')
       .run(kind, id, JSON.stringify(value));
   }
 }

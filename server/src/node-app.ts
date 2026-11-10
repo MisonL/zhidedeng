@@ -21,6 +21,10 @@ export function openDatabase(path: string) {
     PRAGMA busy_timeout = 5000;
     ${SCHEMA}
   `);
+  // 旧库的 entities 表没有 removedAt，补一列。放在 SCHEMA 之后：
+  // 新库走到这里表已经建好，旧库也早就存在。
+  const hasRemovedAt = db.prepare('PRAGMA table_info(entities)').all().some(row => row.name === 'removedAt');
+  if (!hasRemovedAt) db.exec('ALTER TABLE entities ADD COLUMN removedAt TEXT');
   return db;
 }
 
