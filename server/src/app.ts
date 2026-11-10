@@ -28,6 +28,9 @@ const changePasswordSchema: z.ZodType<ChangePasswordRequest> = z.strictObject({ 
 
 const LOGIN_WINDOW_MS = 15 * 60_000;
 const REGISTER_WINDOW_MS = 60 * 60_000;
+// 签到一天只能成功一次，5 次/小时够覆盖手滑和网络重试，脚本刷不起来。
+const CHECKIN_WINDOW_MS = 60 * 60_000;
+const CHECKIN_PER_USER = 5;
 
 // 这些读接口只有本人的数据，未登录直接 401。
 const PERSONAL_READS = new Set<ApiRouteName>(['getMe', 'getMyFavorites', 'getMyPosts']);
@@ -77,6 +80,8 @@ export function buildApp(store: Store, now: () => Date, options: AppOptions = {}
   const loginByUsername = new AttemptLimiter(20, LOGIN_WINDOW_MS);
   const passwordChangeByUser = new AttemptLimiter(5, LOGIN_WINDOW_MS);
   const registerByIp = new AttemptLimiter(10, REGISTER_WINDOW_MS);
+  // 签到是唯一「不限频 + 有写入 + 有奖励」的接口，之前完全没有闸门。
+  const checkInByUser = new AttemptLimiter(CHECKIN_PER_USER, CHECKIN_WINDOW_MS);
 
   const app = new Hono<{ Bindings: Bindings }>();
   app.notFound(c => c.json({ error: { code: 'NOT_FOUND', message: '资源不存在' } }, 404));
@@ -303,7 +308,15 @@ export function buildApp(store: Store, now: () => Date, options: AppOptions = {}
 
   route('getMe', z.strictObject({}), service => service.getMe());
   route('updateMe', z.strictObject({ nickname: nickname.optional(), bio: z.string().trim().max(500).optional() }).refine(input => Object.keys(input).length > 0), (service, input) => service.updateMe(input));
-  route('checkIn', z.strictObject({}), service => service.checkIn());
+  route('checkIn', z.strictObject({}), service => {
+    // 没限流时脚本可以循环打点；虽然一天只成功一次，
+    // 但每次都要走一遍事务和写库，足以把库压住。
+    const key = service.handle ?? '';
+    const wait = checkInByUser.retryAfter(key, now().getTime());
+    if (wait > 0) throw new ApiError(429, 'RATE_LIMITED', '签到太频繁了，请稍后再试', { retryAfter: wait });
+    checkInByUser.record(key, now().getTime());
+    return service.checkIn();
+  });
   route('getMyFavorites', z.strictObject(pagination), (service, input) => service.getMyFavorites(input));
   route('getMyPosts', z.strictObject(pagination), (service, input) => service.getMyPosts(input));
   route('getVendors', z.strictObject(pagination), (service, input) => service.getVendors(input));
