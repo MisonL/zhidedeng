@@ -25,6 +25,10 @@ export function openDatabase(path: string) {
     if (hasSubmissions) ensureSubmissionColumns(openStore(db));
     db.exec(SCHEMA);
     if (!hasSubmissions) ensureSubmissionColumns(openStore(db));
+    // 旧库的 entities 表没有 removedAt，补一列。放在 SCHEMA 之后：
+    // 新库走到这里表已经建好，旧库也早就存在。
+    const hasRemovedAt = db.prepare('PRAGMA table_info(entities)').all().some(row => row.name === 'removedAt');
+    if (!hasRemovedAt) db.exec('ALTER TABLE entities ADD COLUMN removedAt TEXT');
     ensureAgentTokenColumns(openStore(db));
   } catch (error) {
     db.close();
