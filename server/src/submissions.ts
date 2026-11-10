@@ -30,6 +30,12 @@ export const submissionBatchReviewSchema = z.union([
   submissionReviewSchema.extend({ batchId: batchIdentifier }),
 ]);
 
+// 站内发帖的表单结构：与飞书投稿不同，作者直接给标题、摘要、正文。
+const webPostSchema = z.strictObject({
+  kind: z.enum(['deal', 'review', 'community', 'guide']),
+  title: z.string().min(1), summary: z.string().min(1), body: z.string().min(1),
+  stationSlug: z.string().nullish(), modelSlug: z.string().nullish(),
+});
 const submissionFields = {
   kind: submissionKind,
   originKey: z.string().min(1).max(253),
@@ -149,6 +155,9 @@ export function enqueueSubmission(store: Store, input: {
   now: Date;
 }): { submission: SubmissionRecord; deduplicated: boolean; autoApproved: boolean } {
   const validated = parse(enqueueSchema, input);
+  // 自动通过时先校验 payload 格式，避免把一条注定审核失败的记录写进队列。
+  // 站内发帖的表单结构与飞书投稿不同，按渠道分开校验。
+  if (autoApproveEnabled(store)) validatePayload(store, validated.kind, validated.payload, validated.action, validated.channel);
   let payload: string | undefined;
   try {
     payload = JSON.stringify(validated.payload);
@@ -166,7 +175,7 @@ export function enqueueSubmission(store: Store, input: {
     assertBatchOpen(store, validated.batchId);
     const originKey = submissionOriginKey(store, { ...validated, payload: parsedPayload });
     const auto = autoApproveEnabled(store) && validated.action === 'upsert';
-    if (auto || validated.action === 'remove') validatePayload(store, validated.kind, parsedPayload, validated.action);
+    if (auto || validated.action === 'remove') validatePayload(store, validated.kind, parsedPayload, validated.action, validated.channel);
     // 自动通过下相同内容已上站就不再重复物化；人工审核下仍只按 pending 去重。
     // 幂等限定在同一批次内，避免新批次借用旧批次的 id，导致一键审核漏掉这些条目。
     const scope = auto ? "AND status IN ('pending','approved')" : "AND status = 'pending'";
@@ -241,7 +250,7 @@ export function enqueueBatch(store: Store, input: AdminBatchSubmitRequest & { ip
   }
   const results: AdminBatchSubmitResponse['results'] = batch.items.map(item => {
     try {
-      validatePayload(store, item.kind, item.payload, item.action ?? 'upsert');
+      validatePayload(store, item.kind, item.payload, item.action ?? 'upsert', batch.channel);
       const { submission, deduplicated, autoApproved } = enqueueSubmission(store, { ...item, batchId, channel: batch.channel, ip: input.ip, now: input.now });
       // 返回请求里的 key 以便逐条对账；记录里的站点 key 已由服务端规范化。
       return { originKey: item.originKey, kind: item.kind, id: submission.id, status: submission.status, deduplicated, autoApproved };
@@ -336,13 +345,18 @@ function parseStationPayload(store: Store, input: unknown) {
   return payload;
 }
 
-/** 入队校验与审核复用相同规则，批次中的无效内容逐条返回错误。 */
-function validatePayload(store: Store, kind: SubmissionKind, payload: unknown, action: SubmissionRecord['action']): void {
+/**
+ * 入队校验与审核复用相同规则，批次中的无效内容逐条返回错误。
+ * 站内发帖的表单结构与飞书投稿不同，按渠道分流。
+ */
+function validatePayload(store: Store, kind: SubmissionKind, payload: unknown, action: SubmissionRecord['action'], channel: SubmissionChannel): void {
   if (action === 'remove') {
     if (kind !== 'station') throw new ApiError(400, 'INVALID_INPUT', '只有站点支持下架');
     parse(removalSchema, payload);
   } else if (kind === 'model') parse(modelSchema, payload);
   else if (kind === 'station') parseStationPayload(store, payload);
+  // 站内发帖给的是标题/摘要/正文，不涉及 hostname。
+  else if (channel === 'web') parse(webPostSchema, payload);
   else parse(postSchema, payload);
 }
 
@@ -429,6 +443,18 @@ function materialize(store: Store, submission: SubmissionRecord, reviewedAt: str
     store.db.prepare('DELETE FROM offers WHERE stationSlug = ?').run(slug);
     const insert = store.db.prepare('INSERT INTO offers (stationSlug, modelSlug, rate) VALUES (?, ?, ?)');
     for (const offer of offers) insert.run(slug, offer.modelSlug, offer.rate);
+  } else if (submission.channel === 'web') {
+    // 站内发帖：payload 是作者填的表单，不是飞书那种带 hostname 的结构。
+    const payload = parse(webPostSchema, submission.payload);
+    for (const [slug, label] of [[payload.stationSlug, '关联中转站'], [payload.modelSlug, '关联模型']] as const) {
+      if (!slug) continue;
+      if (!store.get(label === '关联中转站' ? 'station' : 'model', slug)) throw new ApiError(400, 'INVALID_INPUT', `${label} ${slug} 不存在`);
+    }
+    store.put('post', submission.id, {
+      id: submission.id, kind: payload.kind, title: payload.title, summary: payload.summary, body: payload.body,
+      authorHandle: submission.actorHandle ?? 'unknown', stationSlug: payload.stationSlug ?? null, modelSlug: payload.modelSlug ?? null,
+      cover: null, publishedAt: reviewedAt, status: 'approved', source: 'user',
+    });
   } else {
     const payload = parse(postSchema, submission.payload);
     const hostname = payload.hostname?.toLowerCase();
