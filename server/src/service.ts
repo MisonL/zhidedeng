@@ -77,9 +77,10 @@ export class Service {
   }
 
   /** 刚入队的站内投稿：先拼出与 Post 一致的结构，审核通过后才从 entities 读。 */
-  pendingPost(submission: { id: string; payload: unknown; actorHandle: string | null; createdAt: string }): Post {
+  /** 刚入队的站内投稿，返回与 Post 一致的结构；自动通过时状态就是 approved。 */
+  pendingPost(submission: { id: string; payload: unknown; actorHandle: string | null; createdAt: string; status?: string }): Post {
     return this.post(this.queuedPost({
-      id: submission.id, payload: submission.payload,
+      id: submission.id, payload: submission.payload, status: submission.status ?? 'pending',
       actorHandle: submission.actorHandle ?? this.user, createdAt: submission.createdAt,
     }));
   }
@@ -167,7 +168,10 @@ export class Service {
     return {
       ...payload, stationSlug: payload.stationSlug ?? null, modelSlug: payload.modelSlug ?? null,
       id: row.id as string, authorHandle: row.actorHandle as string, cover: null,
-      publishedAt: row.createdAt as string, status: (row.status as string) === 'rejected' ? 'rejected' : 'pending',
+      // 状态要如实反映：自动通过时这条已经上站了，回 pending 会让前端显示「审核中」，
+      // 用户刷新才发现早就发布了。
+      publishedAt: row.createdAt as string,
+      status: (row.status as string) === 'rejected' ? 'rejected' : (row.status as string) === 'approved' ? 'approved' : 'pending',
     } as PostRecord;
   }
 

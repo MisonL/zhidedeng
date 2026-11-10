@@ -549,8 +549,13 @@ export function reviewSubmission(store: Store, now: Date, id: string, decision: 
       // 演示数据被要求下架是操作对象选错了，不是这条内容本身有问题。
       || error.code === 'STATION_SOURCE_CONFLICT');
     if (error instanceof ApiError && !retriable) {
-      store.db.prepare("UPDATE submissions SET status = 'rejected', reason = ?, reviewedAt = ? WHERE id = ? AND status = 'pending'")
-        .run(`审核时无法物化：${error.message}`.slice(0, 1000), reviewedAt, id);
+      try {
+        store.db.prepare("UPDATE submissions SET status = 'rejected', reason = ?, reviewedAt = ? WHERE id = ? AND status = 'pending'")
+          .run(`审核时无法物化：${error.message}`.slice(0, 1000), reviewedAt, id);
+      } catch (fallbackError) {
+        // 兜底写入自己失败时不能让原始错误消失：调用方要知道真正的失败原因。
+        console.error('审核失败后写入 rejected 也失败了，该记录可能停在 pending', fallbackError);
+      }
     }
     throw error;
   }
