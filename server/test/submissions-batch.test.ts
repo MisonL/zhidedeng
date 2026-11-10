@@ -970,3 +970,16 @@ describe('下架与恢复', () => {
     expect((await server.app.request('/api/admin/stations/no-such-station/restore', { method: 'POST', headers: admin })).status).toBe(404);
   });
 });
+
+describe('历史数据的兼容性', () => {
+  it('payload 不符合当前 schema 的历史行被跳过，而不是让整个 state 接口 400', async () => {
+    // 一条缺字段的老记录就能让 /api/admin/submissions/state 整体 400，
+    // 同步脚本会把它当失败中止，整条同步链路停摆且只能改库恢复。
+    server.db.prepare(`INSERT INTO submissions (id, kind, channel, originKey, payload, payloadHash, actorHandle, ip, action, status, reason, reviewedAt, createdAt, autoApproved)
+      VALUES ('legacy-bad', 'station', 'feishu', 'legacy.example.com', ?, 'hash', NULL, '1.2.3.4', 'upsert', 'approved', NULL, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 0)`)
+      .run(JSON.stringify({ name: '老站', url: 'https://legacy.example.com/' }));
+    const response = await server.app.request('/api/admin/submissions/state', { headers: admin });
+    expect(response.status).toBe(200);
+    expect((await response.json() as { stations: unknown[] }).stations).toBeInstanceOf(Array);
+  });
+});
