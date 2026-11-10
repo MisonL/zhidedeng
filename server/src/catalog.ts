@@ -98,7 +98,13 @@ function importCatalog(store: Store, input: CatalogImportRequest): CatalogImport
     for (const { offers: _offers, ...station } of stations) {
       // 允许导入的 slug 要先替换原报价，避免残留或撞唯一约束。
       store.db.prepare('DELETE FROM offers WHERE stationSlug = ?').run(station.slug);
-      store.put('station', station.slug, { ...station, uptime: null, firstTokenLatencyMs: null, foundedAt: null, status: null, source: 'submission' });
+      // 指标字段导入内容里没有，沿用旧值：写 null 会把可用率永久清零。
+      const previous = store.get('station', station.slug);
+      store.put('station', station.slug, {
+        ...station, status: previous?.status ?? null, uptime: previous?.uptime ?? null,
+        firstTokenLatencyMs: previous?.firstTokenLatencyMs ?? null, foundedAt: previous?.foundedAt ?? null,
+        source: 'submission',
+      });
     }
     for (const offer of offers) {
       store.db.prepare('INSERT INTO offers (stationSlug, modelSlug, rate) VALUES (?, ?, ?)').run(offer.stationSlug, offer.modelSlug, offer.rate);

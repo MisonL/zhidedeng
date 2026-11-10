@@ -108,13 +108,16 @@ describe('审核物化', () => {
     expect(offers()).toEqual([{ modelSlug: 'gpt-4-1', rate: 0.5 }]);
   });
 
-  it.each(['demo', 'submission', 'agent', 'user'] as const)('slug 已存在时更新内容和全部报价，保留原 source=%s', source => {
+  it.each(['demo', 'submission', 'agent', 'user'] as const)('slug 已存在时更新内容和全部报价，保留原 source=%s 与指标', source => {
     store.put('station', 'sub-api-example-com', existingStation(source));
     server.db.prepare('INSERT INTO offers (stationSlug, modelSlug, rate) VALUES (?, ?, ?)').run('sub-api-example-com', 'o3', 0.7);
     const submission = queue({ payload: { ...stationPayload, name: '更新站名', description: '更新描述' } }).submission;
     approve(submission.id);
+    // 指标字段投稿 payload 里没有、也没有别的写入入口，
+    // 清空等于把种子站点的可用率永久抹掉。
     expect(store.get('station', 'sub-api-example-com')).toMatchObject({
-      name: '更新站名', description: '更新描述', source, uptime: null, firstTokenLatencyMs: null, foundedAt: null, status: null,
+      name: '更新站名', description: '更新描述', source,
+      uptime: 98, firstTokenLatencyMs: 456, foundedAt: '2021-01-01', status: 'running',
     });
     expect(offers()).toEqual([{ modelSlug: 'gpt-4-1', rate: 0.5 }]);
   });
