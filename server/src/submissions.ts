@@ -331,14 +331,19 @@ function stationSlug(store: Store, url: string | null, originKey: string): strin
   const mine = hostname === null ? undefined : store.all('station').find(station => hostnameOf(station.url) === hostname);
   if (mine) return mine.slug;
 
+  // 分配 slug 时必须把已下架的行也算作「已占用」（用 getWithRemoved）。
+  // 否则两个 hostname 清洗出同一个 base 时（a-b.example.com 与 a.b.example.com 都得到
+  // sub-a-b-example-com），后者的 put 会整行覆盖前者并清掉 removedAt——
+  // 前者数据真的没了，已下架清单里也查不到，无从恢复。
+  const taken = (slug: string) => store.getWithRemoved('station', slug) !== undefined;
   const base = stationSlugBase(identity);
-  if (base.length <= STATION_SLUG_MAX && !store.get('station', base)) return base;
+  if (base.length <= STATION_SLUG_MAX && !taken(base)) return base;
   // 撞车或超长：可读前缀加哈希。哈希本身也可能撞上别的站点（例如某个 hostname
   // 恰好等于 "<别的域名>-<这几位>"），所以继续加盐直到找到空位。
   for (let salt = 0; salt < 100; salt += 1) {
     const suffix = stationSlugSuffix(identity, salt);
     const candidate = `${base.slice(0, STATION_SLUG_MAX - suffix.length - 1)}-${suffix}`;
-    if (!store.get('station', candidate)) return candidate;
+    if (!taken(candidate)) return candidate;
   }
   throw new ApiError(409, 'SLUG_CONFLICT', '无法为这个站点分配唯一的地址');
 }
@@ -367,7 +372,7 @@ function validatePayload(store: Store, kind: SubmissionKind, payload: unknown, a
 }
 
 /** 下架只允许群友来源，报价和实体共用调用方的审核事务，不另开事务。 */
-export function removeStation(store: Store, slug: string, expectedSubmissionId: string): string | null {
+export function removeStation(store: Store, slug: string, expectedSubmissionId: string, removedAt: string): string | null {
   const station = store.get('station', slug);
   if (!station) return null;
   // 种子和演示数据不能被下架覆盖。其余来源都该能下线：
@@ -382,7 +387,7 @@ export function removeStation(store: Store, slug: string, expectedSubmissionId: 
   // 软删除而不是真删：站点以自动运行为主，一次误读不该丢整批数据。
   // 报价保留（它们记的是这个站曾提供过什么），恢复时原样拿回来。
   // 同一个 slug 再上架时 put 会清掉标记，也就是自动恢复。
-  store.markRemoved('station', slug, new Date().toISOString());
+  store.markRemoved('station', slug, removedAt);
   return slug;
 }
 
@@ -424,7 +429,7 @@ function materialize(store: Store, submission: SubmissionRecord, reviewedAt: str
   if (submission.action === 'remove') {
     if (submission.kind !== 'station') throw new ApiError(400, 'INVALID_INPUT', '只有站点支持下架');
     const { slug, submissionId } = parse(removalSchema, submission.payload);
-    if (removeStation(store, slug, submissionId) === null) {
+    if (removeStation(store, slug, submissionId, reviewedAt) === null) {
       const reason = '站点已不存在，视为已下架';
       console.info(`站点 ${slug} ${reason}`);
       return reason;
@@ -542,9 +547,24 @@ export function reviewSubmission(store: Store, now: Date, id: string, decision: 
     // 批次永远「还有待审的」，同批重跑被静默吞掉；
     // Agent 的待审配额统计全部 pending 行，几条必然失败的记录就能锁死一个账号，
     // 全局吃满后所有 Agent 投稿停摆。所以物化失败必须落终态。
-    if (error instanceof ApiError && error.status !== 409 && error.status !== 404) {
-      store.db.prepare("UPDATE submissions SET status = 'rejected', reason = ?, reviewedAt = ? WHERE id = ? AND status = 'pending'")
-        .run(`审核时无法物化：${error.message}`.slice(0, 1000), reviewedAt, id);
+    // 区分「本来就不该改状态」与「永久失败」：
+    // - ALREADY_REVIEWED：这条已被处理过，状态本身就是终态；
+    // - STALE_REMOVAL：读取后站点被更新过，重新同步就能过，重试有意义；
+    // - 404：目标不存在。
+    // 其余失败（MODEL_EXISTS、STATION_SOURCE_CONFLICT、SLUG_CONFLICT）
+    // 不会随时间自愈，留着 pending 只会一边占配额一边让批次永远审不完。
+    const retriable = error instanceof ApiError && (
+      error.status === 404 || error.code === 'ALREADY_REVIEWED' || error.code === 'STALE_REMOVAL'
+      // 演示数据被要求下架是操作对象选错了，不是这条内容本身有问题。
+      || error.code === 'STATION_SOURCE_CONFLICT');
+    if (error instanceof ApiError && !retriable) {
+      try {
+        store.db.prepare("UPDATE submissions SET status = 'rejected', reason = ?, reviewedAt = ? WHERE id = ? AND status = 'pending'")
+          .run(`审核时无法物化：${error.message}`.slice(0, 1000), reviewedAt, id);
+      } catch (fallbackError) {
+        // 兜底写入自己失败时不能让原始错误消失：调用方要知道真正的失败原因。
+        console.error('审核失败后写入 rejected 也失败了，该记录可能停在 pending', fallbackError);
+      }
     }
     throw error;
   }
