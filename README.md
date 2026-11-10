@@ -38,11 +38,11 @@ pnpm dev
 | 前端（Vite，`/api` 代理到后端） | http://localhost:5173 |
 | 后端 API | http://127.0.0.1:8787 |
 
-数据库默认在 `server/data/app.db`，空库自动写入演示数据。启动时会幂等补齐投稿表的 `batchId`、`action`、`autoApproved` 列，并建立批次索引；Agent 凭证表自动创建，旧表缺少的 `tokenPrefix` 列也会补齐。当前迁移只覆盖这些指定列，不是通用迁移工具（`server/src/database.ts:144-158`、`server/src/node-app.ts:24-28`）。
+数据库默认在 `server/data/app.db`，空库自动写入演示数据。启动时会幂等补齐投稿表的 `batchId`、`action`、`autoApproved` 列，并建立批次索引；Agent 凭证表自动创建，旧表缺少的 `tokenPrefix` 列也会补齐。当前迁移只覆盖这些指定列，不是通用迁移工具（见 [`server/src/database.ts`](server/src/database.ts) 的 `ensureSubmissionColumns` 与 `ensureAgentTokenColumns`，调用点在 [`server/src/node-app.ts`](server/src/node-app.ts)）。
 
 ## 用 AI Agent 提交数据
 
-凭证签发、列表和吊销，以及 `/api/agent/*` 三个提交接口都已实现；命令行工具 `zdd` 和 Agent Skill 也已就位。公开请求与响应以 [`shared/src/api.ts`](shared/src/api.ts) 和 [`shared/src/routes.ts`](shared/src/routes.ts) 为准。设计依据与实施状态见 [方案 v2](docs/plan-agent-submission-v2.md)，历史审阅的修复情况见 [交叉审阅记录](docs/review-summary.md)。
+凭证签发、列表和吊销，以及 `/api/agent/*` 三个提交接口都在本仓库实现，公开请求与响应以 [`shared/src/api.ts`](shared/src/api.ts) 和 [`shared/src/routes.ts`](shared/src/routes.ts) 为准。命令行工具 `zdd` 和 Agent Skill 是接口的下游使用者，位于各自的前置分支（`feat/zd-cli`、`feat/zd-submit-skill`），尚未合入本分支，本节末尾说明它们的位置和引用注意事项。设计依据见 [方案 v2](docs/plan-agent-submission-v2.md)，历史审阅的修复情况见 [交叉审阅记录](docs/review-summary.md)。
 
 ### 申请凭证
 
@@ -54,7 +54,7 @@ pnpm dev
 | 有至少一篇已通过的站内投稿 | 作者必须是本人，`status=approved`，`source=user` 或未写 source；演示、飞书和 Agent 文章不计入 |
 | 有有效邀请码 | 签发时提交 `inviteCode`，与服务端环境变量 `INVITE_CODES` 的逗号分隔配置精确匹配 |
 
-占位作者 `anonymous-submission` 不能申请。准入不足返回 `403 ELIGIBILITY_REQUIRED`，每账号最多 5 个未吊销凭证，超限返回 `409 TOKEN_LIMIT`（`server/src/agent-tokens.ts:15-39`）。邀请码可重复使用，当前没有单次核销或生成接口。
+占位作者 `anonymous-submission` 不能申请。准入不足返回 `403 ELIGIBILITY_REQUIRED`，每账号最多 5 个未吊销凭证，超限返回 `409 TOKEN_LIMIT`（见 [`server/src/agent-tokens.ts`](server/src/agent-tokens.ts) 的 `requireEligibility`）。邀请码可重复使用，当前没有单次核销或生成接口。
 
 以下示例使用已有登录会话的 curl Cookie 文件 `SESSION_COOKIE_FILE`；`SITE_URL` 是本站地址。凭证管理使用会话 Cookie，不能用 Agent 凭证代替。
 
@@ -65,7 +65,7 @@ curl --connect-timeout 5 --max-time 15 -b "$SESSION_COOKIE_FILE" \
   -d '{"label":"本机采集"}' "$SITE_URL/api/account/agent-tokens"
 ```
 
-`label` 必填，去首尾空白后 1~100 字；需要邀请码时，请求体为 `{"label":"本机采集","inviteCode":"<运营提供的邀请码>"}`，邀请码去首尾空白后 1~200 字。请求不接受其他字段（`server/src/agent-tokens.ts:10-13`）。成功为 HTTP 200，以下 ID、前缀、时间和凭证均为示意值：
+`label` 必填，去首尾空白后 1~100 字；需要邀请码时，请求体为 `{"label":"本机采集","inviteCode":"<运营提供的邀请码>"}`，邀请码去首尾空白后 1~200 字。请求不接受其他字段（`agentTokenSchema` 用 `z.strictObject`）。成功为 HTTP 200，以下 ID、前缀、时间和凭证均为示意值：
 
 ```json
 {
@@ -77,7 +77,7 @@ curl --connect-timeout 5 --max-time 15 -b "$SESSION_COOKIE_FILE" \
 }
 ```
 
-明文只在本次签发响应显示一次。凭证由 `zd_` 加 32 字节随机数的 base64url 编码组成；数据库只存 SHA-256 和前八字符展示前缀，列表不能找回明文。请把完整凭证保存到密钥管理工具，供 Agent 运行时通过环境变量 `ZDD_TOKEN` 读取；丢失后吊销旧凭证再签发。管理响应带 `Cache-Control: no-store`，签发与吊销日志不记录凭证、邀请码或标签（`server/src/agent-tokens.ts:40-49,63-72`、`server/src/app.ts:327-365`）。
+明文只在本次签发响应显示一次。凭证由 `zd_` 加 32 字节随机数的 base64url 编码组成；数据库只存 SHA-256 和前八字符展示前缀，列表不能找回明文。请把完整凭证保存到密钥管理工具，Agent 运行时通过请求头携带，不要写进提交内容或源码；丢失后吊销旧凭证再签发。管理响应带 `Cache-Control: no-store`，签发与吊销日志不记录凭证、邀请码或标签（见 [`server/src/agent-tokens.ts`](server/src/agent-tokens.ts) 与 [`server/src/app.ts`](server/src/app.ts) 中的凭证管理与 `agentRequest`）。
 
 ```sh
 # GET /api/account/agent-tokens：只列出本人的元数据，含已吊销凭证
@@ -115,11 +115,11 @@ HTTP 200 响应：
 {"id":"11111111-1111-4111-8111-111111111111","revokedAt":"2026-11-09T04:30:00.000Z"}
 ```
 
-重复吊销返回第一次的 `revokedAt`；不存在或属于他人的 ID 返回 `404 NOT_FOUND`。列表中的状态为 `active` 或 `revoked`。PR5 尚无 Bearer 使用路径，`lastUsedAt=null`、`useCount=0` 目前只是初值，不能当成请求使用统计（`shared/src/api.ts:96-105`、`server/src/agent-tokens.ts:53-72`）。
+重复吊销返回第一次的 `revokedAt`；不存在或属于他人的 ID 返回 `404 NOT_FOUND`。列表中的状态为 `active` 或 `revoked`。`lastUsedAt` 和 `useCount` 会被 Agent 鉴权真实更新：每次带 `Authorization: Bearer` 调用提交或状态接口都会写入（见 [`server/src/agent-auth.ts`](server/src/agent-auth.ts) 的 `agentHandle`）；签发后从未调用过时才是 `null` 和 0，因此可以当作使用统计。
 
 ### 限流和配额
 
-凭证签发的当前限制：
+凭证签发的限制：
 
 | 维度 | 限制 | 生效范围 |
 |---|---|---|
@@ -128,24 +128,26 @@ HTTP 200 响应：
 | 同一个邀请码 | 20 次 / 小时 | 请求只要带 `inviteCode` 就计入 |
 | 单账号活跃凭证 | 5 个 | 数据库内计数，吊销后可补发 |
 
-前三项是进程内滑动窗口，重启清零；达到限制返回 `429 RATE_LIMITED` 和以秒为单位的 `Retry-After`。准入不足或活跃凭证超限会返还本次预占计数，不能把邀请码限流描述为对所有失败猜码都计数。列表和吊销没有上述签发限流（`server/src/app.ts:32-37,62-78,236-240,327-365`、`server/src/auth.ts:109-139`）。
+前三项是进程内滑动窗口，重启清零；达到限制返回 `429 RATE_LIMITED` 和以秒为单位的 `Retry-After`。准入不足或活跃凭证超限会返还本次预占计数，因此邀请码限流只统计带码的尝试，不会因为准入失败而误伤。列表和吊销没有上述签发限流（见 [`server/src/app.ts`](server/src/app.ts) 顶部的 `AGENT_TOKEN_*` 与 `INVITE_PER_CODE_LIMIT` 常量，计数实现在 [`server/src/auth.ts`](server/src/auth.ts) 的 `AttemptLimiter`）。
 
-PR6 提交限流的设计值如下，**当前尚未启用**（方案 v2 第 6.2 节）；最终错误码、计数规则和配额响应随 PR6 契约确认：
+Agent 提交的配额在 [`server/src/agent-api.ts`](server/src/agent-api.ts) 顶部定义为常量并已在提交接口生效：
 
-| 维度 | 设计限制 |
+| 维度 | 限制 |
 |---|---|
 | 单 Agent 凭证 | 10 条 / 小时 |
-| 单账号 | 20 条 / 小时 |
+| 单账号 | 20 条 / 小时（跨该账号所有凭证合计） |
 | 单 IP | 20 条 / 小时 |
 | 单账号 pending 投稿 | 5 条 |
-| 单 hostname pending 投稿 | 2 条 |
+| 单 hostname pending 投稿 | 2 条（所有渠道合计） |
 | 全局 pending 熔断 | 200 条 |
+
+前三项是速率，超限返回 `429 RATE_LIMITED`，并在响应头 `retry-after` 和响应体 `error.retryAfter` 两处给出等待秒数。后三项是待审数量，超限返回 `409 TOO_MANY_PENDING`，**只有 message 说明是哪一维，不带 `retryAfter`**：待审积压要靠人工审核消化，重试不会让额度恢复。速率计数只计成功入队的提交，被拒绝的请求会退还本次预占。
 
 ### 可以提交什么
 
-Agent 设计接受站点公开信息、模型报价和文字评价。倍率区间 `0.05~20` 已在共享常量、导入和队列校验中生效；未知模型要先由管理员收录，pending 模型不能直接用于站点报价（`shared/src/domain.ts:5-6`、`server/src/submissions.ts:331-346`）。
+Agent 接受站点公开信息、模型报价和文字评价。倍率区间 `0.05~20` 已在共享常量、导入和队列校验中生效；未知模型要先由管理员收录，pending 模型不能直接用于站点报价（见 [`shared/src/domain.ts`](shared/src/domain.ts) 的 `MIN_RATE`/`MAX_RATE` 与 [`server/src/submissions.ts`](server/src/submissions.ts) 的 `parseStationPayload`）。
 
-以下字段不能进入 Agent 投稿 payload，设计要求出现即返回 `400 FORBIDDEN_FIELD`；这项拒绝规则仍待 PR6 实现：
+以下字段不能进入 Agent 投稿 payload，出现即返回 `400 FORBIDDEN_FIELD`：
 
 | 字段 | 原因 |
 |---|---|
@@ -153,21 +155,21 @@ Agent 设计接受站点公开信息、模型报价和文字评价。倍率区�
 | `score`、`lowestRate` | 由服务端根据指标和报价计算 |
 | `apiKey`、`token`、`password`、`secret` | 凭证不属于公开站点或评价数据；鉴权放在请求头 |
 
-设计稿还列了 `api_key` 这一别名。凭证也不能放在 description、正文或 URL 路径里。当前物化已经把四项指标显式写为 null，并保留已有站点最初的 source；管理队列会保存原始 payload，尚未实现 Agent 的禁止字段拒绝规则（`server/src/submissions.ts:153-161,203-205,413-444`）。
+拒绝检查覆盖任意嵌套层级，字段名忽略大小写、下划线和连字符；`api_key`、`authorHandle`、`accessToken`、`refreshToken`、`clientSecret`、`privateKey`、`authorization`、`credentials` 也在禁用集合内（见 [`server/src/agent-api.ts`](server/src/agent-api.ts) 的 `forbidden` 与 `rejectForbiddenFields`）。这不是正文秘密扫描：凭证也不能放在 description、正文或 URL 路径里。物化时四项指标显式写为 null，更新已有站点保留最初 source。管理队列是另一条受管理员保护的入口，其保存原始 payload 的行为不能当作 Agent 入口的拒绝规则。
 
 ### 提交接口
 
-三个接口都由 `Authorization: Bearer zd_...` 凭证鉴权，路径定义在 `shared/src/routes.ts:11-13`。请求体是**扁平 JSON 对象**，没有 `kind/station` 之类的封装层。
+三个接口都由 `Authorization: Bearer zd_...` 凭证鉴权，路径定义在 [`shared/src/routes.ts`](shared/src/routes.ts)。提交请求体是**扁平 JSON 对象**，没有 `kind/station` 之类的封装层；写请求需带 `Content-Type: application/json`。
 
 **凭证从哪来。** 账号在站点的「账户设置 → AI Agent 凭证」自助签发，最多 5 个，可随时吊销。签发的准入条件三选一：注册满 7 天、有过已通过的站内投稿、或持有邀请码。吊销后该凭证立即失效。
 
 **三个接口的共同约束：**
 
-- Agent 投稿一律进入待审队列，标注「AI 采集，未经平台核实」，人工审核通过才公开。
-- 不接受多余字段（`schema.strict()`），整条拒绝。
-- 拒绝实测指标字段：`uptime`、`firstTokenLatencyMs`、`foundedAt`、`status`、`score`、`lowestRate`。这些由平台自己采集，Agent 提交了会返回 `400 FORBIDDEN_FIELD`。凭证类字段（`apiKey`、`token`、`password` 等）同理。
+- 公开 Agent 接口一律进入待审队列，**即使管理员开启自动通过也不例外**，响应固定为 `autoApproved: false`；人工审核通过才公开。新建的站点和评价标注「AI 采集，未经平台核实」；更新已有站点保留最初 source，因此标签不一定变成 AI 采集。
+- 不接受根级多余字段（`schema.strict()`），整条返回 `400 INVALID_INPUT`。任意层级出现下述禁字段，优先返回 `400 FORBIDDEN_FIELD`。
+- 拒绝实测或派生指标字段：`uptime`、`firstTokenLatencyMs`、`foundedAt`、`status`、`score`、`lowestRate`。没有实测数据就不能通过 Agent 自报；凭证类字段（`apiKey`、`token`、`password` 等）同样拒绝。
 - 不接受 `authorHandle`。作者身份由凭证决定，不能自己声明。
-- 内容是幂等的：同一凭证重复提交完全相同的内容，第二次返回 `deduplicated: true`，不会重复入队。
+- 幂等限定在**同一账号、同种类的相同规范化内容仍为 pending** 时，跨该账号不同凭证重复提交也返回 `deduplicated: true`，不重复入队或扣提交额度。JSON 根字段顺序、站点 URL 被清除的 query/fragment/账号密码不影响这一比较；已 approved/rejected/superseded 的内容再提交会产生新 pending。账号之间互不借用记录。
 
 `POST /api/agent/stations`：提交站点公开信息。
 
@@ -186,7 +188,9 @@ curl --connect-timeout 5 --max-time 15 \
 JSON
 ```
 
-字段约束（`shared/src/submission.ts`）：`name` 1~60 字，`description` 1~300 字，`url` 必须是 http/https 且不带查询串、片段和账号密码，`rechargeThreshold` 非负或 `null`，`paymentMethods` 最多 10 项，`offers` 最多 100 项、`rate` 在 0.05~20 之间、同一 `modelSlug` 不能重复。`modelSlug` 必须是平台已收录的模型，否则返回 `400 INVALID_INPUT`。
+六个字段全部必填（见 [`shared/src/api.ts`](shared/src/api.ts) 的 `CreateAgentStationRequest`，运行时校验在 [`server/src/submissions.ts`](server/src/submissions.ts) 的 `stationSchema`）：`name` 1~60 字，`description` 1~300 字，`rechargeThreshold` 非负或 `null`（无数据时不可省略键），`paymentMethods` 最多 10 项、每项 1~20 字，`offers` 最多 100 项、`modelSlug` 1~200 字、`rate` 在 0.05~20 之间、同一 `modelSlug` 不能重复；无支付方式或报价时用空数组。`modelSlug` 必须是平台已收录的模型，否则返回 `400 INVALID_INPUT`。
+
+`url` 只允许 http/https，Agent API 会先去掉 query、fragment、用户名密码并规范化主机名及尾点，再按最长 300 字的 URL 规则校验；内网、回环、本地域名和 `.example` 保留后缀会被拒绝。URL 路径不被清除，不能把邀请码或秘密放在路径里。管理队列和 PR7 CLI 的本地 schema 则直接拒绝带 query、fragment 或账号密码的 URL，因此供 CLI 使用的文件应先清洗成示例中的公开 URL。入口只保存数据，不抓取所提交网址。
 
 `POST /api/agent/posts`：提交文字评价。
 
@@ -204,7 +208,7 @@ curl --connect-timeout 5 --max-time 15 \
 JSON
 ```
 
-`title` 1~100 字、`summary` 1~200 字、`body` 1~5000 字、`authorName` 最多 30 字。`hostname` 只能是主机名加可选端口，内网和回环地址会被拒绝。
+`title`、`summary`、`body`、`authorName` 必填且非空，上限分别为 100、200、5000、30 字。`hostname` 可省略或为 `null`，最长 253 字，只能是主机名加可选端口；入库时端口被去掉并规范化主机名，内网和回环地址会被拒绝。`publishedAt` 可省略或为 `null`；提供时须为 ISO datetime（UTC `Z` 格式）。作者账号取自凭证。
 
 `GET /api/agent/status`：查询本人审核进度、配额余量和拒绝原因。
 
@@ -213,17 +217,17 @@ curl --connect-timeout 5 --max-time 15 \
   -H "Authorization: Bearer $ZDD_TOKEN" "$SITE_URL/api/agent/status?limit=20"
 ```
 
-`limit` 取 1~50，默认 20。响应（`shared/src/api.ts:137-150`）：
+`limit` 取 1~50，默认 20。响应类型见 [`shared/src/api.ts`](shared/src/api.ts) 的 `GetAgentStatusResponse`。下面是一个只有一条待审投稿的示意响应：
 
 ```json
 {
   "handle": "alice",
-  "pendingCount": 2,
+  "pendingCount": 1,
   "quotas": {
     "token": { "limit": 10, "remaining": 8, "retryAfter": 0 },
     "account": { "limit": 20, "remaining": 18, "retryAfter": 0 },
     "ip": { "limit": 20, "remaining": 19, "retryAfter": 0 },
-    "pending": { "limit": 5, "remaining": 3 },
+    "pending": { "limit": 5, "remaining": 4 },
     "globalPending": { "limit": 200, "remaining": 198 },
     "hostnames": [{ "hostname": "example.com", "limit": 2, "remaining": 1, "pendingCount": 1 }]
   },
@@ -233,17 +237,17 @@ curl --connect-timeout 5 --max-time 15 \
 }
 ```
 
-`status` 取值 `pending` / `approved` / `rejected` / `superseded`。`reason` 是管理员填写的拒绝原因，被拒时会有，通过或待审时通常为 `null`，管理员也可以不填。
+`status` 取值 `pending` / `approved` / `rejected` / `superseded`。`reason` 可为空，拒绝时管理员也可以不填；被新版本替代时会给出系统原因。`pendingCount` 是本人全部渠道的待审记录数，`submissions` 是按时间倒序的最近记录，不限审核状态。`quotas.hostnames` 仅列本人待审记录涉及的 hostname，但每个 hostname 的待审数计入所有渠道、所有账号；没有 hostname 的评价不占 hostname 配额。速率余量来自当前进程的滑动窗口，不能用 pendingCount 推算。
 
-**速率与配额**（`server/src/agent-api.ts:12-17`）：单凭证 10 条/小时、单账号 20 条/小时（跨凭证合计）、单 IP 20 条/小时、单账号待审 5 条、单 hostname 待审 2 条（所有渠道合计）、全站待审 200 条。超限返回 `429 RATE_LIMITED` 或 `409 TOO_MANY_PENDING`，后者在 `error.retryAfter` 里给出等待秒数。
+**速率与配额**见上文「限流和配额」：`429 RATE_LIMITED` 带等待秒数，`409 TOO_MANY_PENDING` 不带 `retryAfter`。状态查询与待审幂等重试不扣提交额度。
 
 **凭证失效**：凭证被吊销或账号被禁用时返回 `401 UNAUTHENTICATED`，错误信息统一，不区分「凭证不存在」和「凭证已过期」，避免泄漏凭证是否存在。
 
 ### 命令行工具
 
-`scripts/zdd.ts` 是为 Agent 准备的命令行封装，把上面的接口包装成 `login` / `whoami` / `catalog` / `match` / `validate` / `submit` / `status` 七个命令。输出一律是 JSON，退出码固定 0~5，Agent 据此决定重试还是改数据。用法见 `zdd help`。
+PR7 分支 `feat/zd-cli`（本次只读核对提交 `6c7aba4`）提供 `scripts/zdd.ts` 和 `shared/src/submission.ts`；PR8 分支 `feat/zd-submit-skill`（核对提交 `9ab0337`）提供 `.claude/skills/zdd-submit/SKILL.md`。这些路径**要在对应前置 PR 合入后才出现在本分支**，本分支不随文档另附实现或启动器。
 
-配套的 Agent 使用说明在 `.claude/skills/zdd-submit/SKILL.md`。
+PR7 CLI 封装 `login` / `whoami` / `catalog` / `match` / `validate` / `submit` / `status` 七个命令，stdout 输出 JSON，stderr 输出提示，退出码为 0~5。已核对的 TypeScript 入口可以在对应分支的仓库根目录用 `node --experimental-strip-types scripts/zdd.ts help` 调用；本分支没有可直接执行的 `zdd` 或 `scripts/zdd`。CLI 从 `ZDD_TOKEN` 或登录配置读取凭证，可用 `ZDD_API_BASE` 指向本站地址。`whoami` 使用现有 `GET /api/agent/status`，没有另一个身份接口；`validate` 不联网，也不能证明模型已在服务器收录。Skill 的执行流程和安装说明应在 PR7/8 合入时一并核对入口路径，不把计划中的别名当成已安装命令。
 
 ## 测试
 
@@ -297,7 +301,7 @@ curl -H "Authorization: Bearer $SYNC_TOKEN" "$ADMIN/api/admin/submissions?batchI
 # 人工确认后审核整批 pending；已审核条目会跳过，下架请求也在此人工审核
 curl -X POST -H "Authorization: Bearer $SYNC_TOKEN" -H 'Content-Type: application/json' \
   -d '{"batchId":"<batchId>","status":"approved"}' "$ADMIN/api/admin/submissions/batch-review"
-# 自动通过仅作用于 upsert：上架、更新和评价；下架始终等待人工确认
+# 管理队列自动通过仅作用于 upsert；公开 Agent 接口不受此开关影响，下架始终人工确认
 curl -X POST -H "Authorization: Bearer $SYNC_TOKEN" -H 'Content-Type: application/json' \
   -d '{"autoApprove":true}' "$ADMIN/api/admin/settings"
 # 调整站内或 Agent 文章状态（pending | approved | rejected）；已物化群友文章在此返回 409，待审飞书内容用队列审核
@@ -323,7 +327,7 @@ curl -X POST -H "Authorization: Bearer $SYNC_TOKEN" -H 'Content-Type: applicatio
   -d '{"slug":"stepfun","name":"阶跃星辰"}' "$ADMIN/api/admin/vendors"
 ```
 
-完整管理员接口清单见 [规范文档](docs/spec.md#管理接口)。通用导入接口 `/api/admin/import` 保留并直接写库，会替换 `source=submission` 的集合；输入 slug 已存在且来源不是 submission 或 demo 时跳过该站点，Agent/user 来源站点与报价因此保留。允许导入的站点会替换原报价。默认拒绝未收录的模型；带 `"allowNewModels": true` 时，未知模型会建成 vendor 为 `unknown` 的占位模型，响应里的 `createdModels` 列出新建的 slug。跳过来源保护的站点不参与这项模型检查（`server/src/catalog.ts:64-110`）。队列模型投稿只支持新增，重名返回 `409 MODEL_EXISTS`；改名使用 PATCH。批次中的未知报价模型逐条报错，需要先收录模型再提交站点。
+完整管理员接口清单见 [规范文档](docs/spec.md#管理接口)。通用导入接口 `/api/admin/import` 保留并直接写库，会替换 `source=submission` 的集合；输入 slug 已存在且来源不是 submission 或 demo 时跳过该站点，Agent/user 来源站点与报价因此保留。允许导入的站点会替换原报价。默认拒绝未收录的模型；带 `"allowNewModels": true` 时，未知模型会建成 vendor 为 `unknown` 的占位模型，响应里的 `createdModels` 列出新建的 slug。跳过来源保护的站点不参与这项模型检查（`server/src/catalog.ts` 的 `importCatalog`）。队列模型投稿只支持新增，重名返回 `409 MODEL_EXISTS`；改名使用 PATCH。批次中的未知报价模型逐条报错，需要先收录模型再提交站点。
 
 ## 同步飞书收集表
 
@@ -350,9 +354,9 @@ pnpm sync:feishu --allow-skipped     # 显式跳过坏记录，本次只提交 u
 
 读取失败、返回结构无法识别或关键字段被改名时，脚本中止且不入队，避免生成错误的下架请求。
 
-报价行匹配不到模型、格式错误或超出倍率范围时仍会被跳过并打印 `[提示]`，不计入触发退出码 2 的记录级 `skipped`；需核对提示和最终报价，不能把安全中止规则理解为「任何报价缺失都整批中止」（`scripts/sync-feishu.ts:141-167,402-409`）。
+报价行匹配不到模型、格式错误或超出倍率范围时仍会被跳过并打印 `[提示]`，不计入触发退出码 2 的记录级 `skipped`；需核对提示和最终报价，不能把安全中止规则理解为「任何报价缺失都整批中止」（`scripts/sync-feishu.ts` 的报价解析与安全检查）。
 
-飞书撤销某条评价不会删除已物化文章；当前同步只生成站点下架请求，站点下架也保留评价。旧文章审核接口对 `source=submission` 仍返回 `409 MANAGED_BY_SOURCE`，其「到飞书撤销后同步」提示不能实现文章下架（`server/src/moderation.ts:20`、`server/src/submissions.ts:350-360,428-444`）。
+飞书撤销某条评价不会删除已物化文章；当前同步只生成站点下架请求，站点下架也保留评价。旧文章审核接口对 `source=submission` 仍返回 `409 MANAGED_BY_SOURCE`，其「到飞书撤销后同步」提示不能实现文章下架（`server/src/moderation.ts` 的 `reviewPost`、`server/src/submissions.ts` 的 `removeStation` 与评价物化分支）。
 
 ## 数据说明
 
@@ -367,11 +371,11 @@ pnpm sync:feishu --allow-skipped     # 显式跳过坏记录，本次只提交 u
 ## 已知未修
 
 - 没有找回密码，也不能注销账号。
-- 登录限流在进程内，重启清零，也只适用于单进程。
+- 登录、凭证签发和 Agent 提交速率限流在进程内，重启清零，也只适用于单进程。
 - 按用户名计数的登录退避可以被别人用来把某个账号挡在登录外最多 15 分钟。
 - 没有通用数据库迁移工具；启动只补指定列。`offers` 的数据库 CHECK 仍是 `rate > 0`，0.05~20 在应用层校验，已有异常倍率不会自动回填。
 - 禁用账号不会自动隐藏它已发布的内容，要逐条隐藏评论或拒绝投稿。
-- 中转站 URL 只去掉 query 和 fragment，路径里的邀请码过滤不到，靠人工审核。
+- Agent 入口和飞书同步清除 URL 的 query、fragment、用户名密码，但路径里的邀请码、正文里的秘密过滤不到，靠提交者自查和人工审核。
 - 真实站没有可用率，默认排序排在演示站之后；前端站点目录只取 50 个，超过后部分文章卡片缺站名。
 
 ## 第三方素材
