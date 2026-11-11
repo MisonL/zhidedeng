@@ -1,0 +1,28 @@
+services:
+  zhidedeng:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: zhidedeng:deploy-test
+    container_name: zhidedeng-deploy-test
+    restart: unless-stopped
+    ports:
+      # 只绑本机回环：这是部署测试，不该顺手把服务暴露到局域网。
+      - "127.0.0.1:8788:8787"
+    environment:
+      # 容器内必须监听全部网卡，否则端口映射进不来。宿主机侧仍是反代结构。
+      HOST: 0.0.0.0
+      PORT: "8787"
+      DB_PATH: /data/zhidedeng.db
+      # 管理接口的 Bearer 密钥；少于 32 位会被当成未配置、管理接口直接关闭。
+      SYNC_TOKEN: ${SYNC_TOKEN:?需要先设置 SYNC_TOKEN（至少 32 位）}
+      INVITE_CODES: ${INVITE_CODES:-}
+    volumes:
+      - zhidedeng-data:/data
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+
+volumes:
+  zhidedeng-data:
