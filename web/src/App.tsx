@@ -1,5 +1,6 @@
 import { Route, Routes } from 'react-router';
 import Layout from './components/Layout';
+import Admin from './pages/Admin';
 import { Login, Register } from './pages/Auth';
 import FeedPage from './pages/Feeds';
 import Business from './pages/Business';
@@ -33,6 +34,8 @@ export default function App() {
         <Route path="login" element={<Login />} />
         <Route path="register" element={<Register />} />
         <Route path="docs" element={<Docs />} />
+        {/* 审核台：用管理密钥进入，不走登录会话。 */}
+        <Route path="admin" element={<Admin />} />
         <Route path="business" element={<Business />} />
         <Route path="*" element={<NotFound />} />
       </Route>
