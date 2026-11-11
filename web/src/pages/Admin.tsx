@@ -5,7 +5,12 @@ import { admin, adminToken, AdminError } from '../admin';
 import type { AdminPostRow, RemovedStation } from '../admin';
 import { Skeleton } from '../components/AsyncView';
 
-const displayTime = (iso: string) => new Date(iso).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false });
+const displayTime = (iso: string) => {
+  const date = new Date(iso);
+  // removedAt 是库里的原始字段，没有格式校验；非法值不该渲染成 "Invalid Date"。
+  if (Number.isNaN(date.getTime())) return '时间未知';
+  return date.toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false });
+};
 
 const KIND_LABEL: Record<string, string> = { station: '站点', model: '模型', post: '文章' };
 const CHANNEL_LABEL: Record<string, string> = { feishu: '飞书', agent: 'Agent', web: '站内' };
@@ -34,18 +39,33 @@ export default function Admin() {
   const [error, setError] = useState<string>();
   const [message, setMessage] = useState<string>();
   const [busy, setBusy] = useState(false);
+  // 驳回理由会写进 submissions.reason，作者在 /me 能看到；不填就只显示「已驳回」。
+  const [rejecting, setRejecting] = useState<string>();
+  const [reasons, setReasons] = useState<Record<string, string>>({});
 
-  async function load(active: string) {
-    setError(undefined);
+  async function load(active: string, signal?: AbortSignal) {
+    // 不在这里清错误：调用方可能刚设好一条操作结果，清掉就等于把它吞了。
     try {
-      if (active === 'submissions') setSubmissions((await admin.listSubmissions('pending')).items);
-      if (active === 'posts') setPosts((await admin.listPosts('pending')).items);
-      if (active === 'removed') setRemoved((await admin.listRemovedStations()).items);
+      // 快速切页签时旧请求可能后到，覆盖当前页签的数据。
+      // 每个分支各自写状态，中止后就不再落盘。
+      if (active === 'submissions') {
+        const data = await admin.listAllSubmissions('pending', signal);
+        if (!signal?.aborted) setSubmissions(data);
+      }
+      if (active === 'posts') {
+        const data = (await admin.listPosts('pending', signal)).items;
+        if (!signal?.aborted) setPosts(data);
+      }
+      if (active === 'removed') {
+        const data = (await admin.listRemovedStations(signal)).items;
+        if (!signal?.aborted) setRemoved(data);
+      }
     } catch (caught) {
+      if (signal?.aborted) return;
       // 密钥缺失或被服务端拒绝：退回输入态。留在审核台上只会让用户
       // 对着一个空列表和一条「密钥无效」发呆。
       if (caught instanceof AdminError && (caught.code === 'NO_TOKEN' || caught.unauthorized)) {
-        setToken('');
+        reset();
         return;
       }
       setError((caught as Error).message);
@@ -55,12 +75,24 @@ export default function Admin() {
   // 换密钥或切页时重新取数；密钥为空就停在输入态。
   useEffect(() => {
     if (!token) return;
+    const controller = new AbortController();
     setSubmissions(undefined);
     setPosts(undefined);
     setRemoved(undefined);
-    void load(tab);
-    // 只在密钥或页签变化时重取。
+    void load(tab, controller.signal);
+    return () => controller.abort();
+    // 只在密钥或页签变化时重取；load 每次渲染都是新函数，不参与依赖。
   }, [token, tab]);
+
+  /** 退出或密钥失效时把内存里的列表也清掉，不留残留数据。 */
+  function reset() {
+    setToken('');
+    setSubmissions(undefined);
+    setPosts(undefined);
+    setRemoved(undefined);
+    setError(undefined);
+    setMessage(undefined);
+  }
 
   function unlock(event: FormEvent) {
     event.preventDefault();
@@ -70,6 +102,39 @@ export default function Admin() {
     setDraft('');
     setError(undefined);
     setToken(value);
+  }
+
+  /**
+   * 批量审核。服务端逐条独立事务，单条失败不改 HTTP 状态码，
+   * 只把错误放进 results[].error——不看它就会把部分失败报成全部成功。
+   */
+  async function approveAll() {
+    const ids = (submissions ?? []).map(item => item.id);
+    if (ids.length === 0) return;
+    setBusy(true);
+    setError(undefined);
+    setMessage(undefined);
+    try {
+      const { results } = await admin.batchReview(ids, 'approved');
+      const failed = results.filter(result => result.error);
+      const ok = results.length - failed.length;
+      if (failed.length === 0) setMessage(`已通过 ${ok} 条`);
+      else {
+        setMessage(ok > 0 ? `已通过 ${ok} 条` : undefined);
+        // 逐条原因要露出来：后端会把 MODEL_EXISTS 这类不可自愈的失败
+        // 直接写成 rejected，不说清楚审核员根本不知道发生了什么。
+        setError(`${failed.length} 条未通过：${failed.map(result => result.error!.message).join('；')}`);
+      }
+      await load(tab);
+    } catch (caught) {
+      if (caught instanceof AdminError && caught.unauthorized) {
+        setToken('');
+        return;
+      }
+      setError((caught as Error).message);
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function act(run: () => Promise<unknown>, done: string) {
@@ -82,7 +147,7 @@ export default function Admin() {
       await load(tab);
     } catch (caught) {
       if (caught instanceof AdminError && caught.unauthorized) {
-        setToken('');
+        reset();
         return;
       }
       setError((caught as Error).message);
@@ -130,7 +195,7 @@ export default function Admin() {
         <button className={`btn btn-small ${tab === 'removed' ? 'btn-red' : 'btn-ghost'}`} onClick={() => setTab('removed')}>
           已下架站点 {removed ? `(${removedStations.length})` : ''}
         </button>
-        <button className="btn btn-small btn-ghost" onClick={() => { adminToken.clear(); setToken(''); }}>
+        <button className="btn btn-small btn-ghost" onClick={() => { adminToken.clear(); reset(); }}>
           退出
         </button>
       </div>
@@ -146,10 +211,12 @@ export default function Admin() {
               <div className="tags">
                 <button
                   className="btn btn-small btn-red" disabled={busy}
-                  onClick={() => act(
-                    () => admin.batchReview(pendingSubmissions.map(item => item.id), 'approved'),
-                    `已通过 ${pendingSubmissions.length} 条`,
-                  )}
+                  onClick={() => {
+                    // 通过不可撤销：服务端对非 pending 一律 409 ALREADY_REVIEWED。
+                    // 站点以自动运行为主，但一次误点把几百条全放出去没有回退手段。
+                    if (!window.confirm(`确认通过全部 ${pendingSubmissions.length} 条待审投稿？此操作不可撤销。`)) return;
+                    void approveAll();
+                  }}
                 >
                   全部通过
                 </button>
@@ -166,6 +233,24 @@ export default function Admin() {
                     </div>
                     <p>{summarize(item)}</p>
                     <p className="hint">{item.originKey}</p>
+                    {rejecting === item.id && (
+                      <div className="field">
+                        <label className="field-label" htmlFor={`reason-${item.id}`}>驳回理由（可选）</label>
+                        <input
+                          id={`reason-${item.id}`} value={reasons[item.id] ?? ''} maxLength={200}
+                          onChange={event => setReasons({ ...reasons, [item.id]: event.target.value })}
+                        />
+                        <button
+                          className="btn btn-small btn-ghost" disabled={busy}
+                          onClick={() => void act(
+                            () => admin.reviewSubmission(item.id, 'rejected', reasons[item.id]?.trim() || undefined),
+                            '已拒绝',
+                          ).then(() => setRejecting(undefined))}
+                        >
+                          确认拒绝
+                        </button>
+                      </div>
+                    )}
                     <div className="tags">
                       <button
                         className="btn btn-small btn-red" disabled={busy}
@@ -175,7 +260,7 @@ export default function Admin() {
                       </button>
                       <button
                         className="btn btn-small btn-ghost" disabled={busy}
-                        onClick={() => act(() => admin.reviewSubmission(item.id, 'rejected'), '已拒绝')}
+                        onClick={() => setRejecting(rejecting === item.id ? undefined : item.id)}
                       >
                         拒绝
                       </button>
