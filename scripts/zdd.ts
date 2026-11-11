@@ -312,13 +312,17 @@ export function validatePayload(input: unknown): { kind: 'station' | 'post' | 'm
   const schema = kind === 'station' ? agentStationSchema : kind === 'model' ? agentModelSchema : agentPostSchema;
   const result = schema.safeParse(input);
   if (result.success) return { kind, issues: [] };
-  return {
-    kind,
-    issues: result.error.issues.map(issue => ({
+  // 判成别的种类时，多余字段的报错本身就是线索；这里直接点明它被当成了什么，
+  // 免得用户对着一串「缺少 summary/body」发呆。
+  const misjudged = 'slug' in (input as Record<string, unknown>) && 'vendor' in (input as Record<string, unknown>) && kind !== 'model';
+  const issues = result.error.issues.map(issue => ({
       field: issue.code === 'unrecognized_keys' ? [...issue.path, ...issue.keys].join('.') : issue.path.join('.'),
-      message: issue.code === 'unrecognized_keys' ? '不认识这个字段，Agent 投稿不接受多余字段' : issue.message,
-    })),
-  };
+    message: issue.code === 'unrecognized_keys' ? '不认识这个字段，Agent 投稿不接受多余字段' : issue.message,
+  }));
+  if (misjudged) {
+    issues.push({ field: '', message: `这条看起来是模型，但带了 ${kind === 'station' ? 'url' : 'title'} 字段，被当成${kind === 'station' ? '站点' : '评价'}了；模型不要带 url 或 title` });
+  }
+  return { kind, issues };
 }
 
 export async function validate(path: string): Promise<ValidateResult> {
