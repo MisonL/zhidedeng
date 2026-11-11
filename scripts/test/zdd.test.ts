@@ -641,6 +641,14 @@ describe('模型投稿', () => {
     expect(issues[0]!.field).toBe('slug');
   });
 
+  it('模型带了 title 被当成评价时，明确点出来', () => {
+    // 推断顺序是 url → title → slug+vendor，所以模型带了 title 会先被判成评价。
+    // 光靠「缺少 summary/body」这种报错，用户不知道发生了什么。
+    const { kind, issues } = validatePayload({ ...model, title: '误加' });
+    expect(kind).toBe('post');
+    expect(issues.at(-1)!.message).toContain('这条看起来是模型');
+  });
+
   it('模型提交到 /api/agent/models', async () => {
     const { impl, calls } = fakeFetch({ '/api/agent/models': { body: { submission: { id: 'm1', status: 'pending' }, deduplicated: false } } });
     const result = await submitOne(model, { token: TOKEN, fetchImpl: impl });
