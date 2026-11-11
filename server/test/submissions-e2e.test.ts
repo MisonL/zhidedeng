@@ -260,3 +260,30 @@ describe('站内补录模型', () => {
     expect(openStore(server.db).get('model', existing.slug)!.name).toBe(existing.name);
   });
 });
+
+describe('模型补录也要占站内投稿配额', () => {
+  it('模型投稿计入每小时 10 次和待审 20 条两道闸', async () => {
+    // 用独立实例，避免别的用例留下的记录影响计数。
+    const { createSession } = await import('../src/auth.ts');
+    const store = openStore(server.db);
+    server.db.prepare('INSERT INTO accounts (handle, usernameKey, passwordHash, createdAt) VALUES (?,?,?,?)')
+      .run('QuotaBob', 'quotabob', 'x', clock().toISOString());
+    store.put('user', 'QuotaBob', { handle: 'QuotaBob', nickname: 'QuotaBob', avatar: '', bio: '', tokens: 100 });
+    const cookie = 'session=' + createSession(store, 'QuotaBob', clock());
+    const vendor = store.all('vendor')[0]!.slug;
+    const suggest = (slug: string) => server.app.request('/api/models/suggest', {
+      method: 'POST', headers: { 'content-type': 'application/json', cookie },
+      body: JSON.stringify({ slug, vendor, name: '名称', description: '说明' }),
+    });
+
+    // 连续提交不同 slug，前 10 次应成功，第 11 次被小时配额拦住。
+    let accepted = 0;
+    for (let index = 0; index < 12; index += 1) {
+      const response = await suggest(`quota-m-${index}`);
+      if (response.status === 200) accepted += 1;
+      else expect(response.status).toBe(429);
+    }
+    expect(accepted).toBe(10);
+    expect(store.db.prepare("SELECT count(*) AS count FROM submissions WHERE kind = 'model'").get()!.count).toBe(10);
+  });
+});
