@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# 同一分支的新推送取消上一轮，避免堆着的运行抢机器。
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # 版本由 package.json 的 packageManager 字段决定，两边不会漂移。
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      # 锁文件与 package.json 不一致时直接失败，而不是悄悄装出一套别的依赖。
+      - run: pnpm install --frozen-lockfile
+
+      - run: pnpm -r typecheck
+
+      # 四个包分开跑：失败时一眼看出是哪个包，不用翻日志找是哪个 FAIL。
+      - run: pnpm --filter @zhidedeng/shared test
+      - run: pnpm --filter @zhidedeng/server test
+      - run: pnpm --filter @zhidedeng/scripts test
+      - run: pnpm --filter @zhidedeng/web test
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+
+      # 测试跑通不代表能出包：esbuild 和 vite 的失败只有真正构建才暴露。
+      - run: pnpm build
