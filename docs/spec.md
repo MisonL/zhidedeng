@@ -179,6 +179,7 @@ channel 是队列的来源渠道，source 是物化内容的展示来源，二�
 - `GET /models?vendor=&q=`、`GET /models/:slug`（含 offers：各站倍率，按倍率升序）
 - `GET /stations?vendor=&sort=score|rate|uptime&q=`、`GET /stations/:slug`（含 offers、指标、投票汇总、当前用户投票与收藏状态）
 - `GET /posts?kind=&vendor=&station=&model=&sort=latest|hot&q=`、`GET /posts/:id`、`POST /posts`（kind、title、summary、body、stationSlug?、modelSlug?）
+- `POST /models/suggest`（slug、vendor、name、description）—— 站内补录模型，与 Agent 通道同一套字段，进同一个待审队列
 - `PUT /votes`（targetType: post|station、targetId、value: up|down|null）返回最新汇总
 - `PUT /favorites`（targetType、targetId、favorited）
 - `GET /comments?targetType=&targetId=`、`POST /comments`（content 1~2000 字、parentId?）
@@ -186,4 +187,4 @@ channel 是队列的来源渠道，source 是物化内容的展示来源，二�
 - `GET /banners`
 - `GET /search?q=`（models、stations、posts 三组，各最多 10 条）
 - `GET /hot-searches`
-- `POST /agent/stations`、`POST /agent/posts`、`GET /agent/status?limit=1..50` —— Agent 提交通道，`Authorization: Bearer zd_...` 鉴权。请求体是扁平 JSON 对象，不接受多余字段；实测指标字段（uptime、firstTokenLatencyMs、foundedAt、status、score、lowestRate）和凭证类字段一律 400 FORBIDDEN_FIELD，`authorHandle` 同样拒绝。提交强制进入待审队列，即使管理员开启自动通过也不例外；同一账号相同 pending 内容重提返回 deduplicated。速率配额：单凭证 10 条/小时、单账号 20 条/小时、单 IP 20 条/小时，超限 429 RATE_LIMITED 并带等待秒数；待审配额：单账号 5 条、单 hostname 2 条、全站 200 条，超限 409 TOO_MANY_PENDING 且不带 retryAfter。凭证无效、被吊销或账号被禁用返回 401 UNAUTHENTICATED
+- `POST /agent/stations`、`POST /agent/posts`、`POST /agent/models`、`GET /agent/status?limit=1..50` —— Agent 提交通道，`Authorization: Bearer zd_...` 鉴权。请求体是扁平 JSON 对象，不接受多余字段；实测指标字段（uptime、firstTokenLatencyMs、foundedAt、status、score、lowestRate）和凭证类字段一律 400 FORBIDDEN_FIELD，`authorHandle` 同样拒绝。提交强制进入待审队列，即使管理员开启自动通过也不例外；同一账号相同 pending 内容重提返回 deduplicated。速率配额：单凭证 10 条/小时、单账号 20 条/小时、单 IP 20 条/小时，超限 429 RATE_LIMITED 并带等待秒数；待审配额：单账号 5 条、单 hostname 2 条、全站 200 条，超限 409 TOO_MANY_PENDING 且不带 retryAfter。凭证无效、被吊销或账号被禁用返回 401 UNAUTHENTICATED
