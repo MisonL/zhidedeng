@@ -312,7 +312,7 @@ export function listSubmissions(store: Store, input: {
 }
 
 /** 从站点 url 取归一化 hostname，用于判断某个 slug 是不是同一个站点。 */
-function hostnameOf(url: string | null): string | null {
+export function hostnameOf(url: string | null): string | null {
   if (!url) return null;
   try { return new URL(url).hostname.toLowerCase(); } catch { return null; }
 }
