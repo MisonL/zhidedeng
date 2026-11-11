@@ -194,6 +194,18 @@ export function enqueueSubmission(store: Store, input: {
       : store.db.prepare(`SELECT * FROM submissions WHERE kind = ? AND originKey = ? AND action = ? AND payloadHash = ? AND batchId IS ? ${actorScope} ${scope} ORDER BY createdAt DESC, rowid DESC LIMIT 1`)
         .get(validated.kind, originKey, validated.action, payloadHash, validated.batchId ?? null,
           ...(options.deduplicateByActor ? [validated.channel, validated.actorHandle ?? null] : []));
+    // 模型是全局唯一的：同一个 slug 不管从哪个通道来，都是同一个模型。
+    // 各通道用自己的 originKey 的话，Agent 和站内各提一条同 slug 就会产生两条待审——
+    // 先审的那条建成，后审的必然 MODEL_EXISTS 落 rejected，审核员白审一次；
+    // 等待期间那条还占着提交方的待审配额。
+    // 放在幂等判定之前查会误伤「完全相同的重复提交」：那种应该幂等命中而不是报错。
+    if (!existing && validated.kind === 'model' && validated.action === 'upsert') {
+      const { slug } = parse(modelSchema, parsedPayload);
+      const pendingSame = store.db.prepare(
+        "SELECT id FROM submissions WHERE kind = 'model' AND status = 'pending' AND json_extract(payload, '$.slug') = ? LIMIT 1",
+      ).get(slug);
+      if (pendingSame) throw new ApiError(409, 'PENDING_DUPLICATE', `模型 ${slug} 已有待审的投稿，请等审核后再提交`);
+    }
     const reviewedAt = validated.now.toISOString();
     // 飞书 www/裸域切换会更新同一实体，版本应取实际实体当前 URL 的 hostname。
     const currentOriginKey = auto && existing?.status === 'approved' && validated.kind === 'station'
@@ -452,7 +464,9 @@ function materialize(store: Store, submission: SubmissionRecord, reviewedAt: str
     }
   } else if (submission.kind === 'model') {
     const payload = parse(modelSchema, submission.payload);
-    if (!store.get('vendor', payload.vendor)) throw new ApiError(400, 'INVALID_INPUT', `厂商 ${payload.vendor} 不存在，请先新增厂商`);
+    // 提交时厂商是存在的，是之后被删了。这不是这条投稿本身的问题，
+    // 补回厂商再审核就能过，所以用独立错误码，让审核端保持 pending 而不是永久拒绝。
+    if (!store.get('vendor', payload.vendor)) throw new ApiError(400, 'VENDOR_MISSING', `厂商 ${payload.vendor} 不存在，请先恢复该厂商再审核`);
     // 已存在的模型直接覆盖会静默改写名称和厂商、并清空 tags，与新增接口的 409 不一致。
     if (store.get('model', payload.slug)) throw new ApiError(409, 'MODEL_EXISTS', `模型 ${payload.slug} 已存在，请拒绝这条投稿；如需改名请用 PATCH /api/admin/models/:slug`);
     store.put('model', payload.slug, { ...payload, tags: [] });
@@ -578,7 +592,9 @@ export function reviewSubmission(store: Store, now: Date, id: string, decision: 
     const retriable = error instanceof ApiError && (
       error.status === 404 || error.code === 'ALREADY_REVIEWED' || error.code === 'STALE_REMOVAL'
       // 演示数据被要求下架是操作对象选错了，不是这条内容本身有问题。
-      || error.code === 'STATION_SOURCE_CONFLICT');
+      || error.code === 'STATION_SOURCE_CONFLICT'
+      // 厂商在提交后被删：补回来就能审，不该让投稿方白丢一次提交。
+      || error.code === 'VENDOR_MISSING');
     if (error instanceof ApiError && !retriable) {
       try {
         store.db.prepare("UPDATE submissions SET status = 'rejected', reason = ?, reviewedAt = ? WHERE id = ? AND status = 'pending'")

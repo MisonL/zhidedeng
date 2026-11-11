@@ -287,3 +287,49 @@ describe('模型补录也要占站内投稿配额', () => {
     expect(store.db.prepare("SELECT count(*) AS count FROM submissions WHERE kind = 'model'").get()!.count).toBe(10);
   });
 });
+
+describe('模型投稿的重复与中间态', () => {
+  const cookieFor = async (handle: string) => {
+    const { createSession } = await import('../src/auth.ts');
+    const store = openStore(server.db);
+    server.db.prepare('INSERT INTO accounts (handle, usernameKey, passwordHash, createdAt) VALUES (?,?,?,?)')
+      .run(handle, handle.toLowerCase(), 'x', clock().toISOString());
+    store.put('user', handle, { handle, nickname: handle, avatar: '', bio: '', tokens: 100 });
+    return 'session=' + createSession(store, handle, clock());
+  };
+  const suggest = (cookie: string, body: unknown) => server.app.request('/api/models/suggest', {
+    method: 'POST', headers: { 'content-type': 'application/json', cookie }, body: JSON.stringify(body),
+  });
+
+  it('同一 slug 已有待审时拒绝再入队，不同渠道也算同一个模型', async () => {
+    const store = openStore(server.db);
+    const vendor = store.all('vendor')[0]!.slug;
+    const cookie = await cookieFor('DupUser');
+    const base = { slug: 'dup-model', vendor, name: '名称', description: '说明' };
+    expect((await suggest(cookie, base)).status).toBe(200);
+    // 文案不同、payloadHash 不同，但 slug 一样，仍应拦住。
+    const second = await suggest(cookie, { ...base, description: '另一份说明' });
+    expect(second.status).toBe(409);
+    expect((await second.json()).error.code).toBe('PENDING_DUPLICATE');
+    const rows = server.db.prepare("SELECT count(*) AS count FROM submissions WHERE kind = 'model' AND status = 'pending'").get()!.count;
+    expect(rows).toBe(1);
+  });
+
+  it('厂商在提交后被删时，审核失败但记录保持 pending，补回厂商就能过', async () => {
+    const store = openStore(server.db);
+    const vendor = store.all('vendor')[0]!;
+    const cookie = await cookieFor('VendorUser');
+    const created = await suggest(cookie, { slug: 'vendor-gone', vendor: vendor.slug, name: '名称', description: '说明' });
+    const { id } = await created.json() as { id: string };
+    // 模拟管理员在审核前删掉了厂商。
+    server.db.prepare("DELETE FROM entities WHERE kind = 'vendor' AND id = ?").run(vendor.slug);
+    const failed = await review(id, { status: 'approved' });
+    expect(failed.status).toBe(400);
+    expect((await failed.json()).error.code).toBe('VENDOR_MISSING');
+    expect(server.db.prepare('SELECT status FROM submissions WHERE id = ?').get(id)!.status).toBe('pending');
+    // 补回厂商后同一条投稿可以继续审。
+    store.put('vendor', vendor.slug, vendor);
+    expect((await review(id, { status: 'approved' })).status).toBe(200);
+    expect(store.get('model', 'vendor-gone')?.name).toBe('名称');
+  });
+});

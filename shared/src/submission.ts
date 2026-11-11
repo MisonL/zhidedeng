@@ -27,7 +27,13 @@ export const httpUrl = z.string().max(300).refine(value => {
 
 /** 模型和厂商的 slug 共用同一套规则：小写字母、数字和连字符，最长 64。 */
 const slugPattern = /^[a-z0-9][a-z0-9-]{0,63}$/;
-export const adminSlug = z.string().trim().regex(slugPattern);
+/**
+ * 前端表单会把 slug 转小写，服务端也照做，避免「UI 能过、直接调接口被拒」。
+ * 报错带上规则本身，否则调用方只看到「请求参数无效」。
+ */
+export const adminSlug = z.string().trim().toLowerCase().regex(slugPattern, {
+  error: '只能用小写字母、数字和连字符，且以字母或数字开头，最长 64 位',
+});
 
 export const stationSchema = z.object({
   name: text(60),
