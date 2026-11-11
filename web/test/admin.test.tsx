@@ -1,6 +1,7 @@
 import { fireEvent, screen, within } from '@testing-library/react';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { callsTo, renderApp, stubApi } from './helpers';
+import type { StubRequest } from './helpers';
 
 const submission = {
   id: 'sub-1', kind: 'station', channel: 'feishu', originKey: 'a.example.com', batchId: 'batch-1',
@@ -24,7 +25,11 @@ async function unlock() {
   await screen.findByRole('heading', { name: '审核台' });
 }
 
-beforeEach(() => sessionStorage.clear());
+beforeEach(() => {
+  sessionStorage.clear();
+  // 全部通过会先弹二次确认（通过不可撤销），默认点「确定」。
+  vi.stubGlobal('confirm', () => true);
+});
 
 describe('审核台', () => {
   it('没有密钥时只显示入口，不请求任何管理接口', () => {
@@ -63,7 +68,11 @@ describe('审核台', () => {
     const second = { ...submission, id: 'sub-2', originKey: 'b.example.com', payload: { name: '第二站', url: 'https://b.example.com/' } };
     const fetchMock = stubApi({
       'GET /api/admin/submissions': { items: [submission, second], total: 2 },
-      'POST /api/admin/submissions/batch-review': { results: [] },
+      // 真实后端每条一个结果，成功项带 submission、失败项带 error。
+      'POST /api/admin/submissions/batch-review': {
+        results: [{ id: 'sub-1', submission: { ...submission, status: 'approved' } },
+          { id: 'sub-2', submission: { ...second, status: 'approved' } }],
+      },
     });
     await unlock();
     fireEvent.click(await screen.findByRole('button', { name: '全部通过' }));
@@ -120,5 +129,98 @@ describe('审核台', () => {
     expect(await screen.findByText('模型已存在')).toBeInTheDocument();
     // 失败不该把已经取到的内容清空。
     expect(within(screen.getByRole('list')).getByText('示例站 · https://a.example.com/')).toBeInTheDocument();
+  });
+});
+
+describe('审核台的批量语义', () => {
+  it('批量审核部分失败时必须报出来，不能显示全部成功', async () => {
+    const second = { ...submission, id: 'sub-2', originKey: 'b.example.com', payload: { name: '第二站', url: 'https://b.example.com/' } };
+    stubApi({
+      'GET /api/admin/submissions': { items: [submission, second], total: 2 },
+      // 后端逐条独立事务：单条失败仍是 HTTP 200，错误只在 results[].error 里。
+      'POST /api/admin/submissions/batch-review': {
+        results: [{ id: 'sub-1', submission: { ...submission, status: 'approved' } },
+          { id: 'sub-2', error: { status: 409, code: 'MODEL_EXISTS', message: '模型 m 已存在' } }],
+      },
+    });
+    await unlock();
+    fireEvent.click(await screen.findByRole('button', { name: '全部通过' }));
+    expect(await screen.findByText('1 条未通过：模型 m 已存在')).toBeInTheDocument();
+  });
+
+  it('待审超过一页时翻页取全，而不是只看第一页 50 条', async () => {
+    const page = (from: number) => Array.from({ length: 50 }, (_, index) => ({
+      ...submission, id: `sub-${from + index}`, originKey: `s${from + index}.example.com`,
+      payload: { name: `站 ${from + index}`, url: `https://s${from + index}.example.com/` },
+    }));
+    const first = page(0);
+    const second = page(50);
+    const fetchMock = stubApi({
+      'GET /api/admin/submissions': ({ url }: StubRequest) => (url.searchParams.get('page') === '2'
+        ? { items: second, total: 100 }
+        : { items: first, total: 100 }),
+    });
+    await unlock();
+    expect(await screen.findByRole('button', { name: '待审投稿 (100)' })).toBeInTheDocument();
+    const pages = callsTo(fetchMock, 'GET', '/api/admin/submissions').map(call => call.url.searchParams.get('page'));
+    expect(pages).toContain('2');
+  });
+
+  it('取消二次确认时不发批量请求', async () => {
+    vi.stubGlobal('confirm', () => false);
+    const fetchMock = stubApi({ 'GET /api/admin/submissions': { items: [submission], total: 1 } });
+    await unlock();
+    fireEvent.click(await screen.findByRole('button', { name: '全部通过' }));
+    expect(callsTo(fetchMock, 'POST', '/api/admin/submissions/batch-review')).toHaveLength(0);
+  });
+
+  it('退出后清空内存里的列表，不留残留数据', async () => {
+    stubApi({ 'GET /api/admin/submissions': { items: [submission], total: 1 } });
+    await unlock();
+    await screen.findByText('示例站 · https://a.example.com/');
+    fireEvent.click(screen.getByRole('button', { name: '退出' }));
+    // 回到入口态，旧列表不再渲染。
+    expect(await screen.findByLabelText('管理密钥')).toBeInTheDocument();
+    expect(screen.queryByText('示例站 · https://a.example.com/')).not.toBeInTheDocument();
+  });
+});
+
+describe('拒绝理由与时间兜底', () => {
+  it('拒绝时可以填理由，理由随请求一起提交，作者能在 /me 看到', async () => {
+    const fetchMock = stubApi({
+      'GET /api/admin/submissions': { items: [submission], total: 1 },
+      'POST /api/admin/submissions/sub-1/review': { ...submission, status: 'rejected', reason: '链接打不开' },
+    });
+    await unlock();
+    fireEvent.click(await screen.findByRole('button', { name: '拒绝' }));
+    // 先展开理由输入，再确认，避免误点直接驳回。
+    fireEvent.change(screen.getByLabelText('驳回理由（可选）'), { target: { value: ' 链接打不开 ' } });
+    fireEvent.click(screen.getByRole('button', { name: '确认拒绝' }));
+    expect(await screen.findByText('已拒绝')).toBeInTheDocument();
+    expect(callsTo(fetchMock, 'POST', '/api/admin/submissions/sub-1/review')[0].body)
+      .toEqual({ status: 'rejected', reason: '链接打不开' });
+  });
+
+  it('理由留空时不传 reason 字段', async () => {
+    const fetchMock = stubApi({
+      'GET /api/admin/submissions': { items: [submission], total: 1 },
+      'POST /api/admin/submissions/sub-1/review': { ...submission, status: 'rejected' },
+    });
+    await unlock();
+    fireEvent.click(await screen.findByRole('button', { name: '拒绝' }));
+    fireEvent.click(screen.getByRole('button', { name: '确认拒绝' }));
+    await screen.findByText('已拒绝');
+    expect(callsTo(fetchMock, 'POST', '/api/admin/submissions/sub-1/review')[0].body).toEqual({ status: 'rejected' });
+  });
+
+  it('下架时间不合法时显示「时间未知」，不渲染 Invalid Date', async () => {
+    stubApi({
+      'GET /api/admin/submissions': { items: [], total: 0 },
+      'GET /api/admin/stations/removed': { items: [{ slug: 'bad-time', removedAt: 'not-a-date' }] },
+    });
+    await unlock();
+    fireEvent.click(await screen.findByRole('button', { name: /已下架站点/ }));
+    expect(await screen.findByText('下架于 时间未知')).toBeInTheDocument();
+    expect(screen.queryByText(/Invalid Date/)).not.toBeInTheDocument();
   });
 });

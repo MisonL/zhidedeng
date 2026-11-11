@@ -8,6 +8,8 @@ import type { AdminSubmissionStateResponse, Post, SubmissionRecord } from '@zhid
  * 不会像 localStorage 那样在公共机器上长期留存。
  */
 const KEY = 'zdd.adminToken';
+/** 翻页上限：500 条待审 / 每页 50 = 10 页，留一倍余量。 */
+const MAX_PAGES = 20;
 
 export const adminToken = {
   get: () => sessionStorage.getItem(KEY) ?? '',
@@ -67,6 +69,12 @@ export interface AdminPostRow {
   status: Post['status'];
 }
 
+export interface BatchReviewResult {
+  id: string;
+  /** 服务端逐条独立事务，单条失败不改变 HTTP 状态码，只能从 results 里读。 */
+  error?: { status: number; code: string; message: string };
+}
+
 export interface RemovedStation {
   slug: string;
   removedAt: string;
@@ -74,14 +82,29 @@ export interface RemovedStation {
 
 export const admin = {
   getSubmissionState: (signal?: AbortSignal) => request<AdminSubmissionStateResponse>('/api/admin/submissions/state', { signal }),
+  /**
+   * 按页取投稿。服务端单页上限 50，批次上限 500，所以必须翻页：
+   * 只读第一页会让「全部通过」漏掉其余条目，而界面上看不出来。
+   */
   listSubmissions: (status: string, signal?: AbortSignal) =>
     request<PendingSubmissions>(`/api/admin/submissions?status=${encodeURIComponent(status)}&pageSize=50`, { signal }),
+  listAllSubmissions: async (status: string, signal?: AbortSignal): Promise<SubmissionRecord[]> => {
+    const all: SubmissionRecord[] = [];
+    for (let page = 1; page <= MAX_PAGES; page += 1) {
+      const chunk = await request<PendingSubmissions>(
+        `/api/admin/submissions?status=${encodeURIComponent(status)}&pageSize=50&page=${page}`, { signal },
+      );
+      all.push(...chunk.items);
+      if (all.length >= chunk.total || chunk.items.length === 0) return all;
+    }
+    return all;
+  },
   reviewSubmission: (id: string, status: 'approved' | 'rejected', reason?: string) =>
     request<SubmissionRecord>(`/api/admin/submissions/${encodeURIComponent(id)}/review`, {
       method: 'POST', body: { status, ...(reason ? { reason } : {}) },
     }),
   batchReview: (ids: string[], status: 'approved' | 'rejected', reason?: string) =>
-    request<{ results: unknown[] }>('/api/admin/submissions/batch-review', {
+    request<{ results: BatchReviewResult[] }>('/api/admin/submissions/batch-review', {
       method: 'POST', body: { ids, status, ...(reason ? { reason } : {}) },
     }),
   listPosts: (status: string, signal?: AbortSignal) =>
