@@ -144,26 +144,37 @@ describe('SKILL.md 与 CLI 一致', () => {
     // 用斜杠分隔 100 / 200 / 5000 的那种行 —— 把 body 改成 9999 测试也不会报。
     // 所以这里按字段名逐个找，找不到对应数字就算失败。
     const submission = await readFile(join(repoRoot, 'shared/src/submission.ts'), 'utf8');
-    const limits = new Map<string, number>();
-    for (const match of submission.matchAll(/\b([a-zA-Z]+):\s*text\((\d+)\)/g)) {
-      if (!forbiddenAgentFields.has(match[1]!.toLowerCase())) limits.set(match[1]!, Number(match[2]));
+    // 同一字段名可能在不同 schema 里有不同上限（站点的 description 300、模型 200）。
+    // 早先用 Map 会让后者覆盖前者，模型那条上限就永远查不到。
+    // 现在按「schema 块」分段，逐块收集，任何一块写错都会被抓到。
+    const limits: { field: string; limit: number }[] = [];
+    const blocks = submission.split(/\nexport const /);
+    for (const block of blocks) {
+      for (const match of block.matchAll(/\b([a-zA-Z]+):\s*text\((\d+)\)/g)) {
+        if (forbiddenAgentFields.has(match[1]!.toLowerCase())) continue;
+        // 同一个块内同名只记一次，跨块各自保留。
+        const field = match[1]!;
+        const limit = Number(match[2]);
+        if (!limits.some(entry => entry.field === field && entry.limit === limit)) limits.push({ field, limit });
+      }
     }
-    expect(limits.size).toBeGreaterThan(5);
+    expect(limits.length).toBeGreaterThan(5);
 
     const table = tableRows(await skill(), '| 字段 | 约束 |');
+    // 文档里用「（模型）」这类后缀区分同名字段，比对时去掉限定语。
+    const normalize = (cell: string) => cell.replace(/`/g, '').replace(/（[^）]*）|\([^)]*\)/g, '').trim();
+    const rowsFor = (field: string) => table.filter(cells => cells[0]!.split('/').some(name => normalize(name) === field));
 
     // 必须真正找到这一行。早先 `if (!row) continue` 会让删掉整行的变异静默通过。
-    const missing: string[] = [];
-    for (const field of limits.keys()) {
-      const row = table.find(cells =>
-        cells[0]!.replace(/`/g, '').split('/').some(name => name.trim() === field));
-      if (!row) missing.push(field);
-    }
+    const missing = limits.filter(entry => rowsFor(entry.field).length === 0).map(entry => entry.field);
     expect(missing, `这些字段在约束表里没有独立一行：${missing.join(', ')}`).toEqual([]);
 
-    for (const [field, limit] of limits) {
-      const cells = table.find(cell =>
-        cell[0]!.replace(/`/g, '').split('/').some(name => name.trim() === field))!;
+    for (const { field, limit } of limits) {
+      // 同名字段有多个上限时，只要有一行写对这个上限即可。
+      const candidates = rowsFor(field);
+      const matched = candidates.some(cells => [...cells[1]!.matchAll(/\d+/g)].map(m => Number(m[0])).includes(limit));
+      if (matched) continue;
+      const cells = candidates[0]!;
       const names = cells[0]!.replace(/`/g, '').split('/').map(name => name.trim());
       const numbers = [...cells[1]!.matchAll(/\d+/g)].map(match => Number(match[0]));
 

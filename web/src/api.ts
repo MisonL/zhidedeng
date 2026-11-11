@@ -2,7 +2,7 @@ import { API_ROUTES } from '@zhidedeng/shared';
 import type {
   ApiContracts, ApiErrorResponse, ApiRouteName, ChangePasswordRequest, CreateAgentTokenRequest, CreateCommentRequest, CreatePostRequest,
   GetModelsRequest, GetPostsRequest, GetRankingsRequest, GetStationsRequest, LoginRequest, PaginationQuery,
-  PutFavoriteRequest, PutVoteRequest, RegisterRequest, Target, UpdateMeRequest,
+  PutFavoriteRequest, PutVoteRequest, RegisterRequest, SuggestModelRequest, Target, UpdateMeRequest,
 } from '@zhidedeng/shared';
 
 export class ApiError extends Error {
@@ -72,6 +72,7 @@ export const api = {
   getPosts: (query: GetPostsRequest, signal?: AbortSignal) => call('getPosts', { query, signal }),
   getPost: (id: string, signal?: AbortSignal) => call('getPost', { path: { id }, signal }),
   createPost: (body: CreatePostRequest) => call('createPost', { body }),
+  suggestModel: (body: SuggestModelRequest) => call('suggestModel', { body }),
   putVote: (body: PutVoteRequest) => call('putVote', { body }),
   putFavorite: (body: PutFavoriteRequest) => call('putFavorite', { body }),
   getComments: (query: Target & PaginationQuery, signal?: AbortSignal) => call('getComments', { query, signal }),

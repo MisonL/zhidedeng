@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import type { AdminBatchSubmitRequest, AdminBatchSubmitResponse, AdminSubmissionStateResponse, SubmissionChannel, SubmissionKind, SubmissionRecord, SubmissionStatus } from '@zhidedeng/shared';
 import { feishuHostnameKey, STATION_SLUG_MAX, stationSlugBase, stationSlugSuffix } from '@zhidedeng/shared';
-import { adminSlug, httpUrl, postSchema, stationSchema, text } from '@zhidedeng/shared/submission';
+import { adminSlug, httpUrl, modelSchema, postSchema, stationSchema, text } from '@zhidedeng/shared/submission';
 
 import type { SqlRow, SqlValue, StationRecord, Store } from './database.ts';
 import { ApiError } from './errors.ts';
@@ -56,7 +56,6 @@ const enqueueSchema = z.object({
   now: z.date(),
 }).refine(input => input.action !== 'remove' || input.kind === 'station', '只有站点支持下架');
 export { postSchema, stationSchema };
-const modelSchema = z.object({ slug: adminSlug, vendor: adminSlug, name: text(60), description: text(200) });
 const stationUrlSchema = z.object({ url: httpUrl });
 const removalSchema = z.object({ slug: z.string().min(1).max(200), submissionId: batchIdentifier });
 

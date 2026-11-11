@@ -615,3 +615,36 @@ describe('启动壳的错误路径', () => {
     expect(script).toContain('cd "$target"');
   });
 });
+
+describe('模型投稿', () => {
+  const model = { slug: 'claude-sonnet-4-5', vendor: 'anthropic', name: 'Claude Sonnet 4.5', description: '一句话说明' };
+
+  it('同时有 slug 和 vendor 时按模型判断', () => {
+    expect(inferKind(model)).toBe('model');
+  });
+
+  it('只有 slug 不算模型，避免和别的形状混淆', () => {
+    expect(inferKind({ slug: 'only-slug' })).toBeNull();
+  });
+
+  it('url 优先于 slug/vendor', () => {
+    expect(inferKind({ ...model, url: 'https://x.example.com/' })).toBe('station');
+  });
+
+  it('合法模型通过本地校验', () => {
+    expect(validatePayload(model)).toEqual({ kind: 'model', issues: [] });
+  });
+
+  it('slug 大写被拒', () => {
+    const issues = validatePayload({ ...model, slug: 'Claude-Sonnet' }).issues;
+    expect(issues).toHaveLength(1);
+    expect(issues[0]!.field).toBe('slug');
+  });
+
+  it('模型提交到 /api/agent/models', async () => {
+    const { impl, calls } = fakeFetch({ '/api/agent/models': { body: { submission: { id: 'm1', status: 'pending' }, deduplicated: false } } });
+    const result = await submitOne(model, { token: TOKEN, fetchImpl: impl });
+    expect(result.submission.id).toBe('m1');
+    expect(calls[0]!.url).toContain('/api/agent/models');
+  });
+});

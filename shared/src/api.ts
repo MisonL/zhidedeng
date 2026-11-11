@@ -127,8 +127,30 @@ export interface AgentSubmitResponse {
   // 管理员开启自动通过时为 true，此时 submission.status 已经是 approved。
   autoApproved: boolean;
 }
+// 补录模型：vendor 必须是已有厂商，slug 已存在时服务端返回 409 MODEL_EXISTS。
+export interface CreateAgentModelRequest {
+  slug: string;
+  vendor: string;
+  name: string;
+  description: string;
+}
 export type CreateAgentStationResponse = AgentSubmitResponse;
 export type CreateAgentPostResponse = AgentSubmitResponse;
+export type CreateAgentModelResponse = AgentSubmitResponse;
+// 站内补录模型：和 Agent 通道同一套字段，走 web 渠道进同一个队列。
+export interface SuggestModelRequest {
+  slug: string;
+  vendor: string;
+  name: string;
+  description: string;
+}
+/** 模型补录没有文章实体可回，返回入队结果即可。 */
+export interface SuggestModelResponse {
+  id: string;
+  slug: string;
+  status: SubmissionStatus;
+  deduplicated: boolean;
+}
 export interface GetAgentStatusRequest {
   // 默认最近 20 条，最多 50 条。
   limit?: number;
@@ -337,6 +359,8 @@ export interface ApiContracts {
   revokeAgentToken: { request: RevokeAgentTokenRequest; response: ApiResponse<RevokeAgentTokenResponse> };
   createAgentStation: { request: CreateAgentStationRequest; response: ApiResponse<CreateAgentStationResponse> };
   createAgentPost: { request: CreateAgentPostRequest; response: ApiResponse<CreateAgentPostResponse> };
+  createAgentModel: { request: CreateAgentModelRequest; response: ApiResponse<CreateAgentModelResponse> };
+  suggestModel: { request: SuggestModelRequest; response: ApiResponse<SuggestModelResponse> };
   getAgentStatus: { request: GetAgentStatusRequest; response: ApiResponse<GetAgentStatusResponse> };
   getMe: { request: GetMeRequest; response: ApiResponse<GetMeResponse> };
   updateMe: { request: UpdateMeRequest; response: ApiResponse<UpdateMeResponse> };

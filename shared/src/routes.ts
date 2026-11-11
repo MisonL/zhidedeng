@@ -10,6 +10,8 @@ export const API_ROUTES = {
   revokeAgentToken: { method: 'DELETE', path: '/api/account/agent-tokens/:id' },
   createAgentStation: { method: 'POST', path: '/api/agent/stations' },
   createAgentPost: { method: 'POST', path: '/api/agent/posts' },
+  createAgentModel: { method: 'POST', path: '/api/agent/models' },
+  suggestModel: { method: 'POST', path: '/api/models/suggest' },
   getAgentStatus: { method: 'GET', path: '/api/agent/status' },
   getMe: { method: 'GET', path: '/api/me' },
   updateMe: { method: 'PATCH', path: '/api/me' },
