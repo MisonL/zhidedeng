@@ -983,3 +983,26 @@ describe('历史数据的兼容性', () => {
     expect((await response.json() as { stations: unknown[] }).stations).toBeInstanceOf(Array);
   });
 });
+
+describe('重跑的幂等', () => {
+  it('自动通过下，相同内容在新批次里幂等命中，不产生重复行', async () => {
+    await send('/api/admin/settings', { autoApprove: true });
+    const first = await submit([stationItem()]);
+    // 同步脚本每次用新的随机 batchId。重跑一遍不能把已成功的条目再插一遍。
+    const again = await submit([stationItem()]);
+    expect(again.results[0].deduplicated).toBe(true);
+    expect(again.results[0].id).toBe(first.results[0].id);
+    const rows = server.db.prepare("SELECT count(*) AS count FROM submissions WHERE originKey = 'batch.example.com'").get()!.count;
+    expect(rows).toBe(1);
+  });
+
+  it('人工审核下，跨批次仍有待审记录时产生新行，避免一键审核漏掉', async () => {
+    await send('/api/admin/settings', { autoApprove: false });
+    const first = await submit([stationItem()]);
+    // 人工审核态下若跨批次复用同一条 pending 行，
+    // 新批次的批量审核会漏掉它（它属于旧批次），所以这里必须产生新行。
+    const again = await submit([stationItem()]);
+    expect(again.results[0].deduplicated).toBe(false);
+    expect(again.results[0].id).not.toBe(first.results[0].id);
+  });
+});
