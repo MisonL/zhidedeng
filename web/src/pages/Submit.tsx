@@ -8,11 +8,15 @@ import { Empty } from '../components/AsyncView';
 import { loginPath } from '../format';
 import { useCatalog, useHere, useMe, useToast } from '../state';
 
-const KINDS: { value: PostKind; label: string }[] = [
+/** 补录模型不是文章，但和投稿共用一个入口，所以类型放宽一格。 */
+type SubmitKind = PostKind | 'model';
+
+const KINDS: { value: SubmitKind; label: string }[] = [
   { value: 'deal', label: '发爆料' },
   { value: 'review', label: '写评测' },
   { value: 'guide', label: '写指南' },
   { value: 'community', label: '发社区' },
+  { value: 'model', label: '补充模型' },
 ];
 
 const REQUIRED = { title: '请填写标题', summary: '请填写摘要', body: '请填写正文' };
@@ -25,8 +29,11 @@ export default function Submit() {
   const here = useHere();
   const toast = useToast();
   const requested = params.get('kind');
-  const kind = KINDS.find(({ value }) => value === requested)?.value ?? 'deal';
+  const kind: SubmitKind = KINDS.find(({ value }) => value === requested)?.value ?? 'deal';
+  const isModel = kind === 'model';
   const [form, setForm] = useState({ title: '', summary: '', body: '', stationSlug: '', modelSlug: '' });
+  // 补录模型自己的字段；模型不属于文章，不共用 title/summary/body。
+  const [modelForm, setModelForm] = useState({ slug: '', vendor: '', name: '', description: '' });
   const [errors, setErrors] = useState<Partial<typeof REQUIRED>>({});
   const [serverError, setServerError] = useState<string>();
   const [submitting, setSubmitting] = useState(false);
@@ -36,6 +43,30 @@ export default function Submit() {
 
   async function submit(event: FormEvent) {
     event.preventDefault();
+    // 补录模型走另一个接口：模型不是文章，没有标题/摘要/正文。
+    if (isModel) {
+      const fields = {
+        slug: modelForm.slug.trim().toLowerCase(),
+        vendor: modelForm.vendor.trim(),
+        name: modelForm.name.trim(),
+        description: modelForm.description.trim(),
+      };
+      if (!fields.slug || !fields.vendor || !fields.name || !fields.description) {
+        setServerError('模型需要填写 slug、厂商、名称和说明');
+        return;
+      }
+      setSubmitting(true);
+      setServerError(undefined);
+      try {
+        await api.suggestModel(fields);
+        toast('已提交，审核通过后进入模型库');
+        navigate('/me?tab=posts');
+      } catch (error) {
+        setServerError((error as Error).message);
+        setSubmitting(false);
+      }
+      return;
+    }
     const title = form.title.trim();
     const summary = form.summary.trim();
     const body = form.body.trim();
@@ -49,7 +80,7 @@ export default function Submit() {
     setServerError(undefined);
     try {
       await api.createPost({
-        kind, title, summary, body,
+        kind: kind as PostKind, title, summary, body,
         stationSlug: form.stationSlug || undefined,
         modelSlug: form.modelSlug || undefined,
       });
@@ -88,6 +119,32 @@ export default function Submit() {
             </label>
           ))}
         </fieldset>
+        {isModel && (
+          <>
+            <p className="hint">补录平台还没收录的模型。厂商必须已存在，slug 已存在时会被拒绝。审核通过后进入模型库。</p>
+            <div className="field">
+              <label className="field-label" htmlFor="model-slug">模型 slug</label>
+              <input id="model-slug" maxLength={64} value={modelForm.slug} onChange={event => setModelForm({ ...modelForm, slug: event.target.value })} />
+              <p className="hint">小写字母、数字和连字符，例如 claude-sonnet-4-5</p>
+            </div>
+            <div className="field">
+              <label className="field-label" htmlFor="model-vendor">厂商</label>
+              <select id="model-vendor" value={modelForm.vendor} onChange={event => setModelForm({ ...modelForm, vendor: event.target.value })}>
+                <option value="">选择厂商</option>
+                {catalog?.vendors.map(vendor => <option key={vendor.slug} value={vendor.slug}>{vendor.name}</option>)}
+              </select>
+            </div>
+            <div className="field">
+              <label className="field-label" htmlFor="model-name">模型名称</label>
+              <input id="model-name" maxLength={60} value={modelForm.name} onChange={event => setModelForm({ ...modelForm, name: event.target.value })} />
+            </div>
+            <div className="field">
+              <label className="field-label" htmlFor="model-description">一句话说明</label>
+              <textarea id="model-description" rows={2} maxLength={200} value={modelForm.description} onChange={event => setModelForm({ ...modelForm, description: event.target.value })} />
+            </div>
+          </>
+        )}
+        {!isModel && (<>
         <div className="field">
           <label className="field-label" htmlFor="submit-title">标题</label>
           <input id="submit-title" maxLength={100} value={form.title} onChange={(event) => change('title', event.target.value)} aria-invalid={Boolean(errors.title)} />
@@ -128,6 +185,7 @@ export default function Submit() {
             : <textarea id="submit-body" rows={12} value={form.body} onChange={(event) => change('body', event.target.value)} aria-invalid={Boolean(errors.body)} />}
           {errors.body && <p className="form-error">{errors.body}</p>}
         </div>
+        </>)}
         {serverError && <p className="form-error" role="alert">{serverError}</p>}
         <button type="submit" className="btn btn-red submit-btn" disabled={submitting}>{submitting ? '提交中…' : '提交审核'}</button>
       </form>

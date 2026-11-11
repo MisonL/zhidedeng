@@ -745,3 +745,57 @@ describe('幂等命中不消耗常规额度', () => {
     expect(quota).toBe(9);
   });
 });
+
+describe('Agent 补录模型', () => {
+  const submitModel = (key: Credential, body: unknown, ip = IP) =>
+    request(API_ROUTES.createAgentModel.path, 'POST', key.token, body, ip);
+  const model = (patch: Record<string, unknown> = {}) => ({
+    slug: 'claude-sonnet-4-5', vendor: store.all('vendor')[0]!.slug,
+    name: 'Claude Sonnet 4.5', description: '一句话说明', ...patch,
+  });
+
+  it('入队一条 kind=model 的待审记录', async () => {
+    const key = credential();
+    const result = await submitted(await submitModel(key, model()));
+    expect(result.submission.kind).toBe('model');
+    expect(result.submission.status).toBe('pending');
+    expect(result.submission.payload).toMatchObject({ slug: 'claude-sonnet-4-5' });
+  });
+
+  it('同一 slug 重复提交幂等命中，不产生第二条待审', async () => {
+    const key = credential();
+    await submitted(await submitModel(key, model()));
+    const again = await submitted(await submitModel(key, model()));
+    // 模型没有上游记录，originKey 用 slug 本身，重复提交必须命中同一条。
+    expect(again.deduplicated).toBe(true);
+    const rows = server.db.prepare("SELECT count(*) AS count FROM submissions WHERE kind = 'model'").get()!.count;
+    expect(rows).toBe(1);
+  });
+
+  it('厂商不存在时拒绝', async () => {
+    const key = credential();
+    await error(await submitModel(key, model({ vendor: 'no-such-vendor' })), 400, 'INVALID_INPUT', 'no-such-vendor');
+  });
+
+  it('多余字段被拒', async () => {
+    const key = credential();
+    await error(await submitModel(key, { ...model(), extra: 1 }), 400, 'INVALID_INPUT');
+  });
+
+  it('审核通过后模型真的出现在模型库里', async () => {
+    const key = credential();
+    const result = await submitted(await submitModel(key, model()));
+    reviewSubmission(store, clock, result.submission.id, { status: 'approved' });
+    const created = store.get('model', 'claude-sonnet-4-5');
+    expect(created?.name).toBe('Claude Sonnet 4.5');
+    expect(created?.tags).toEqual([]);
+  });
+
+  it('slug 与已有模型冲突时落 rejected 终态，不卡在待审', async () => {
+    const key = credential();
+    const result = await submitted(await submitModel(key, model({ slug: store.all('model')[0]!.slug })));
+    expect(() => reviewSubmission(store, clock, result.submission.id, { status: 'approved' })).toThrow();
+    // MODEL_EXISTS 是永久失败，必须落终态，否则永久占配额。
+    expect(store.db.prepare('SELECT status FROM submissions WHERE id = ?').get(result.submission.id)!.status).toBe('rejected');
+  });
+});

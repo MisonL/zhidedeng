@@ -216,3 +216,47 @@ describe('自动通过开关', () => {
     })).status).toBe(401);
   });
 });
+
+describe('站内补录模型', () => {
+  const cookie = async () => {
+    const store = openStore(server.db);
+    server.db.prepare('INSERT INTO accounts (handle, usernameKey, passwordHash, createdAt) VALUES (?, ?, ?, ?)')
+      .run('Alice', 'alice', 'not-a-real-hash', clock().toISOString());
+    store.put('user', 'Alice', { handle: 'Alice', nickname: 'Alice', avatar: '', bio: '', tokens: 100 });
+    const { createSession } = await import('../src/auth.ts');
+    return 'session=' + createSession(store, 'Alice', clock());
+  };
+  const suggest = (body: unknown, session: string) => server.app.request('/api/models/suggest', {
+    method: 'POST', headers: { 'content-type': 'application/json', cookie: session }, body: JSON.stringify(body),
+  });
+
+  it('站内也能补录模型，进同一个队列并需要审核', async () => {
+    const session = await cookie();
+    const vendor = openStore(server.db).all('vendor')[0]!.slug;
+    const response = await suggest({ slug: 'new-model-x', vendor, name: '新模型', description: '说明' }, session);
+    expect(response.status).toBe(200);
+    const created = await response.json() as { id: string; status: string };
+    expect(created.status).toBe('pending');
+    // 审核前不应进模型库。
+    expect(openStore(server.db).get('model', 'new-model-x')).toBeUndefined();
+    const reviewed = await review(created.id, { status: 'approved' });
+    expect(reviewed.status).toBe(200);
+    expect(openStore(server.db).get('model', 'new-model-x')?.name).toBe('新模型');
+  });
+
+  it('厂商不存在时提交阶段就拒绝，不占待审配额', async () => {
+    const session = await cookie();
+    const response = await suggest({ slug: 'new-model-y', vendor: 'ghost-vendor', name: '新模型', description: '说明' }, session);
+    expect(response.status).toBe(400);
+    const pending = await list('?status=pending');
+    expect(pending.items.filter(item => item.status === 'pending')).toHaveLength(0);
+  });
+
+  it('模型已存在时返回 409，不静默覆盖', async () => {
+    const session = await cookie();
+    const existing = openStore(server.db).all('model')[0]!;
+    const response = await suggest({ slug: existing.slug, vendor: existing.vendor, name: '改名尝试', description: '说明' }, session);
+    expect(response.status).toBe(409);
+    expect(openStore(server.db).get('model', existing.slug)!.name).toBe(existing.name);
+  });
+});

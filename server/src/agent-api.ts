@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { isIP } from 'node:net';
 import { z } from 'zod';
 import type { AgentRateQuota, AgentSubmitResponse, GetAgentStatusResponse, SubmissionKind } from '@zhidedeng/shared';
-import { agentPostSchema, agentStationSchema, findForbiddenAgentField } from '@zhidedeng/shared/submission';
+import { agentModelSchema, agentPostSchema, agentStationSchema, findForbiddenAgentField } from '@zhidedeng/shared/submission';
 import { activeAgentHandle } from './agent-auth.ts';
 import { AttemptLimiter } from './auth.ts';
 import type { Store } from './database.ts';
@@ -139,6 +139,18 @@ export class AgentApi {
     // 评价没有上游记录 ID，用规范化内容和账号生成稳定的 originKey；不把当前时间混入 payload。
     const hash = createHash('sha256').update(JSON.stringify(payload)).digest('hex');
     return this.enqueue('post', payload, `agent:${request.handle}:${hash}`, hostname ?? null, request);
+  }
+
+  /**
+   * 补录模型。模型没有上游记录，originKey 用 slug 本身：
+   * 同一个 slug 重复提交必须幂等命中，否则每跑一次就多一条待审。
+   */
+  submitModel(input: unknown, request: AgentRequest): AgentSubmitResponse {
+    const payload = parseSubmissionInput(agentModelSchema, objectPayload(input));
+    // 厂商必须已存在。物化时才校验的话，一条注定失败的投稿会先占掉待审配额，
+    // 提交方却看不到任何反馈。
+    if (!this.store.get('vendor', payload.vendor)) throw new ApiError(400, 'INVALID_INPUT', `厂商不存在：${payload.vendor}`);
+    return this.enqueue('model', payload, `model:${payload.slug}`, null, request);
   }
 
   private pendingCount(handle?: string): number {

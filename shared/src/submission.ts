@@ -43,8 +43,21 @@ export const postSchema = z.object({
   authorHandle: text(200).nullish(), hostname: text(253).nullish(), publishedAt: z.iso.datetime().nullish(),
 });
 
+/**
+ * 补录模型。规划 4.2 承诺过这条通道，但服务端只实现了物化侧，
+ * 提交侧一直缺——模型此前只能由管理员直接建。
+ * slug 冲突时服务端返回 409 MODEL_EXISTS，不会静默改建已有模型。
+ */
+export const modelSchema = z.object({
+  slug: adminSlug,
+  vendor: adminSlug,
+  name: text(60),
+  description: text(200),
+});
+
 export type StationPayload = z.infer<typeof stationSchema>;
 export type PostPayload = z.infer<typeof postSchema>;
+export type ModelPayload = z.infer<typeof modelSchema>;
 
 /**
  * Agent 接口收得更紧：不允许多余字段，也不允许提交实测指标类字段。
@@ -52,6 +65,7 @@ export type PostPayload = z.infer<typeof postSchema>;
  */
 export const agentStationSchema = stationSchema.strict();
 export const agentPostSchema = postSchema.omit({ authorHandle: true }).strict();
+export const agentModelSchema = modelSchema.strict();
 
 /** 规范化后比对的禁用字段名（下划线、连字符、大小写都不影响判断）。 */
 export const forbiddenAgentFields: ReadonlySet<string> = new Set([

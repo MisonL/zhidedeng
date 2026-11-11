@@ -11,7 +11,7 @@ import { chmod, mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'no
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { API_ROUTES, type AgentSubmitResponse, type GetAgentStatusResponse } from '@zhidedeng/shared';
-import { agentPostSchema, agentStationSchema, findForbiddenAgentField } from '@zhidedeng/shared/submission';
+import { agentModelSchema, agentPostSchema, agentStationSchema, findForbiddenAgentField } from '@zhidedeng/shared/submission';
 
 export const EXIT = {
   ok: 0,
@@ -278,23 +278,30 @@ export function matchModel(query: string, models: { slug: string; name: string; 
 export interface ValidateResult {
   path: string;
   valid: boolean;
-  kind?: 'station' | 'post' | null;
+  kind?: 'station' | 'post' | 'model' | null;
   issues?: { field: string; message: string }[];
 }
 
-/** 按 payload 的形状判断种类：有 url 当站点，有 title 当评价。 */
-export function inferKind(input: unknown): 'station' | 'post' | null {
+/**
+ * 按 payload 的形状判断种类：有 url 当站点，有 title 当评价，
+ * 有 slug+vendor 当模型。
+ * url 先判：站点也可能带 name，但绝不会带 vendor；
+ * title 在模型上不存在，所以两者不会撞。
+ */
+export function inferKind(input: unknown): 'station' | 'post' | 'model' | null {
   if (typeof input !== 'object' || input === null || Array.isArray(input)) return null;
   const record = input as Record<string, unknown>;
   if ('url' in record) return 'station';
   if ('title' in record) return 'post';
+  // 模型必须同时有 slug 和 vendor：只凭 slug 会和别的东西混淆。
+  if ('slug' in record && 'vendor' in record) return 'model';
   return null;
 }
 
-export function validatePayload(input: unknown): { kind: 'station' | 'post' | null; issues: { field: string; message: string }[] } {
+export function validatePayload(input: unknown): { kind: 'station' | 'post' | 'model' | null; issues: { field: string; message: string }[] } {
   const kind = inferKind(input);
   if (kind === null) {
-    return { kind: null, issues: [{ field: '', message: '无法判断种类：站点需要 url 字段，评价需要 title 字段' }] };
+    return { kind: null, issues: [{ field: '', message: '无法判断种类：站点需要 url 字段，评价需要 title 字段，模型需要 slug 和 vendor 字段' }] };
   }
   // 禁用字段要先查：schema 会把未知字段剥掉，剥完再查就查不到了，
   // 而服务端是在剥之前拒的。
@@ -302,7 +309,7 @@ export function validatePayload(input: unknown): { kind: 'station' | 'post' | nu
   if (forbidden !== null) {
     return { kind, issues: [{ field: forbidden, message: 'Agent 投稿不允许这个字段，实测指标由平台自己采集' }] };
   }
-  const schema = kind === 'station' ? agentStationSchema : agentPostSchema;
+  const schema = kind === 'station' ? agentStationSchema : kind === 'model' ? agentModelSchema : agentPostSchema;
   const result = schema.safeParse(input);
   if (result.success) return { kind, issues: [] };
   return {
@@ -339,7 +346,9 @@ export async function submitOne(
     throw new ZdError(EXIT.validation, `本地校验未通过：${issues[0]!.field} ${issues[0]!.message}`, { issues });
   }
   const token = options.token ?? (await resolveToken());
-  const route = kind === 'station' ? API_ROUTES.createAgentStation : API_ROUTES.createAgentPost;
+  const route = kind === 'station' ? API_ROUTES.createAgentStation
+    : kind === 'model' ? API_ROUTES.createAgentModel
+      : API_ROUTES.createAgentPost;
   return await request(route.path, { method: 'POST', body: input, token, fetchImpl: options.fetchImpl }) as AgentSubmitResponse;
 }
 

@@ -5,6 +5,7 @@ import { bodyLimit } from 'hono/body-limit';
 import { z, ZodError } from 'zod';
 import { API_ROUTES } from '@zhidedeng/shared';
 import type { ApiContracts, ApiRouteName, ChangePasswordRequest, LoginRequest, RegisterRequest } from '@zhidedeng/shared';
+import { modelSchema } from '@zhidedeng/shared/submission';
 import { AttemptLimiter, burnPasswordCheck, clearedSessionCookie, createSession, deleteOtherSessions, deleteSession, hashPassword, INITIAL_TOKENS, isWeakPassword, sessionCookie, sessionHandle, USERNAME, verifyPassword } from './auth.ts';
 import { agentTokenSchema, createAgentToken, listAgentTokens, revokeAgentToken } from './agent-tokens.ts';
 import { agentHandle, agentTokenHash } from './agent-auth.ts';
@@ -273,6 +274,10 @@ export function buildApp(store: Store, now: () => Date, options: AppOptions = {}
     const request = agentRequest(c);
     return c.json(agentApi.submitPost(await c.req.json(), request));
   });
+  app.post(API_ROUTES.createAgentModel.path, async c => {
+    const request = agentRequest(c);
+    return c.json(agentApi.submitModel(await c.req.json(), request));
+  });
   app.get(API_ROUTES.getAgentStatus.path, c => c.json(agentApi.status(agentRequest(c), c.req.query())));
 
   function refuseIfLimited(c: AppContext, limited: number[]) {
@@ -448,6 +453,19 @@ export function buildApp(store: Store, now: () => Date, options: AppOptions = {}
       kind: 'post', channel: 'web', originKey, payload, actorHandle: service.handle, ip, now: now(),
     });
     return service.pendingPost(result.submission);
+  });
+  // 站内补录模型：规划 4.2 承诺过这条通道，此前只实现了物化侧，
+  // 模型只能由管理员直接建。走 web 渠道进同一个队列，和其他投稿一样需要审核。
+  route('suggestModel', modelSchema.strict(), (service, input, ip) => {
+    service.assertCanSubmitPost();
+    const payload = { slug: input.slug, vendor: input.vendor, name: input.name, description: input.description };
+    if (!store.get('vendor', payload.vendor)) throw new ApiError(400, 'INVALID_INPUT', `厂商不存在：${payload.vendor}`);
+    if (store.get('model', payload.slug)) throw new ApiError(409, 'MODEL_EXISTS', `模型 ${payload.slug} 已存在`);
+    const originKey = `web:${service.handle}:model:${payload.slug}`;
+    const result = enqueueSubmission(store, {
+      kind: 'model', channel: 'web', originKey, payload, actorHandle: service.handle, ip, now: now(),
+    });
+    return { id: result.submission.id, slug: payload.slug, status: result.submission.status, deduplicated: result.deduplicated };
   });
   route('putVote', z.strictObject({ ...target, value: z.enum(['up', 'down']).nullable() }), (service, input) => service.putVote(input));
   route('putFavorite', z.strictObject({ ...target, favorited: z.boolean() }), (service, input) => service.putFavorite(input));
