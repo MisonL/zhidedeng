@@ -190,12 +190,22 @@ export function enqueueSubmission(store: Store, input: {
     const auto = !options.pendingOnly && autoApproveEnabled(store) && validated.action === 'upsert';
     if (auto || validated.action === 'remove') validatePayload(store, validated.kind, parsedPayload, validated.action, validated.channel);
     // 自动通过下相同内容已上站就不再重复物化；人工审核下仍只按 pending 去重。
-    // 幂等限定在同一批次内，避免新批次借用旧批次的 id，导致一键审核漏掉这些条目。
     const scope = auto ? "AND status IN ('pending','approved')" : "AND status = 'pending'";
     const actorScope = options.deduplicateByActor ? 'AND channel = ? AND actorHandle IS ?' : '';
-    const existing = store.db.prepare(`SELECT * FROM submissions WHERE kind = ? AND originKey = ? AND action = ? AND payloadHash = ? AND batchId IS ? ${actorScope} ${scope} ORDER BY createdAt DESC, rowid DESC LIMIT 1`)
-      .get(validated.kind, originKey, validated.action, payloadHash, validated.batchId ?? null,
-        ...(options.deduplicateByActor ? [validated.channel, validated.actorHandle ?? null] : []));
+    // 去重不带 batchId：带上它等于「只有同一批次内才幂等」，而同步脚本每次都用新的
+    // 随机 batchId，于是重跑一遍就把已成功的条目再插一遍（实测两次同步 2 行 1 实体）。
+    // 原本担心「新批次借用旧批次的 id 导致一键审核漏掉条目」——那说的是 pending：
+    // 人工审核态下 scope 仍限定 status='pending'，跨批次复用 pending 行会让新批次的
+    // 一键审核漏掉它，所以这种情况要继续产生新行。自动通过态没有「待审」概念，
+    // 已上站就是已上站，直接幂等命中。
+    const crossBatch = auto && validated.batchId !== null && validated.batchId !== undefined;
+    const existing = crossBatch
+      ? store.db.prepare(`SELECT * FROM submissions WHERE kind = ? AND originKey = ? AND action = ? AND payloadHash = ? AND batchId IS NOT NULL ${actorScope} ${scope} ORDER BY createdAt DESC, rowid DESC LIMIT 1`)
+        .get(validated.kind, originKey, validated.action, payloadHash,
+          ...(options.deduplicateByActor ? [validated.channel, validated.actorHandle ?? null] : []))
+      : store.db.prepare(`SELECT * FROM submissions WHERE kind = ? AND originKey = ? AND action = ? AND payloadHash = ? AND batchId IS ? ${actorScope} ${scope} ORDER BY createdAt DESC, rowid DESC LIMIT 1`)
+        .get(validated.kind, originKey, validated.action, payloadHash, validated.batchId ?? null,
+          ...(options.deduplicateByActor ? [validated.channel, validated.actorHandle ?? null] : []));
     const reviewedAt = validated.now.toISOString();
     // 飞书 www/裸域切换会更新同一实体，版本应取实际实体当前 URL 的 hostname。
     const currentOriginKey = auto && existing?.status === 'approved' && validated.kind === 'station'
