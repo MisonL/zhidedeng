@@ -142,15 +142,17 @@ export class Service {
     // 再把 entities 加进来会把同一篇算两次，10 篇/小时实际只剩 5 篇。
     const hourAgo = new Date(this.now().getTime() - 3_600_000).toISOString();
     return Number(this.store.db.prepare(
-      "SELECT count(*) AS count FROM submissions WHERE kind = 'post' AND channel = 'web' AND actorHandle = ? AND createdAt > ?",
+      "SELECT count(*) AS count FROM submissions WHERE kind IN ('post','model') AND channel = 'web' AND actorHandle = ? AND createdAt > ?",
     ).get(this.user, hourAgo)!.count);
   }
 
-  /** 该账号当前待审的文章数（已物化的 pending + 队列里的）。 */
+  /**
+   * 该账号当前待审的站内投稿数（已物化的 pending + 队列里的）。
+   * 模型补录也算：它们同样占队列、同样要人审，不数进来就等于开了个无限入口。 */
   private pendingOwnPosts(): number {
     // 同上：pending 只可能出现在队列里，物化后的状态就是 approved。
     return Number(this.store.db.prepare(
-      "SELECT count(*) AS count FROM submissions WHERE kind = 'post' AND channel = 'web' AND actorHandle = ? AND status = 'pending'",
+      "SELECT count(*) AS count FROM submissions WHERE kind IN ('post','model') AND channel = 'web' AND actorHandle = ? AND status = 'pending'",
     ).get(this.user)!.count);
   }
 
