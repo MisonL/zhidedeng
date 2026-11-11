@@ -635,10 +635,16 @@ describe('模型投稿', () => {
     expect(validatePayload(model)).toEqual({ kind: 'model', issues: [] });
   });
 
-  it('slug 大写被拒', () => {
-    const issues = validatePayload({ ...model, slug: 'Claude-Sonnet' }).issues;
+  it('slug 大写会被规范成小写而不是报错', () => {
+    // 前端表单本来就转小写；服务端也转，避免「UI 能过、直接调接口被拒」。
+    expect(validatePayload({ ...model, slug: 'Claude-Sonnet' })).toEqual({ kind: 'model', issues: [] });
+  });
+
+  it('slug 含非法字符才报错，且说明规则', () => {
+    const issues = validatePayload({ ...model, slug: 'a b' }).issues;
     expect(issues).toHaveLength(1);
     expect(issues[0]!.field).toBe('slug');
+    expect(issues[0]!.message).toContain('小写字母、数字和连字符');
   });
 
   it('模型带了 title 被当成评价时，明确点出来', () => {

@@ -205,13 +205,15 @@ describe('审核物化', () => {
     expect(store.get('model', modelPayload.slug)).toEqual({ ...modelPayload, tags: [] });
   });
 
-  it('model 的厂商不存在时返回可定位错误，落成 rejected 终态，entities 不变', () => {
+  it('model 的厂商不存在时保持 pending 等厂商补回，不落终态', () => {
     const before = entities();
     const submission = queue({ kind: 'model', originKey: modelPayload.slug, payload: { ...modelPayload, vendor: 'missing-vendor' } }).submission;
     expect(() => approve(submission.id)).toThrow(expect.objectContaining({
-      status: 400, code: 'INVALID_INPUT', message: '厂商 missing-vendor 不存在，请先新增厂商',
+      status: 400, code: 'VENDOR_MISSING', message: '厂商 missing-vendor 不存在，请先恢复该厂商再审核',
     }));
-    expect(record(submission.id).status).toBe('rejected');
+    // 提交时厂商可能还在，是之后被删的——补回来就能过，
+    // 所以不能把这条投稿判死，否则提交方要重提一次。
+    expect(record(submission.id).status).toBe('pending');
     expect(entities()).toEqual(before);
     expect(store.get('model', modelPayload.slug)).toBeUndefined();
   });
@@ -338,12 +340,12 @@ describe('投稿管理接口', () => {
     });
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({ results: [
-      { id: invalid.id, error: { status: 400, code: 'INVALID_INPUT' } },
+      // 厂商缺失是可重试的（补回厂商就能审），所以错误码独立且记录保持 pending。
+      { id: invalid.id, error: { status: 400, code: 'VENDOR_MISSING' } },
       { id: 'missing-id', error: { status: 404, code: 'NOT_FOUND' } },
       { id: valid.id, submission: { id: valid.id, status: 'approved' } },
     ] });
-    // 失败的那条落成 rejected，不再卡在待审队列里占配额。
-    expect(record(invalid.id).status).toBe('rejected');
+    expect(record(invalid.id).status).toBe('pending');
     expect(record(valid.id).status).toBe('approved');
     expect(store.get('station', 'sub-api-example-com')).toBeDefined();
   });

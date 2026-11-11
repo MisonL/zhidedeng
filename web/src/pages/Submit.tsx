@@ -59,6 +59,7 @@ export default function Submit() {
       setServerError(undefined);
       try {
         await api.suggestModel(fields);
+        me.refreshMe();
         toast('已提交，审核通过后进入模型库');
         navigate('/me?tab=posts');
       } catch (error) {
@@ -114,7 +115,15 @@ export default function Submit() {
           <legend className="field-label">类型</legend>
           {KINDS.map(({ value, label }) => (
             <label key={value} className="kind-option">
-              <input type="radio" name="kind" value={value} checked={kind === value} onChange={() => setParams({ kind: value }, { replace: true })} />
+              <input
+                type="radio" name="kind" value={value} checked={kind === value}
+                onChange={() => {
+                  // 换类型等于换一套字段，上一类的校验和报错都不再适用。
+                  setErrors({});
+                  setServerError(undefined);
+                  setParams({ kind: value }, { replace: true });
+                }}
+              />
               <span>{label}</span>
             </label>
           ))}
