@@ -21,6 +21,11 @@ const server = serve({ fetch: app.fetch, port, hostname }, info => {
   if (hostname !== '127.0.0.1' && !process.env.TRUSTED_PROXIES) {
     console.warn('未配置 TRUSTED_PROXIES：所有请求的来源都会记成网关地址，按 IP 的限流与审计会失真。前面有反向代理时请填它的网段。');
   }
+  // 生产环境靠 Secure cookie 保会话；请求若不是 https，cookie 会被浏览器丢弃，
+  // 表现为「登录成功但立刻又变回未登录」。这里提前说清楚，别让人去猜。
+  if (process.env.NODE_ENV === 'production' && process.env.TLS_ENABLED !== '1') {
+    console.warn('生产环境未启用 TLS_ENABLED：会话 cookie 只在确认走 https 时才带 Secure。前面必须挂 HTTPS 反向代理并透传 X-Forwarded-Proto，否则登录态不被浏览器保存。');
+  }
 });
 
 for (const signal of ['SIGINT', 'SIGTERM'] as const) {

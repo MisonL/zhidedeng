@@ -29,6 +29,8 @@ interface SiteModel {
 }
 
 const PAGE_SIZE = 200;
+/** 页数上限。has_more 恒为 true 或 offset 不推进时会无限循环，读到这么多页就中止。 */
+const MAX_PAGES = 500;
 const BATCH_SIZE = 500;
 const APPROVED = '通过';
 const REQUIRED_COLUMNS = ['中转站名称', '网址', '提交类型', '审核状态', '提交时间'];
@@ -351,10 +353,17 @@ function runLark(args: string[], configDir: string) {
 
 /** 分页串行读取全部记录（record-list 禁止并发）。 */
 async function readAllRecords(config: Config) {
+  return collectPages(async offset => parseRecordPage(await runLark(['base', '+record-list', '--as', 'bot', '--base-token', config.baseToken, '--table-id', config.tableId, '--offset', String(offset), '--limit', String(PAGE_SIZE)], config.configDir)));
+}
+
+/** 分页逻辑本身。抽出来是为了能直接测「has_more 恒为真」这类边界。 */
+export async function collectPages(fetchPage: (offset: number) => Promise<{ records: RawRecord[]; columns: string[]; hasMore: boolean | null }>) {
   const records: RawRecord[] = [];
   const columns = new Set<string>();
-  for (;;) {
-    const page = parseRecordPage(await runLark(['base', '+record-list', '--as', 'bot', '--base-token', config.baseToken, '--table-id', config.tableId, '--offset', String(records.length), '--limit', String(PAGE_SIZE)], config.configDir));
+  for (let pageCount = 1; ; pageCount += 1) {
+    if (pageCount > MAX_PAGES) throw new Error(`分页超过 ${MAX_PAGES} 页仍未结束，疑似 has_more 恒为真或 offset 不推进，中止同步`);
+    const page = await fetchPage(records.length);
+
     // 每页单独校验必填字段。只在读完后查一次是不够的：
     // 分页里混入列式与对象式结构时，某一页的字段会解析成空，
     // 那些记录读不到「审核状态」就被当成未通过——结果静默生成下架请求，

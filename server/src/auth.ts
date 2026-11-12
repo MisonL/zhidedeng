@@ -106,18 +106,43 @@ const cookieFlags = (secure: boolean) => `Path=/; HttpOnly; SameSite=Lax${secure
 export const sessionCookie = (token: string, secure: boolean) => `session=${token}; Max-Age=${SESSION_DAYS * 86400}; ${cookieFlags(secure)}`;
 export const clearedSessionCookie = (secure: boolean) => `session=; Max-Age=0; ${cookieFlags(secure)}`;
 
-/** 进程内滑动窗口计数。服务是单进程，重启清零可以接受。 */
+/** 计数落库所需的最小接口，只依赖这两条语句，避免把整个 Store 拖进来。 */
+export interface RateLimitStore {
+  db: {
+    prepare(sql: string): { all(...params: unknown[]): unknown[]; run(...params: unknown[]): unknown };
+  };
+}
+
+/**
+ * 滑动窗口计数。
+ *
+ * 传了 store 就写库：多个进程共用同一个库文件时配额才是真正的全局限额。
+ * 不传就用进程内 Map —— 单元测试和单进程部署是这个路径。
+ *
+ * 库版本只覆盖「共享同一个库文件」的多进程；跨主机部署要另换共享存储。
+ * 窗口内的旧记录由 record() 顺便清掉，不需要单独的清理任务。
+ */
 export class AttemptLimiter {
   private readonly attempts = new Map<string, number[]>();
   private readonly max: number;
   private readonly windowMs: number;
+  private readonly store?: RateLimitStore;
+  private readonly bucket: string;
 
-  constructor(max: number, windowMs: number) {
+  constructor(max: number, windowMs: number, store?: RateLimitStore, bucket = 'default') {
     this.max = max;
     this.windowMs = windowMs;
+    this.store = store;
+    this.bucket = bucket;
   }
 
-  private recent(key: string, now: number) {
+  private recent(key: string, now: number): number[] {
+    if (this.store) {
+      const rows = this.store.db
+        .prepare('SELECT at FROM rate_limits WHERE bucket = ? AND key = ? AND at > ? ORDER BY at')
+        .all(this.bucket, key, now - this.windowMs) as { at: number }[];
+      return rows.map(row => row.at);
+    }
     return (this.attempts.get(key) ?? []).filter(time => time > now - this.windowMs);
   }
 
@@ -133,6 +158,12 @@ export class AttemptLimiter {
   }
 
   record(key: string, now: number) {
+    if (this.store) {
+      // 顺手清掉本桶过期的记录：没有单独清理任务，靠写入顺带回收。
+      this.store.db.prepare('DELETE FROM rate_limits WHERE bucket = ? AND at <= ?').run(this.bucket, now - this.windowMs);
+      this.store.db.prepare('INSERT INTO rate_limits (bucket, key, at) VALUES (?, ?, ?)').run(this.bucket, key, now);
+      return;
+    }
     if (this.attempts.size > 10_000) {
       for (const stale of this.attempts.keys()) if (this.recent(stale, now).length === 0) this.attempts.delete(stale);
     }
@@ -141,10 +172,20 @@ export class AttemptLimiter {
 
   /** 撤销最近一次 record：预占的尝试最后没有失败时调用。 */
   release(key: string) {
+    if (this.store) {
+      // 删最新一条，等价于内存版的 pop。
+      this.store.db.prepare('DELETE FROM rate_limits WHERE rowid = (SELECT rowid FROM rate_limits WHERE bucket = ? AND key = ? ORDER BY at DESC, rowid DESC LIMIT 1)')
+        .run(this.bucket, key);
+      return;
+    }
     this.attempts.get(key)?.pop();
   }
 
   clear(key: string) {
+    if (this.store) {
+      this.store.db.prepare('DELETE FROM rate_limits WHERE bucket = ? AND key = ?').run(this.bucket, key);
+      return;
+    }
     this.attempts.delete(key);
   }
 }

@@ -117,12 +117,19 @@ const HOSTNAME_SQL = "CASE WHEN kind = 'station' THEN rtrim(lower(originKey), '.
 
 export class AgentApi {
   private readonly store: Store;
-  private readonly byToken = new AttemptLimiter(TOKEN_PER_HOUR, HOUR_MS);
-  private readonly byAccount = new AttemptLimiter(ACCOUNT_PER_HOUR, HOUR_MS);
-  private readonly byIp = new AttemptLimiter(IP_PER_HOUR, HOUR_MS);
-  private readonly byDedupe = new AttemptLimiter(DEDUPE_PER_HOUR, HOUR_MS);
+  private readonly byToken: AttemptLimiter;
+  private readonly byAccount: AttemptLimiter;
+  private readonly byIp: AttemptLimiter;
+  private readonly byDedupe: AttemptLimiter;
 
-  constructor(store: Store) { this.store = store; }
+  constructor(store: Store) {
+    this.store = store;
+    // 计数落库，量级很小（每次提交几条），换来多进程下配额仍然成立。
+    this.byToken = new AttemptLimiter(TOKEN_PER_HOUR, HOUR_MS, store, 'agent-token');
+    this.byAccount = new AttemptLimiter(ACCOUNT_PER_HOUR, HOUR_MS, store, 'agent-account');
+    this.byIp = new AttemptLimiter(IP_PER_HOUR, HOUR_MS, store, 'agent-ip');
+    this.byDedupe = new AttemptLimiter(DEDUPE_PER_HOUR, HOUR_MS, store, 'agent-dedupe');
+  }
 
   submitStation(input: unknown, request: AgentRequest): AgentSubmitResponse {
     const raw = objectPayload(input);

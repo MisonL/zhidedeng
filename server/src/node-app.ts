@@ -51,7 +51,7 @@ export function openStore(db: DatabaseSync) {
   });
 }
 
-export function createApp(options: { dbPath?: string; now?: () => Date; syncToken?: string; inviteCodes?: readonly string[]; webRoot?: string; trustedProxies?: string } = {}) {
+export function createApp(options: { dbPath?: string; now?: () => Date; syncToken?: string; inviteCodes?: readonly string[]; webRoot?: string; trustedProxies?: string; secureCookie?: boolean } = {}) {
   const production = process.env.NODE_ENV === 'production';
   if (production && !options.dbPath && !process.env.DB_PATH) throw new Error('生产环境必须设置 DB_PATH');
   const db = openDatabase(options.dbPath ?? process.env.DB_PATH ?? defaultDbPath);
@@ -64,7 +64,10 @@ export function createApp(options: { dbPath?: string; now?: () => Date; syncToke
   const inviteCodes = options.inviteCodes ?? (process.env.INVITE_CODES ?? '').split(',').map(code => code.trim()).filter(Boolean);
   // 容器部署时请求从 Docker 网桥进来，不配这个会让所有用户的 IP 限流落进同一个桶。
   const trustedProxies = options.trustedProxies ?? process.env.TRUSTED_PROXIES ?? '';
-  const app = buildApp(store, now, { secureCookie: production, syncToken: usable, inviteCodes, trustedProxies });
+    // 只在生产且显式开启 TLS 时要求 Secure；本机 http 试用不该被静默登不上。
+  // 显式传入的选项优先（测试用），否则按生产 + TLS_ENABLED 决定。
+  const cookieSecure = options.secureCookie ?? (production && process.env.TLS_ENABLED === '1');
+  const app = buildApp(store, now, { secureCookie: cookieSecure, syncToken: usable, inviteCodes, trustedProxies });
   if (options.webRoot) mountWeb(app, options.webRoot);
   return { app, db };
 }

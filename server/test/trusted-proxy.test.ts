@@ -54,7 +54,8 @@ describe('可信反向代理', () => {
     }
     // 第 31 次：仍然按 203.0.113.7 计数，触发单 IP 上限。
     expect((await request(99)).status).toBe(429);
-  });
+    // 30 次登录各要跑一次密码校验，默认 5 秒不够。
+  }, 60_000);
 
   it('可信来源的 X-Forwarded-For 会被采信，不同来源各算各的', async () => {
     const server = createApp({ dbPath: ':memory:', now: () => clock, trustedProxies: '172.16.0.0/12' });
@@ -69,7 +70,7 @@ describe('可信反向代理', () => {
     expect((await one('198.51.100.1', 99)).status).toBe(429);
     // 换一个来源则是新的桶——这正是修好之后应有的行为。
     expect((await one('198.51.100.2', 100)).status).toBe(401);
-  });
+  }, 60_000);
 });
 
 describe('无请求体的写接口', () => {
@@ -89,5 +90,42 @@ describe('无请求体的写接口', () => {
       body: JSON.stringify({ username: 'x', password: 'y' }),
     }, { incoming: { socket: { remoteAddress: '127.0.0.1' } } });
     expect(response.status).toBe(415);
+  });
+});
+
+describe('cookie 的 Secure 标记', () => {
+  const login = async (server: ReturnType<typeof createApp>, headers: Record<string, string> = {}) => {
+    const response = await server.app.request('/api/auth/register', {
+      method: 'POST',
+      headers: { ...json, ...headers },
+      body: JSON.stringify({ username: 'cookieuser', password: 'correct-horse-battery' }),
+    }, { incoming: { socket: { remoteAddress: '172.17.0.1' } } });
+    return response.headers.get('set-cookie') ?? '';
+  };
+
+  it('生产 + 开启 TLS + 反代声明 https 时带 Secure', async () => {
+    const server = createApp({ dbPath: ':memory:', now: () => clock, trustedProxies: '172.16.0.0/12', secureCookie: true });
+    expect(await login(server, { 'x-forwarded-proto': 'https' })).toContain('Secure');
+  });
+
+  it('生产 + 开启 TLS 但请求是 http 时不带 Secure（否则浏览器会丢弃 cookie）', async () => {
+    const server = createApp({ dbPath: ':memory:', now: () => clock, trustedProxies: '172.16.0.0/12', secureCookie: true });
+    expect(await login(server, { 'x-forwarded-proto': 'http' })).not.toContain('Secure');
+  });
+
+  it('不可信来源自称 https 不算数', async () => {
+    const server = createApp({ dbPath: ':memory:', now: () => clock, trustedProxies: '172.16.0.0/12', secureCookie: true });
+    const response = await server.app.request('/api/auth/register', {
+      method: 'POST',
+      headers: { ...json, 'x-forwarded-proto': 'https' },
+      body: JSON.stringify({ username: 'untrusted', password: 'correct-horse-battery' }),
+    }, { incoming: { socket: { remoteAddress: '203.0.113.7' } } });
+    // 直连方不在可信网段，X-Forwarded-Proto 不被采信。
+    expect(response.headers.get('set-cookie') ?? '').not.toContain('Secure');
+  });
+
+  it('没开 TLS 时本机 http 能正常拿到 cookie', async () => {
+    const server = createApp({ dbPath: ':memory:', now: () => clock });
+    expect(await login(server)).not.toContain('Secure');
   });
 });

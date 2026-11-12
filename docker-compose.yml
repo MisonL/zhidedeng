@@ -22,6 +22,10 @@ services:
       # 查自己机器上的网段：docker network inspect <项目名>_default --format '{{range .IPAM.Config}}{{.Subnet}}{{end}}'
       # 留空则退化成「只有本机可信」，容器部署下等于全站共用一个限流桶。
       TRUSTED_PROXIES: ${TRUSTED_PROXIES:-}
+      # 公网部署时置 1：会话 cookie 会按请求的实际协议加 Secure。
+      # 前面必须挂 HTTPS 反代并透传 X-Forwarded-Proto，否则登录态不被浏览器保存。
+      # 纯本机试用（http://127.0.0.1）保持默认 0 即可。
+      TLS_ENABLED: ${TLS_ENABLED:-0}
       INVITE_CODES: ${INVITE_CODES:-}
     volumes:
       - zhidedeng-data:/data

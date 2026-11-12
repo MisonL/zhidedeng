@@ -6,8 +6,8 @@ import { homedir, tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { AdminBatchSubmitRequest, AdminSubmissionStateResponse } from '@zhidedeng/shared';
-import { buildBatch, normalizeUrl, parseRecordPage, planBatch } from '../sync-feishu.ts';
 import type { RawRecord } from '../sync-feishu.ts';
+import { buildBatch, collectPages, normalizeUrl, parseRecordPage, planBatch } from '../sync-feishu.ts';
 
 const SCRIPT = resolve(import.meta.dirname, '../sync-feishu.ts');
 const FIXTURES = resolve(import.meta.dirname, 'fixtures');
@@ -625,5 +625,51 @@ describe('分页截断保护', () => {
     const parsed = parseRecordPage(page);
     expect(parsed.hasMore).toBeNull();
     expect(parsed.records.length).toBeLessThan(200);
+  });
+});
+
+describe('分页边界', () => {
+  type Page = { records: RawRecord[]; columns: string[]; hasMore: boolean | null };
+  const page = (records: RawRecord[], hasMore: boolean | null): Page => ({ records, columns, hasMore });
+  const record = (index: number) => ({
+    recordId: `r${index}`,
+    fields: {
+      '中转站名称': `站${index}`, '网址': `https://s${index}.example.com/`,
+      '提交类型': '推荐新站', '审核状态': '已通过', '提交时间': '2026-11-01 10:00:00',
+    },
+  });
+  const columns = ['中转站名称', '网址', '提交类型', '审核状态', '提交时间'];
+
+  it('has_more 恒为真时按页数上限中止，不会无限读', async () => {
+    let calls = 0;
+    const run = collectPages(async offset => {
+      calls += 1;
+      return page(Array.from({ length: 200 }, (_, index) => record(offset + index)), true);
+    });
+    await expect(run).rejects.toThrow(/超过 500 页/);
+    // 读满 500 页后第 501 次不再请求，直接判死循环。
+    expect(calls).toBe(500);
+  });
+
+  it('has_more 为 false 时正常结束', async () => {
+    const records = await collectPages(async offset => page(offset === 0 ? [record(0), record(1)] : [], false));
+    expect(records).toHaveLength(2);
+  });
+
+  it('没有 has_more 时，满页会继续读下一页', async () => {
+    const records = await collectPages(async offset =>
+      page(offset === 0 ? Array.from({ length: 200 }, (_, index) => record(index)) : [], null));
+    expect(records).toHaveLength(200);
+  });
+
+  it('没有 has_more 且第二页遇到短页时中止，而不是当成读完了', async () => {
+    const run = collectPages(async offset =>
+      page(offset === 0 ? Array.from({ length: 200 }, (_, index) => record(index)) : [record(200)], null));
+    await expect(run).rejects.toThrow(/分页结果不完整/);
+  });
+
+  it('空页直接结束', async () => {
+    const records = await collectPages(async () => page([], true));
+    expect(records).toHaveLength(0);
   });
 });

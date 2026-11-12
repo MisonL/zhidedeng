@@ -67,6 +67,15 @@ export const SCHEMA = `
     useCount INTEGER NOT NULL DEFAULT 0
   );
   CREATE INDEX IF NOT EXISTS agent_tokens_handle ON agent_tokens(handle);
+  -- 限流计数。放库里而不是进程内存里，是为了让同一个库上的多个进程共享同一份计数：
+  -- 内存版在多进程下每个进程各算各的，配额实际被放大成 N 倍。
+  -- 注意这只覆盖「共享同一个库文件」的进程；跨主机部署仍需换共享存储。
+  CREATE TABLE IF NOT EXISTS rate_limits (
+    bucket TEXT NOT NULL,
+    key    TEXT NOT NULL,
+    at     INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS rate_limits_lookup ON rate_limits(bucket, key, at);
   CREATE INDEX IF NOT EXISTS votes_target ON votes(targetType, targetId);
   CREATE INDEX IF NOT EXISTS favorites_target ON favorites(targetType, targetId);
   CREATE INDEX IF NOT EXISTS comments_target ON comments(targetType, targetId, createdAt);
