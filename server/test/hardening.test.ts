@@ -58,10 +58,22 @@ describe('登录限制', () => {
     expect((await login('alice', PASSWORD)).status).toBe(429);
   }, 30_000);
 
-  it('成功登录释放预占，不算失败', async () => {
+  it('成功登录也计入总量配额，但会清掉「这个 IP 猜这个账号」的失败计数', async () => {
     await register('alice');
-    // 超过按用户名（20）和按 IP（30）的上限，全部成功说明预占都释放了。
-    for (let index = 0; index < 32; index++) expect((await login('alice', PASSWORD)).status).toBe(200);
+    // 成功登录不再退还按用户名（20）与按 IP（30）的预占：
+    // 全退的话任何注册用户拿自己的正确密码循环打登录，就能一直占住密码校验的
+    // 并发闸门，把登录、注册、改密一起打成 503，代价只是一个自建账号。
+    for (let index = 0; index < 20; index++) expect((await login('alice', PASSWORD)).status).toBe(200);
+    expect((await login('alice', PASSWORD)).status).toBe(429);
+  }, 30_000);
+
+  it('成功登录清掉该 IP 对该账号的失败计数，不会被自己之前的失误挡住', async () => {
+    await register('alice');
+    // 先猜错 4 次（上限 5），再登录成功应当把这一维清空。
+    for (let index = 0; index < 4; index++) expect((await login('alice', 'wrong-password-1')).status).toBe(401);
+    expect((await login('alice', PASSWORD)).status).toBe(200);
+    // 清空后又能再猜 4 次，而不是紧接着就被挡。
+    for (let index = 0; index < 4; index++) expect((await login('alice', 'wrong-password-1')).status).toBe(401);
   }, 30_000);
 });
 

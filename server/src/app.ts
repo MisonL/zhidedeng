@@ -406,6 +406,17 @@ export function buildApp(store: Store, now: () => Date, options: AppOptions = {}
       loginByIp.release(ip, loginIpHandle);
       loginByUsername.release(usernameKey, loginUsernameHandle);
     };
+    /**
+     * 登录成功只退「这个 IP 猜这个账号」的失败计数，不退按 IP 与按账号的总量。
+     *
+     * 三个都退会让成功登录完全不计入配额：任何注册用户拿自己的正确密码循环打
+     * /api/auth/login，就能一直占用密码校验的并发闸门（2 执行 + 16 排队），
+     * 把登录、注册、改密一起打成 503，代价只是一个自建账号。
+     */
+    const refundOnSuccess = () => {
+      loginByTarget.release(pair, loginTargetHandle);
+      loginByTarget.clear(pair);
+    };
     const account = store.db.prepare('SELECT handle, passwordHash, disabledAt FROM accounts WHERE usernameKey = ?').get(usernameKey);
     let valid: boolean;
     try {
@@ -416,8 +427,7 @@ export function buildApp(store: Store, now: () => Date, options: AppOptions = {}
     }
     // 被禁用的账号和密码错误返回同样的错误。
     if (!account || !valid || account.disabledAt !== null) throw new ApiError(401, 'INVALID_CREDENTIALS', '用户名或密码错误');
-    refund();
-    loginByTarget.clear(pair);
+    refundOnSuccess();
     const handle = account.handle as string;
     c.header('set-cookie', sessionCookie(createSession(store, handle, now()), cookieSecure()));
     return c.json(new Service(store, now, handle).getMe());
