@@ -34,6 +34,9 @@ export const API_ROUTES = {
   getBanners: { method: 'GET', path: '/api/banners' },
   search: { method: 'GET', path: '/api/search' },
   getHotSearches: { method: 'GET', path: '/api/hot-searches' },
+  createInviteCode: { method: 'POST', path: '/api/admin/invite-codes' },
+  getInviteCodes: { method: 'GET', path: '/api/admin/invite-codes' },
+  revokeInviteCode: { method: 'POST', path: '/api/admin/invite-codes/:id/revoke' },
 } as const satisfies Record<keyof ApiContracts, {
   method: 'GET' | 'PATCH' | 'POST' | 'PUT' | 'DELETE';
   path: `/api/${string}`;

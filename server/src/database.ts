@@ -70,6 +70,26 @@ export const SCHEMA = `
   -- 限流计数。放库里而不是进程内存里，是为了让同一个库上的多个进程共享同一份计数：
   -- 内存版在多进程下每个进程各算各的，配额实际被放大成 N 倍。
   -- 注意这只覆盖「共享同一个库文件」的进程；跨主机部署仍需换共享存储。
+  -- 邀请码。原先只是环境变量里的静态白名单：发一个码等于发无限个码。
+  -- 这里落到表上，带次数、有效期、核销记录与吊销。
+  -- 只存哈希与前缀，明文仅在签发那一刻返回一次，库被读走也拿不到可用码。
+  CREATE TABLE IF NOT EXISTS invite_codes (
+    id         TEXT PRIMARY KEY,
+    codeHash   TEXT NOT NULL UNIQUE,
+    codePrefix TEXT NOT NULL,
+    note       TEXT,
+    maxUses    INTEGER,
+    usedCount  INTEGER NOT NULL DEFAULT 0,
+    createdAt  TEXT NOT NULL,
+    expiresAt  TEXT,
+    revokedAt  TEXT
+  );
+  CREATE TABLE IF NOT EXISTS invite_code_uses (
+    codeId TEXT NOT NULL REFERENCES invite_codes(id),
+    handle TEXT NOT NULL,
+    usedAt TEXT NOT NULL,
+    PRIMARY KEY (codeId, handle)
+  );
   CREATE TABLE IF NOT EXISTS rate_limits (
     bucket TEXT NOT NULL,
     key    TEXT NOT NULL,

@@ -3,6 +3,7 @@ import { z } from 'zod';
 import type { AgentToken, CreateAgentTokenRequest, CreateAgentTokenResponse, RevokeAgentTokenResponse } from '@zhidedeng/shared';
 import type { Store } from './database.ts';
 import { ApiError } from './errors.ts';
+import { inviteCodeError, inviteCodeProblem, inviteCodeRedeemedBy, redeemInviteCode } from './invite-codes.ts';
 
 const MIN_ACCOUNT_AGE_MS = 7 * 86_400_000;
 const MAX_ACTIVE_TOKENS = 5;
@@ -24,7 +25,16 @@ function requireEligibility(store: Store, handle: string, now: Date, inviteCode:
   // 冒用别人的名字挂一篇 approved 投稿，从而绕过整个准入。
   // 普通站内投稿不写 source，读取时视为 user。
   const approved = store.db.prepare("SELECT 1 FROM entities WHERE kind = 'post' AND json_extract(data, '$.authorHandle') = ? AND json_extract(data, '$.status') = 'approved' AND COALESCE(json_extract(data, '$.source'), 'user') = 'user' LIMIT 1").get(handle);
-  if (approved || (inviteCode !== undefined && inviteCodes.includes(inviteCode))) return;
+  if (approved) return;
+  if (inviteCode !== undefined) {
+    // 优先认库里的码；环境变量那套保留给还没建码的老部署，避免升级后所有人被拒。
+    if (inviteCodes.includes(inviteCode)) return;
+    // 已经用这个码核销过的账号继续放行：码后来用完或吊销，不该把已获准的人踢回去。
+    if (inviteCodeRedeemedBy(store, inviteCode, handle)) return;
+    const problem = inviteCodeProblem(store, inviteCode, now);
+    if (problem === null) return;
+    throw inviteCodeError(problem);
+  }
   throw new ApiError(403, 'ELIGIBILITY_REQUIRED', '账号注册未满 7 天或缺少有效注册时间，且没有通过的非演示投稿；请等待注册满 7 天、完成至少一篇审核通过的投稿，或填写有效邀请码');
 }
 
@@ -43,6 +53,8 @@ export function createAgentToken(store: Store, input: CreateAgentTokenRequest & 
     const record = { id: randomUUID(), tokenPrefix: token.slice(0, 8) + '\u2026', label: input.label, createdAt: input.now.toISOString() };
     store.db.prepare('INSERT INTO agent_tokens (id, handle, tokenHash, label, tokenPrefix, createdAt) VALUES (?, ?, ?, ?, ?, ?)')
       .run(record.id, input.handle, tokenHash, record.label, record.tokenPrefix, record.createdAt);
+    // 凭证真的签出去了才核销邀请码：前面任何一步抛错都不该消耗次数。
+    if (input.inviteCode !== undefined) redeemInviteCode(store, input.inviteCode, input.handle, input.now);
     return { ...record, token };
   });
   // 成功提交后再审计，失败的事务不能留下成功日志；不记录标签、邀请码或密码学材料。

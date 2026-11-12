@@ -180,6 +180,7 @@ channel 是队列的来源渠道，source 是物化内容的展示来源，二�
 - `GET /stations?vendor=&sort=score|rate|uptime&q=`、`GET /stations/:slug`（含 offers、指标、投票汇总、当前用户投票与收藏状态）
 - `GET /posts?kind=&vendor=&station=&model=&sort=latest|hot&q=`、`GET /posts/:id`、`POST /posts`（kind、title、summary、body、stationSlug?、modelSlug?）
 - `POST /models/suggest`（slug、vendor、name、description）—— 站内补录模型，与 Agent 通道同一套字段，进同一个待审队列
+- `POST /admin/invite-codes`（note?、maxUses?、expiresAt?）、`GET /admin/invite-codes`、`POST /admin/invite-codes/:id/revoke` —— 邀请码管理，`Authorization: Bearer` 鉴权。明文只在创建响应里返回一次，库里只存 SHA-256 与前缀；`maxUses` 为 null 表示不限次数，同一账号对同一个码只核销一次
 - `PUT /votes`（targetType: post|station、targetId、value: up|down|null）返回最新汇总
 - `PUT /favorites`（targetType、targetId、favorited）
 - `GET /comments?targetType=&targetId=`、`POST /comments`（content 1~2000 字、parentId?）

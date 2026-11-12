@@ -62,6 +62,42 @@ export interface AdminBatchSubmitResponse {
 }
 
 // GET /api/admin/submissions/state。只供同步脚本比较已上线的队列站点。
+export interface InviteCode {
+  id: string;
+  codePrefix: string;
+  note: string | null;
+  /** null 表示不限次数。 */
+  maxUses: number | null;
+  usedCount: number;
+  createdAt: string;
+  expiresAt: string | null;
+  revokedAt: string | null;
+}
+
+export interface CreateInviteCodeRequest {
+  note?: string;
+  maxUses?: number | null;
+  expiresAt?: string | null;
+}
+
+export interface CreateInviteCodeResponse {
+  /** 明文只在这里返回一次，库里只有哈希。 */
+  code: string;
+  inviteCode: InviteCode;
+}
+
+export interface GetInviteCodesRequest { }
+
+export interface GetInviteCodesResponse {
+  items: InviteCode[];
+}
+
+export interface RevokeInviteCodeRequest { }
+
+export interface RevokeInviteCodeResponse {
+  inviteCode: InviteCode;
+}
+
 export interface AdminSubmissionStateResponse {
   stations: { slug: string; submissionId: string; originKey: string; url: string | null; name: string }[];
 }
@@ -383,4 +419,7 @@ export interface ApiContracts {
   getBanners: { request: GetBannersRequest; response: ApiResponse<GetBannersResponse> };
   search: { request: SearchRequest; response: ApiResponse<SearchResponse> };
   getHotSearches: { request: GetHotSearchesRequest; response: ApiResponse<GetHotSearchesResponse> };
+  createInviteCode: { request: CreateInviteCodeRequest; response: ApiResponse<CreateInviteCodeResponse> };
+  getInviteCodes: { request: GetInviteCodesRequest; response: ApiResponse<GetInviteCodesResponse> };
+  revokeInviteCode: { request: RevokeInviteCodeRequest; response: ApiResponse<RevokeInviteCodeResponse> };
 }

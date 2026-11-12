@@ -14,6 +14,7 @@ import { authorizeAdmin, adminSlug, createModel, createVendor, deleteModel, impo
 import type { Store } from './database.ts';
 import { Service } from './service.ts';
 import { ApiError, isDatabaseBusyError } from './errors.ts';
+import { createInviteCode, listInviteCodes, revokeInviteCode } from './invite-codes.ts';
 import { listPosts, reviewPost, setAccountDisabled, setCommentHidden } from './moderation.ts';
 import { autoApproveEnabled, enqueueBatch, enqueueSubmission, listSubmissions, reviewSubmission, setAutoApprove, submissionBatchReviewSchema, submissionBatchSchema, submissionQuerySchema, submissionReviewSchema, submissionState } from './submissions.ts';
 
@@ -253,6 +254,21 @@ export function buildApp(store: Store, now: () => Date, options: AppOptions = {}
     return c.json(enqueueBatch(store, { ...input, ip: clientIp(c, trustedProxies), now: now() }));
   });
   app.get('/api/admin/submissions/state', c => c.json(submissionState(store)));
+  // 邀请码管理。这套接口和别的管理接口一样走 Bearer，不在公开契约里开放给浏览器会话。
+  app.post('/api/admin/invite-codes', async c => {
+    const input = z.strictObject({
+      note: z.string().trim().max(100).optional(),
+      maxUses: z.number().int().min(1).max(10_000).nullable().optional(),
+      expiresAt: z.string().trim().min(1).max(40).nullable().optional(),
+    }).parse(await c.req.json());
+    const created = createInviteCode(store, input, now());
+    return c.json({ code: created.code, inviteCode: created.record });
+  });
+  app.get('/api/admin/invite-codes', c => c.json({ items: listInviteCodes(store) }));
+  app.post('/api/admin/invite-codes/:id/revoke', c => {
+    const { id } = z.strictObject({ id: z.string().trim().min(1).max(200) }).parse(c.req.param());
+    return c.json({ inviteCode: revokeInviteCode(store, id, now()) });
+  });
   app.get('/api/admin/settings', c => c.json({ autoApprove: autoApproveEnabled(store) }));
   app.post('/api/admin/settings', async c => {
     const { autoApprove } = z.strictObject({ autoApprove: z.boolean() }).parse(await c.req.json());

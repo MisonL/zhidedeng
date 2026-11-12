@@ -9,7 +9,7 @@ describe('API_ROUTES', () => {
       '--input-type=module', '-e',
       'import { API_ROUTES } from "@zhidedeng/shared"; console.log(Object.keys(API_ROUTES).length);',
     ], { cwd: new URL('..', import.meta.url), encoding: 'utf8' });
-    expect(output.trim()).toBe('33');
+    expect(output.trim()).toBe('36');
   });
 
   it('covers every method and path listed in docs/spec.md', () => {
@@ -19,7 +19,7 @@ describe('API_ROUTES', () => {
       .map(([, method, path]) => `${method} /api${path}`))];
     const actual = Object.values(API_ROUTES).map(({ method, path }) => `${method} ${path}`);
 
-    expect(expected).toHaveLength(33);
+    expect(expected).toHaveLength(36);
     expect(actual.sort()).toEqual(expected.sort());
   });
 });
