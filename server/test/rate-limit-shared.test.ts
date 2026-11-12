@@ -69,3 +69,26 @@ describe('限流计数跨进程共享', () => {
     expect(count()).toBe(1);
   });
 });
+
+describe('撤销必须精确到条', () => {
+  it('事务回滚后撤销不会删掉上一次成功的记录', () => {
+    const limiter = new AttemptLimiter(2, HOUR, { db }, 'agent-token');
+    // 第一次成功：预占并保留。
+    limiter.record('t', now);
+    // 第二次预占，随后事务回滚（那一行已经不存在），再执行撤销。
+    const second = limiter.record('t', now + 1000);
+    db.prepare('DELETE FROM rate_limits WHERE rowid = ?').run(second);
+    limiter.release('t', second);
+    // 第一次的记录必须还在，否则配额被无限释放。
+    expect(limiter.remaining('t', now)).toBe(1);
+  });
+
+  it('不带句柄的撤销仍退回最新一条', () => {
+    const limiter = new AttemptLimiter(2, HOUR, { db }, 'agent-token');
+    limiter.record('t', now);
+    limiter.record('t', now + 1000);
+    expect(limiter.remaining('t', now)).toBe(0);
+    limiter.release('t');
+    expect(limiter.remaining('t', now)).toBe(1);
+  });
+});

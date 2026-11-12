@@ -5,7 +5,7 @@ import type {
   AdminCreateModelRequest, AdminCreateVendorRequest, AdminDeleteModelResponse, AdminUpdateModelRequest,
   CatalogImportRequest, CatalogImportResponse, Model, Vendor,
 } from '@zhidedeng/shared';
-import type { Store } from './database.ts';
+import type { StationRecord, Store } from './database.ts';
 import { ApiError } from './errors.ts';
 
 // 通用全量导入。替换 source=submission 的集合并处理全部输入 slug，账号和互动保留。
@@ -86,14 +86,24 @@ function importCatalog(store: Store, input: CatalogImportRequest): CatalogImport
     store.db.prepare(`DELETE FROM offers WHERE stationSlug IN ${SUBMITTED_STATIONS}`).run();
     // 只清在线的：已下架的行留着，恢复接口还要用。
     // 全量导入再干净也不该把「可恢复」变成「永久没了」。
+    // 先把旧指标抄下来再删。删完再 store.get() 只会拿到 undefined，
+    // 注释里说的「沿用旧值」就变成了把可用率、首字延迟、建站时间全部清零。
+    const metrics = new Map<string, { status: StationRecord['status']; uptime: number | null; firstTokenLatencyMs: number | null; foundedAt: string | null }>();
+    for (const { offers: _offers, ...station } of stations) {
+      const previous = store.get('station', station.slug);
+      metrics.set(station.slug, {
+        status: previous?.status ?? null, uptime: previous?.uptime ?? null,
+        firstTokenLatencyMs: previous?.firstTokenLatencyMs ?? null, foundedAt: previous?.foundedAt ?? null,
+      });
+    }
     store.db.prepare(`DELETE FROM entities WHERE ${IS_SUBMISSION} AND removedAt IS NULL`).run();
     for (const { offers: _offers, ...station } of stations) {
       // 允许导入的 slug 要先替换原报价，避免残留或撞唯一约束。
       store.db.prepare('DELETE FROM offers WHERE stationSlug = ?').run(station.slug);
-      // 指标字段导入内容里没有，沿用旧值：写 null 会把可用率永久清零。
-      const previous = store.get('station', station.slug);
+      const previous = metrics.get(station.slug);
       store.put('station', station.slug, {
-        ...station, status: previous?.status ?? null, uptime: previous?.uptime ?? null,
+        ...station,
+        status: previous?.status ?? null, uptime: previous?.uptime ?? null,
         firstTokenLatencyMs: previous?.firstTokenLatencyMs ?? null, foundedAt: previous?.foundedAt ?? null,
         source: 'submission',
       });

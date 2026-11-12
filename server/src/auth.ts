@@ -139,6 +139,8 @@ export interface RateLimitStore {
  */
 export class AttemptLimiter {
   private readonly attempts = new Map<string, number[]>();
+  private readonly ids = new Map<string, number>();
+  private nextId = 1;
   private readonly max: number;
   private readonly windowMs: number;
   private readonly store?: RateLimitStore;
@@ -172,28 +174,57 @@ export class AttemptLimiter {
     return Math.max(0, this.max - this.recent(key, now).length);
   }
 
-  record(key: string, now: number) {
+  /**
+   * 记一次尝试，返回可用来精确撤销它的句柄。
+   *
+   * 句柄是必须的：早先 release() 删的是「该 key 最新一条」，而调用方通常在
+   * 一个事务回滚之后才撤销——那时本次预占已经随回滚消失，删掉的就是上一次
+   * 成功的记录，配额被无限释放。
+   */
+  record(key: string, now: number): number {
     if (this.store) {
       // 顺手清掉本桶过期的记录：没有单独清理任务，靠写入顺带回收。
       this.store.db.prepare('DELETE FROM rate_limits WHERE bucket = ? AND at <= ?').run(this.bucket, now - this.windowMs);
-      this.store.db.prepare('INSERT INTO rate_limits (bucket, key, at) VALUES (?, ?, ?)').run(this.bucket, key, now);
-      return;
+      const result = this.store.db.prepare('INSERT INTO rate_limits (bucket, key, at) VALUES (?, ?, ?)').run(this.bucket, key, now) as { lastInsertRowid: number | bigint };
+      return Number(result.lastInsertRowid);
     }
     if (this.attempts.size > 10_000) {
       for (const stale of this.attempts.keys()) if (this.recent(stale, now).length === 0) this.attempts.delete(stale);
     }
+    const entry = { id: this.nextId++, at: now };
     this.attempts.set(key, [...this.recent(key, now), now]);
+    // 内存版靠平行表记住 id，与库版的 rowid 语义对齐。
+    this.ids.set(`${key}\u0000${now}\u0000${entry.id}`, entry.id);
+    return entry.id;
   }
 
-  /** 撤销最近一次 record：预占的尝试最后没有失败时调用。 */
-  release(key: string) {
+  /**
+   * 撤销**这一次**预占。id 来自 record() 的返回值。
+   * 不带 id 时退回「删最新一条」，仅供确实没有句柄的历史调用点使用。
+   */
+  release(key: string, id?: number) {
     if (this.store) {
-      // 删最新一条，等价于内存版的 pop。
-      this.store.db.prepare('DELETE FROM rate_limits WHERE rowid = (SELECT rowid FROM rate_limits WHERE bucket = ? AND key = ? ORDER BY at DESC, rowid DESC LIMIT 1)')
-        .run(this.bucket, key);
+      if (id === undefined) {
+        this.store.db.prepare('DELETE FROM rate_limits WHERE rowid = (SELECT rowid FROM rate_limits WHERE bucket = ? AND key = ? ORDER BY at DESC, rowid DESC LIMIT 1)')
+          .run(this.bucket, key);
+        return;
+      }
+      // 按 rowid 精确删。事务回滚后这条已不存在，删除自然成为空操作——
+      // 这正是想要的：不能因为撤销而抹掉别人的计数。
+      this.store.db.prepare('DELETE FROM rate_limits WHERE rowid = ? AND bucket = ? AND key = ?').run(id, this.bucket, key);
       return;
     }
-    this.attempts.get(key)?.pop();
+    const times = this.attempts.get(key);
+    if (!times) return;
+    if (id === undefined) { times.pop(); return; }
+    // 内存版没有 rowid，用「第几条」无法还原，这里按时间戳近似：删掉等于本次 at 的最后一条。
+    const entry = [...this.ids.entries()].find(([, value]) => value === id);
+    if (!entry) return;
+    const [token] = entry;
+    const at = Number(token.split('\u0000')[1]);
+    const index = times.lastIndexOf(at);
+    if (index >= 0) times.splice(index, 1);
+    this.ids.delete(token);
   }
 
   clear(key: string) {

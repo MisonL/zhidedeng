@@ -382,12 +382,12 @@ export function buildApp(store: Store, now: () => Date, options: AppOptions = {}
     if (isWeakPassword(input.password)) throw new ApiError(400, 'WEAK_PASSWORD', '这个密码太常见了，请换一个');
     const ip = `register:${clientIp(c, trustedProxies)}`;
     refuseIfLimited(c, [registerByIp.retryAfter(ip, now().getTime())]);
-    registerByIp.record(ip, now().getTime());
+    const registerHandle = registerByIp.record(ip, now().getTime());
     const usernameKey = input.username.toLowerCase();
     const taken = () => store.db.prepare('SELECT 1 FROM accounts WHERE usernameKey = ?').get(usernameKey);
     if (taken()) throw new ApiError(409, 'USERNAME_TAKEN', '这个用户名已被注册');
     const passwordHash = await hashPassword(input.password).catch((error: unknown) => {
-      registerByIp.release(ip);
+      registerByIp.release(ip, registerHandle);
       throw error;
     });
     const handle = input.username;
@@ -410,13 +410,13 @@ export function buildApp(store: Store, now: () => Date, options: AppOptions = {}
     const time = now().getTime();
     refuseIfLimited(c, [loginByTarget.retryAfter(pair, time), loginByIp.retryAfter(ip, time), loginByUsername.retryAfter(usernameKey, time)]);
     // 在 await 之前同步预占，并发猜测看得到彼此，越不过上限。没失败时再退回。
-    loginByTarget.record(pair, time);
-    loginByIp.record(ip, time);
-    loginByUsername.record(usernameKey, time);
+    const loginTargetHandle = loginByTarget.record(pair, time);
+    const loginIpHandle = loginByIp.record(ip, time);
+    const loginUsernameHandle = loginByUsername.record(usernameKey, time);
     const refund = () => {
-      loginByTarget.release(pair);
-      loginByIp.release(ip);
-      loginByUsername.release(usernameKey);
+      loginByTarget.release(pair, loginTargetHandle);
+      loginByIp.release(ip, loginIpHandle);
+      loginByUsername.release(usernameKey, loginUsernameHandle);
     };
     const account = store.db.prepare('SELECT handle, passwordHash, disabledAt FROM accounts WHERE usernameKey = ?').get(usernameKey);
     let valid: boolean;
@@ -473,9 +473,9 @@ export function buildApp(store: Store, now: () => Date, options: AppOptions = {}
     const byIp = `agentTokenIp:${clientIp(c, trustedProxies)}`;
     refuseIfLimited(c, [agentTokenByUser.retryAfter(byUser, time.getTime()), agentTokenByIp.retryAfter(byIp, time.getTime()),
       ...(input.inviteCode === undefined ? [] : [inviteByCode.retryAfter(`invite:${input.inviteCode}`, time.getTime())])]);
-    agentTokenByUser.record(byUser, time.getTime());
-    agentTokenByIp.record(byIp, time.getTime());
-    if (input.inviteCode !== undefined) inviteByCode.record(`invite:${input.inviteCode}`, time.getTime());
+    const userHandle = agentTokenByUser.record(byUser, time.getTime());
+    const ipHandle = agentTokenByIp.record(byIp, time.getTime());
+    const inviteHandle = input.inviteCode === undefined ? undefined : inviteByCode.record(`invite:${input.inviteCode}`, time.getTime());
     try {
       return c.json(createAgentToken(store, { ...input, handle, now: time, inviteCodes: options.inviteCodes }));
     } catch (error) {
@@ -484,9 +484,9 @@ export function buildApp(store: Store, now: () => Date, options: AppOptions = {}
       // 退回等于把该接口的限流整个取消——无脑填错码就能无限打。
       // TOKEN_LIMIT 与路径无关，退回无副作用。
       if (error instanceof ApiError && (error.code === 'TOKEN_LIMIT' || (error.code === 'ELIGIBILITY_REQUIRED' && input.inviteCode === undefined))) {
-        agentTokenByUser.release(byUser);
-        agentTokenByIp.release(byIp);
-        if (input.inviteCode !== undefined) inviteByCode.release(`invite:${input.inviteCode}`);
+        agentTokenByUser.release(byUser, userHandle);
+        agentTokenByIp.release(byIp, ipHandle);
+        if (input.inviteCode !== undefined) inviteByCode.release(`invite:${input.inviteCode}`, inviteHandle);
       }
       throw error;
     }

@@ -186,8 +186,10 @@ export class AgentApi {
         { retryAfter: Math.max(...limited.map(dimension => dimension.retryAfter)) });
     }
     // 从预占到入队结束都是同步代码，没有 await；失败时撤销本次预占。
-    for (const { limiter, key } of dimensions) limiter.record(key, time);
-    return () => { for (const { limiter, key } of dimensions) limiter.release(key); };
+    // 必须记住每条预占的句柄：入队事务回滚后那几行已经不存在了，
+    // 若按「删最新一条」撤销，删掉的是上一次成功的记录，配额会被无限释放。
+    const handles = dimensions.map(({ limiter, key }) => ({ limiter, key, id: limiter.record(key, time) }));
+    return () => { for (const { limiter, key, id } of handles) limiter.release(key, id); };
   }
 
   /**
