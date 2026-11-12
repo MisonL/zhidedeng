@@ -12,7 +12,9 @@ import { mountWeb } from './static.ts';
 // 只用于本地开发；生产环境必须显式设置 DB_PATH。
 export const defaultDbPath = fileURLToPath(new URL('../data/app.db', import.meta.url));
 
-export function openDatabase(path: string) {
+/** 只读打开时跳过建目录与迁移：dry-run 之类的操作不该产生任何写入。 */
+export function openDatabase(path: string, options: { readOnly?: boolean } = {}) {
+  if (options.readOnly) return new DatabaseSync(path, { readOnly: true });
   if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   const db = new DatabaseSync(path);
   try {

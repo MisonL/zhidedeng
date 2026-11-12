@@ -112,11 +112,18 @@ describe('SKILL.md 与 CLI 一致', () => {
 
   it('配额数字与 server 常量一致（逐行比对表格，不是子串搜索）', async () => {
     const text = await skill();
-    const agentApi = await readFile(join(repoRoot, 'server/src/agent-api.ts'), 'utf8');
+    // 全站待审的熔断放在统一入队口（三个渠道共用），常量住在 submissions.ts，
+    // 其余配额仍在 agent-api.ts。按常量实际所在文件去读，别写死成同一个文件。
+    const sources = {
+      'server/src/agent-api.ts': await readFile(join(repoRoot, 'server/src/agent-api.ts'), 'utf8'),
+      'server/src/submissions.ts': await readFile(join(repoRoot, 'server/src/submissions.ts'), 'utf8'),
+    };
     const read = (name: string): number => {
-      const found = agentApi.match(new RegExp(`\\b${name}\\s*=\\s*([\\d_]+)`));
-      if (!found) throw new Error(`agent-api.ts 里没找到 ${name}`);
-      return Number(found[1]!.replace(/_/g, ''));
+      for (const [file, source] of Object.entries(sources)) {
+        const found = source.match(new RegExp(`\\b${name}\\s*=\\s*([\\d_]+)`));
+        if (found) return Number(found[1]!.replace(/_/g, ''));
+      }
+      throw new Error(`没找到常量 ${name}`);
     };
     const table = tableRows(text, '| 维度 | 上限 |');
     expect(table.length).toBeGreaterThan(0);

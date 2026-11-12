@@ -12,6 +12,7 @@
 // 任何读取失败都中止且不入队：把读取失败当成空表会生成错误的下架请求。
 import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import { realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -33,6 +34,15 @@ const PAGE_SIZE = 200;
 const MAX_PAGES = 500;
 const BATCH_SIZE = 500;
 const APPROVED = '通过';
+/**
+ * 明确表示「还没审 / 没通过」的状态。只有这些才允许静默跳过。
+ *
+ * 审核状态是人工在多维表格里选的下拉值，改选项名、多打一个空格都会让
+ * 整行落到「不等于通过」的分支——那个站点就会被计划下架，而 skipped 仍是 0、
+ * 日志里只有一行混在正常条目里的 [下架]，几乎发现不了。
+ * 所以不在这份名单里的非空值一律当作数据异常，计入 skipped 交给闸门处理。
+ */
+const REJECTED_STATUSES = new Set(['未审核', '待审核', '不通过', '未通过', '已拒绝', '拒绝']);
 const REQUIRED_COLUMNS = ['中转站名称', '网址', '提交类型', '审核状态', '提交时间'];
 const REVIEW_TYPES = new Set(['使用评价', '避坑反馈']);
 const SUBMISSION_TYPES = new Set(['推荐新站', '更新信息', ...REVIEW_TYPES]);
@@ -236,7 +246,23 @@ export function buildBatch(records: RawRecord[], models: SiteModel[]) {
 
   const submissions: Submission[] = [];
   for (const record of records) {
-    if (cellText(record.fields['审核状态']) !== APPROVED) continue;
+    // cleanLine 会 trim 并收敛内部空白：表格里常见的「通过 」尾空格不该等同于未通过。
+    // 判成未通过会把这个站点计划下架，而人工多打一个空格显然不是那个意思。
+    const rawStatus = record.fields['审核状态'];
+    // 多值单元格不猜：既可能是误操作选了「通过+拒绝」，也可能是列配置错了。
+    // 猜通过会放出被拒内容，猜未通过会下架在线站点，两种都不该由脚本决定。
+    if (Array.isArray(rawStatus) && rawStatus.length > 1) {
+      skipped.push(`${record.recordId}：审核状态是多值（${rawStatus.map(item => cellText(item)).join('/')}），无法判定`);
+      continue;
+    }
+    const status = cleanLine(cellText(Array.isArray(rawStatus) ? rawStatus[0] : rawStatus), 20);
+    if (status !== APPROVED) {
+      if (status === '' || REJECTED_STATUSES.has(status)) continue;
+      // 既不是通过、也不是已知的未通过值：多半是选项被改名或多打了字。
+      // 当成未通过会静默下架这个站点，所以记进 skipped，由既有闸门拦住整批。
+      skipped.push(`${record.recordId}：审核状态「${status}」无法识别，可能是表格选项被改名`);
+      continue;
+    }
     const parsed = parseSubmission(record, modelIndex, notes);
     if (typeof parsed === 'string') skipped.push(`${record.recordId}：${parsed}`);
     else submissions.push(parsed);
@@ -379,15 +405,21 @@ export async function collectPages(fetchPage: (offset: number) => Promise<{ reco
     // 服务端若把 limit 截断成更小的值（或返回比请求少的行），第一页就 break，
     // 解析失败数为 0、有效站点数 > 0，两道闸门都不触发，
     // 而 planBatch 会把第一页之外的全部站点计划下架。
-    if (page.records.length === 0) break;
+    // 空页但服务端说还有下一页，是自相矛盾的响应。信「没有更多」结束掉，
+    // 剩下没读到的站点就会被当成已删除——宁可中止。
+    if (page.records.length === 0) {
+      if (page.hasMore === true) throw new Error('返回空页但 has_more 为 true，分页结果自相矛盾，中止同步');
+      break;
+    }
     if (page.hasMore !== null) {
       if (!page.hasMore) break;
       continue;
     }
+    // 拿不到 has_more 又遇到短页：无法区分「表格本来就不足一页」和「服务端把 limit 截断了」。
+    // 前者只可能出现在第一页，但第一页也可能正是被截断的那页（20 个站点、首页只回 12 行），
+    // 信任它会让剩下 8 个站点被判成已删除，而两道闸门都拦不住（有效站点数非 0、也没掉一半）。
+    // 所以一律中止：少同步一次可以补，误下架是事故。
     if (page.records.length < PAGE_SIZE) {
-      // 拿不到 has_more 且本页没满：只在第一页就遇到短页时信任它（表格本来就不足一页），
-      // 否则说明分页被截断，中止比猜安全。
-      if (records.length === page.records.length) break;
       throw new Error(`分页结果不完整：本页 ${page.records.length} 行，请求上限 ${PAGE_SIZE} 行，且返回里没有 has_more。中止同步`);
     }
   }
@@ -503,7 +535,10 @@ async function main(dryRun: boolean, allowSkipped: boolean, allowRemoval: boolea
   if (failed.length > 0) throw new Error(`批次 ${result.batchId} 有 ${failed.length} 条入队失败`);
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+// 两边都 realpath 再比：import.meta.url 会 realpath 并做 percent-encoding，
+// 而 resolve() 只做词法归一。macOS 的 /tmp、包装脚本用的软链、含空格或中文的
+// 目录都会让两者失配，脚本随即静默空转并退出 0——cron 那边看到的是「成功」。
+if (process.argv[1] && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url))) {
   const dryRun = process.argv.includes('--dry-run');
   const allowSkipped = process.argv.includes('--allow-skipped');
   // 默认自动下架；--no-removal 只同步新增和更新。

@@ -1006,3 +1006,42 @@ describe('重跑的幂等', () => {
     expect(again.results[0].id).not.toBe(first.results[0].id);
   });
 });
+
+describe('全站待审熔断', () => {
+  const pending = () => Number(server.db.prepare("SELECT count(*) AS c FROM submissions WHERE status = 'pending'").get()!.c);
+  const fillTo = (count: number) => {
+    for (let index = 0; index < count; index += 1) {
+      server.db.prepare(`INSERT INTO submissions (id, kind, channel, originKey, action, autoApproved, payload, payloadHash, ip, status, createdAt)
+        VALUES (?, 'station', 'web', ?, 'upsert', 0, '{}', ?, '1.2.3.4', 'pending', ?)`)
+        .run(`fill-${index}`, `fill-${index}.example.com`, `hash-${index}`, new Date().toISOString());
+    }
+  };
+
+  it('队列满时站内发帖也拒绝，不能只挡住 Agent 通道', async () => {
+    // 只挡 Agent 时，web 通道照样能把队列灌满，Agent 投稿被 409 卡死，
+    // 而灌满它的成本只是十来个免费账号。这里直接入队验证 web 也受同一个闸门约束。
+    fillTo(200);
+    expect(pending()).toBe(200);
+    expect(() => enqueueSubmission(store, {
+      kind: 'post', channel: 'web', originKey: 'blocked-post', ip: '1.2.3.4', now: new Date(),
+      actorHandle: 'someone',
+      payload: { kind: 'guide', title: '标题', summary: '摘要', body: '正文' },
+    })).toThrow(/全局待审队列已达 200 条/);
+  });
+
+  it('Agent 通道同样被拦住', async () => {
+    fillTo(200);
+    expect(() => enqueueSubmission(store, {
+      kind: 'station', channel: 'agent', originKey: 'blocked.example.com', ip: '1.2.3.4', now: new Date(),
+      payload: { name: '站', description: 'd', url: 'https://blocked.example.com/', rechargeThreshold: null, paymentMethods: [], offers: [] },
+    })).toThrow(/全局待审队列已达 200 条/);
+  });
+
+  it('管理端批次不受熔断影响：一次飞书全量导入天然会超过 200 条', async () => {
+    fillTo(199);
+    const items = Array.from({ length: 5 }, (_, index) => stationItem(`bulk-${index}.example.com`));
+    const result = await submit(items, 'bulk-over-limit');
+    expect(result.results).toHaveLength(5);
+    expect(result.results.every(item => item.status === 'pending')).toBe(true);
+  });
+});

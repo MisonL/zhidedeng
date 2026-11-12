@@ -130,6 +130,11 @@ export function setAutoApprove(store: Store, enabled: boolean, now: Date): boole
   });
 }
 
+/** 全站待审队列上限。放在统一入队口，三个渠道共用：
+ *  只挡住 agent 通道时，web 通道照样能把队列灌满，Agent 投稿被 409 卡死，
+ *  而灌满它的成本只是十来个免费账号。 */
+export const GLOBAL_PENDING = 200;
+
 /**
  * 入队。开启自动通过时只直接物化 upsert，下架始终等待人工审核；
  * 校验不通过则不入队也不上站，直接 400，不会留下需要清理的脏记录。
@@ -146,6 +151,12 @@ export function enqueueSubmission(store: Store, input: {
   now: Date;
 }, options: {
   pendingOnly?: boolean;
+  /**
+   * 是否套用全站待审熔断。默认套用。
+   * 管理端批次（飞书全量导入）必须显式关掉：一次同步就可能超过 200 条，
+   * 而它本身已是受信通道，不应该被面向用户自助投稿的闸门拦住。
+   */
+  globalPendingBreaker?: boolean;
   deduplicateByActor?: boolean;
   // 在查重之后、插入之前执行，复用本函数的 BEGIN IMMEDIATE，不能另开事务。
   beforeInsert?: () => void;
@@ -227,6 +238,13 @@ export function enqueueSubmission(store: Store, input: {
       return { submission, deduplicated: true, autoApproved: false };
     }
     options.beforeInsert?.();
+    // 全站熔断：与渠道无关。放在幂等判定之后，重复提交不该被这里挡住。
+    if (options.globalPendingBreaker !== false) {
+      const pending = Number(store.db.prepare("SELECT count(*) AS count FROM submissions WHERE status = 'pending'").get()!.count);
+      if (pending >= GLOBAL_PENDING) {
+        throw new ApiError(409, 'TOO_MANY_PENDING', `全局待审队列已达 ${GLOBAL_PENDING} 条，暂停接收新投稿`);
+      }
+    }
     const submission: SubmissionRecord = {
       id: randomUUID(), kind: validated.kind, channel: validated.channel, originKey,
       batchId: validated.batchId ?? null, action: validated.action,
@@ -278,7 +296,8 @@ export function enqueueBatch(store: Store, input: AdminBatchSubmitRequest & { ip
   const results: AdminBatchSubmitResponse['results'] = batch.items.map(item => {
     try {
       validatePayload(store, item.kind, item.payload, item.action ?? 'upsert', batch.channel);
-      const { submission, deduplicated, autoApproved } = enqueueSubmission(store, { ...item, batchId, channel: batch.channel, ip: input.ip, now: input.now });
+      // 管理端批次是受信通道，且一次同步天然会超过 200 条，不套用户侧的熔断。
+      const { submission, deduplicated, autoApproved } = enqueueSubmission(store, { ...item, batchId, channel: batch.channel, ip: input.ip, now: input.now }, { globalPendingBreaker: false });
       // 返回请求里的 key 以便逐条对账；记录里的站点 key 已由服务端规范化。
       return { originKey: item.originKey, kind: item.kind, id: submission.id, status: submission.status, deduplicated, autoApproved };
     } catch (error) {

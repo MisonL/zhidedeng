@@ -178,6 +178,13 @@ export function buildApp(store: Store, now: () => Date, options: AppOptions = {}
     return c.json({ error: { code: 'INTERNAL_ERROR', message: '服务暂时不可用' } }, 500);
   });
 
+  const tooLarge = () => { throw new ApiError(413, 'PAYLOAD_TOO_LARGE', '请求体过大'); };
+  const apiBodyLimit = bodyLimit({ maxSize: API_BODY_BYTES, onError: tooLarge });
+  const importBodyLimit = bodyLimit({ maxSize: IMPORT_BODY_BYTES, onError: tooLarge });
+  // 体积闸门必须排在 Content-Type 闸门之前：bodyLimit 只看 Content-Length、不读流，
+  // 而下面的闸门一旦读流，超大请求就会先被完整读进内存，限制形同虚设。
+  app.use('/api/*', (c, next) => ([IMPORT_PATH, SUBMISSION_BATCH_PATH].includes(c.req.path) ? importBodyLimit : apiBodyLimit)(c, next));
+
   // 跨站表单发不出 application/json，配合 SameSite=Lax 防 CSRF。
   // 带请求体的写接口必须有这个头；不带请求体的（DELETE、restore）允许没有，
   // 否则调用方按直觉发的 DELETE 会被拒，报错还指向一个它根本没打算发的正文。
@@ -185,15 +192,14 @@ export function buildApp(store: Store, now: () => Date, options: AppOptions = {}
     const method = c.req.method;
     if (['GET', 'HEAD', 'OPTIONS'].includes(method)) return next();
     if (/^application\/json\b/i.test(c.req.header('content-type') ?? '')) return next();
-    const hasBody = method !== 'DELETE' && Boolean(await c.req.raw.text().catch(() => ''));
+    // 用 Hono 的 c.req.text() 而不是 c.req.raw.text()：前者会缓存结果，
+    // handler 再读时命中缓存，不会二次消费流（raw.text() 会抛 ERR_INVALID_STATE）。
+    // bodyLimit 已在前一步按 Content-Length 拦过大请求，这里读进内存是安全的。
+    // 必须按内容判断而不是只看头部：只看头会让不带长度头的传输路径绕过 CSRF 防线。
+    const hasBody = method !== 'DELETE' && Boolean(await c.req.text().catch(() => ''));
     if (hasBody) throw new ApiError(415, 'UNSUPPORTED_MEDIA_TYPE', '写接口要求 Content-Type: application/json');
     await next();
   });
-
-  const tooLarge = () => { throw new ApiError(413, 'PAYLOAD_TOO_LARGE', '请求体过大'); };
-  const apiBodyLimit = bodyLimit({ maxSize: API_BODY_BYTES, onError: tooLarge });
-  const importBodyLimit = bodyLimit({ maxSize: IMPORT_BODY_BYTES, onError: tooLarge });
-  app.use('/api/*', (c, next) => ([IMPORT_PATH, SUBMISSION_BATCH_PATH].includes(c.req.path) ? importBodyLimit : apiBodyLimit)(c, next));
 
   app.get('/api/health', c => {
     store.db.prepare('SELECT 1').get();
@@ -247,7 +253,8 @@ export function buildApp(store: Store, now: () => Date, options: AppOptions = {}
       payload: z.unknown(),
       actorHandle: z.string().trim().max(200).nullish(),
     }).parse(await c.req.json());
-    return c.json(enqueueSubmission(store, { ...input, ip: clientIp(c, trustedProxies), now: now() }));
+    // 管理端手动入队，受信通道，不套用户侧熔断。
+    return c.json(enqueueSubmission(store, { ...input, ip: clientIp(c, trustedProxies), now: now() }, { globalPendingBreaker: false }));
   });
   app.post(SUBMISSION_BATCH_PATH, async c => {
     const input = submissionBatchSchema.parse(await c.req.json());
@@ -472,8 +479,11 @@ export function buildApp(store: Store, now: () => Date, options: AppOptions = {}
     try {
       return c.json(createAgentToken(store, { ...input, handle, now: time, inviteCodes: options.inviteCodes }));
     } catch (error) {
-      // 准入没通过就退回计数，避免失败尝试把合法用户挡在门外。
-      if (error instanceof ApiError && (error.code === 'ELIGIBILITY_REQUIRED' || error.code === 'TOKEN_LIMIT')) {
+      // 准入没通过且**没填邀请码**时退回计数：那多半是注册不满 7 天的合法用户在等，
+      // 不该把失败尝试算进配额。带码失败（无效/过期/用尽/吊销）正是要限的滥用路径，
+      // 退回等于把该接口的限流整个取消——无脑填错码就能无限打。
+      // TOKEN_LIMIT 与路径无关，退回无副作用。
+      if (error instanceof ApiError && (error.code === 'TOKEN_LIMIT' || (error.code === 'ELIGIBILITY_REQUIRED' && input.inviteCode === undefined))) {
         agentTokenByUser.release(byUser);
         agentTokenByIp.release(byIp);
         if (input.inviteCode !== undefined) inviteByCode.release(`invite:${input.inviteCode}`);

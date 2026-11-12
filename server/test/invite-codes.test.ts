@@ -90,12 +90,33 @@ describe('用邀请码满足准入', () => {
     expect((await issueToken(cookie, body.code!)).status).toBe(200);
   });
 
-  it('次数用完后拒绝，且报错说明是用完而不是无效', async () => {
+  it('次数用完后拒绝', async () => {
     const { body } = await issueCode({ maxUses: 1 });
     expect((await issueToken(freshAccount('First'), body.code!)).status).toBe(200);
     const second = await issueToken(freshAccount('Second'), body.code!);
     expect(second.status).toBe(403);
-    expect(second.body.error!.message).toContain('次数已用完');
+    expect(second.body.error!.code).toBe('ELIGIBILITY_REQUIRED');
+  });
+
+  it('四种失败原因的文案完全一致，不泄漏码是否存在', async () => {
+    // 区分「无效/吊销/过期/用完」等于给外部一个存在性预言机，可用来暴力枚举。
+    const messages = new Set<string>();
+    const revoked = await issueCode({ maxUses: 5 });
+    await admin().request('/api/admin/invite-codes/' + revoked.body.inviteCode!.id + '/revoke', {
+      method: 'POST', headers: { ...json, authorization: 'Bearer ' + ADMIN }, body: '{}',
+    });
+    messages.add((await issueToken(freshAccount('M1'), revoked.body.code!)).body.error!.message);
+
+    const expiring = await issueCode({ expiresAt: new Date(clock.getTime() + DAY_MS).toISOString() });
+    clock = new Date(clock.getTime() + 2 * DAY_MS);
+    messages.add((await issueToken(freshAccount('M2'), expiring.body.code!)).body.error!.message);
+
+    const used = await issueCode({ maxUses: 1 });
+    await issueToken(freshAccount('M3'), used.body.code!);
+    messages.add((await issueToken(freshAccount('M4'), used.body.code!)).body.error!.message);
+
+    messages.add((await issueToken(freshAccount('M5'), 'zdi_nonexistent')).body.error!.message);
+    expect(messages.size).toBe(1);
   });
 
   it('同一账号重复用同一个码不会把次数耗光', async () => {
@@ -116,7 +137,7 @@ describe('用邀请码满足准入', () => {
     });
     const result = await issueToken(freshAccount('AfterRevoke'), body.code!);
     expect(result.status).toBe(403);
-    expect(result.body.error!.message).toContain('吊销');
+    expect(result.body.error!.code).toBe('ELIGIBILITY_REQUIRED');
   });
 
   it('过期后拒绝', async () => {
@@ -124,13 +145,13 @@ describe('用邀请码满足准入', () => {
     clock = new Date(clock.getTime() + 2 * DAY_MS);
     const result = await issueToken(freshAccount('AfterExpiry'), body.code!);
     expect(result.status).toBe(403);
-    expect(result.body.error!.message).toContain('过期');
+    expect(result.body.error!.code).toBe('ELIGIBILITY_REQUIRED');
   });
 
   it('不存在的码报无效', async () => {
     const result = await issueToken(freshAccount('Bogus'), 'zdi_not-a-real-code');
     expect(result.status).toBe(403);
-    expect(result.body.error!.message).toContain('无效');
+    expect(result.body.error!.code).toBe('ELIGIBILITY_REQUIRED');
   });
 
   it('签发失败不消耗次数', async () => {

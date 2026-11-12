@@ -100,13 +100,11 @@ export function redeemInviteCode(store: Store, code: string, handle: string, now
   return true;
 }
 
-const PROBLEM_TEXT: Record<string, string> = {
-  'not-found': '邀请码无效',
-  revoked: '邀请码已被吊销',
-  expired: '邀请码已过期',
-  exhausted: '邀请码使用次数已用完',
-};
-
-export function inviteCodeError(problem: NonNullable<ReturnType<typeof inviteCodeProblem>>): ApiError {
-  return new ApiError(403, 'ELIGIBILITY_REQUIRED', `${PROBLEM_TEXT[problem]}，请向发放者确认，或等待注册满 7 天、完成至少一篇审核通过的投稿`);
+/**
+ * 文案刻意统一：区分「无效/已吊销/已过期/已用完」等于给外部一个
+ * 「这个码存在吗」的预言机，可被用来暴力枚举。列出具体原因是为了
+ * 运营自己判断，这里不需要——统一成一句即可。
+ */
+export function inviteCodeError(): ApiError {
+  return new ApiError(403, 'ELIGIBILITY_REQUIRED', '邀请码无效或已不可用，请向发放者确认，或等待注册满 7 天、完成至少一篇审核通过的投稿');
 }

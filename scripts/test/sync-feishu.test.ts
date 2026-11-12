@@ -81,9 +81,11 @@ describe('buildBatch', () => {
     expect(stationItems(payload).every(item => !('slug' in item.payload))).toBe(true);
   });
 
-  it('只同步严格等于「通过」的记录', () => {
+  it('只同步审核通过的记录', () => {
     const text = JSON.stringify(result().payload);
-    for (const name of ['pending', 'rejected', 'blank', 'space', 'multi']) expect(text).not.toContain(`${name}.example`);
+    // 脏状态（尾空格、多值、陌生值）在「审核状态漂移」一节单独覆盖，
+    // 共享 fixture 只保留干净形态，避免这些用例被脏数据牵连。
+    for (const name of ['pending', 'rejected', 'blank']) expect(text).not.toContain(`${name}.example`);
     expect(text).not.toContain('待审内容');
   });
 
@@ -669,7 +671,50 @@ describe('分页边界', () => {
   });
 
   it('空页直接结束', async () => {
-    const records = await collectPages(async () => page([], true));
+    const records = await collectPages(async () => page([], false));
     expect(records).toHaveLength(0);
+  });
+
+  it('空页却说还有下一页时抛错，不把剩余站点当成已删除', async () => {
+    await expect(collectPages(async () => page([], true))).rejects.toThrow(/自相矛盾/);
+  });
+});
+
+describe('审核状态漂移', () => {
+  // 这些记录刻意不进共享 fixture：每条 CLI 级测试都会读 fixture，
+  // 脏数据会让它们的 skipped 计数与站点清单全部失真。
+  const record = (index: number, status: unknown) => ({
+    recordId: `r${index}`,
+    fields: {
+      '中转站名称': `站${index}`, '网址': `https://s${index}.example.com/`,
+      '提交类型': '推荐新站', '审核状态': status, '提交时间': '2026-11-01 10:00:00',
+    },
+  });
+
+  it('尾空格不算未通过：判未通过会静默下架在线站点', () => {
+    const batch = buildBatch([record(0, '通过 '), record(1, ' 通过')], []);
+    expect(batch.validStations).toBe(2);
+    expect(batch.skipped).toEqual([]);
+  });
+
+  it('已知的未通过状态正常跳过，不报异常', () => {
+    const batch = buildBatch([record(0, '待审核'), record(1, '不通过'), record(2, '')], []);
+    expect(batch.validStations).toBe(0);
+    expect(batch.skipped).toEqual([]);
+  });
+
+  it('陌生的状态值计入 skipped，触发闸门而不是静默下架', () => {
+    // 「已通过」是选项改名的典型结果：不拦就会把该站点计划下架。
+    const batch = buildBatch([record(0, '通过'), record(1, '已通过')], []);
+    expect(batch.validStations).toBe(1);
+    expect(batch.skipped).toHaveLength(1);
+    expect(batch.skipped[0]).toContain('无法识别');
+  });
+
+  it('多值状态无法判定，两种猜测都不该由脚本做', () => {
+    const batch = buildBatch([record(0, ['通过', '拒绝'])], []);
+    expect(batch.validStations).toBe(0);
+    expect(batch.skipped).toHaveLength(1);
+    expect(batch.skipped[0]).toContain('多值');
   });
 });

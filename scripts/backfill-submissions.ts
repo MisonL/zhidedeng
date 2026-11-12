@@ -1,4 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { existsSync, realpathSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { openDatabase, openStore } from '../server/src/node-app.ts';
 import { feishuHostnameKey } from '@zhidedeng/shared';
 import { hostnameOf, stationSchema } from '../server/src/submissions.ts';
@@ -113,7 +115,11 @@ export async function main(argv: readonly string[]): Promise<number> {
   const apply = argv.includes('--apply');
   const dbPath = argv.find(arg => arg.startsWith('--db='))?.slice(5) ?? process.env.DB_PATH;
   if (!dbPath) throw new Error('需要 --db=<路径> 或环境变量 DB_PATH');
-  const db = openDatabase(dbPath);
+  // 库不存在就报错，绝不新建：--db 拼错时 openDatabase 会造一个空库，
+  // 然后如实报告「待回填 0 条」并退出 0，运维会以为回填完成。
+  // dry-run 还要求只读打开，保证它真的不产生任何文件与写操作。
+  if (!existsSync(dbPath)) throw new Error(`数据库不存在：${dbPath}`);
+  const db = apply ? openDatabase(dbPath) : openDatabase(dbPath, { readOnly: true });
   try {
     const store = openStore(db);
     const result = planBackfill(store);
@@ -132,7 +138,8 @@ export async function main(argv: readonly string[]): Promise<number> {
   }
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+// 与 sync-feishu 同样的问题：手拼 file:// 不处理空格与中文，且不 realpath。
+if (process.argv[1] && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url))) {
   main(process.argv.slice(2)).then(code => process.exit(code)).catch(error => {
     console.error(error instanceof Error ? error.message : String(error));
     process.exit(1);

@@ -33,7 +33,7 @@ function requireEligibility(store: Store, handle: string, now: Date, inviteCode:
     if (inviteCodeRedeemedBy(store, inviteCode, handle)) return;
     const problem = inviteCodeProblem(store, inviteCode, now);
     if (problem === null) return;
-    throw inviteCodeError(problem);
+    throw inviteCodeError();
   }
   throw new ApiError(403, 'ELIGIBILITY_REQUIRED', '账号注册未满 7 天或缺少有效注册时间，且没有通过的非演示投稿；请等待注册满 7 天、完成至少一篇审核通过的投稿，或填写有效邀请码');
 }

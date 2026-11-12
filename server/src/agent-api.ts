@@ -7,7 +7,9 @@ import { activeAgentHandle } from './agent-auth.ts';
 import { AttemptLimiter } from './auth.ts';
 import type { Store } from './database.ts';
 import { ApiError } from './errors.ts';
-import { enqueueSubmission, parseStationPayload, parseSubmissionInput, postSchema, stationSchema } from './submissions.ts';
+import {
+  enqueueSubmission, GLOBAL_PENDING, parseStationPayload, parseSubmissionInput, postSchema, stationSchema,
+} from './submissions.ts';
 
 const HOUR_MS = 3_600_000;
 const TOKEN_PER_HOUR = 10;
@@ -15,7 +17,6 @@ const ACCOUNT_PER_HOUR = 20;
 const IP_PER_HOUR = 20;
 const ACCOUNT_PENDING = 5;
 const HOSTNAME_PENDING = 2;
-const GLOBAL_PENDING = 200;
 // 幂等命中单独记一个宽松额度。重试不该把 Agent 的常规额度吃光，
 // 但无脑重放同一个请求同样要能被限住。
 const DEDUPE_PER_HOUR = 100;
@@ -221,9 +222,6 @@ export class AgentApi {
           }
           if (hostname !== null && this.hostnameCount(hostname) >= HOSTNAME_PENDING) {
             throw new ApiError(409, 'TOO_MANY_PENDING', `单 hostname ${hostname} 的待审投稿已达 ${HOSTNAME_PENDING} 条，请等待审核`);
-          }
-          if (this.pendingCount() >= GLOBAL_PENDING) {
-            throw new ApiError(409, 'TOO_MANY_PENDING', `全局待审队列已达 ${GLOBAL_PENDING} 条，暂停接收新投稿`);
           }
           release = this.reserve(request);
         },
