@@ -69,5 +69,5 @@ export function createApp(options: { dbPath?: string; now?: () => Date; syncToke
   const cookieSecure = options.secureCookie ?? (production && process.env.TLS_ENABLED === '1');
   const app = buildApp(store, now, { secureCookie: cookieSecure, syncToken: usable, inviteCodes, trustedProxies });
   if (options.webRoot) mountWeb(app, options.webRoot);
-  return { app, db };
+  return { app, db, store };
 }

@@ -3,6 +3,9 @@ import { createApp } from '../src/node-app.ts';
 import { isTrustedProxy } from '../src/app.ts';
 
 const json = { 'content-type': 'application/json' };
+// 复用 auth.test.ts 的约定。之前这里写了一个大小写+数字+符号的字面量，
+// 被 GitGuardian 当成真实口令告警——测试夹具不该长得像真凭据。
+const PASSWORD = 'correct-horse-battery';
 let clock: Date;
 
 beforeEach(() => { clock = new Date('2026-11-06T01:00:00Z'); });
@@ -98,7 +101,7 @@ describe('cookie 的 Secure 标记', () => {
     const response = await server.app.request('/api/auth/register', {
       method: 'POST',
       headers: { ...json, ...headers },
-      body: JSON.stringify({ username: 'cookieuser', password: 'correct-horse-battery' }),
+      body: JSON.stringify({ username: 'cookieuser', password: PASSWORD }),
     }, { incoming: { socket: { remoteAddress: '172.17.0.1' } } });
     return response.headers.get('set-cookie') ?? '';
   };
@@ -118,7 +121,7 @@ describe('cookie 的 Secure 标记', () => {
     const response = await server.app.request('/api/auth/register', {
       method: 'POST',
       headers: { ...json, 'x-forwarded-proto': 'https' },
-      body: JSON.stringify({ username: 'untrusted', password: 'correct-horse-battery' }),
+      body: JSON.stringify({ username: 'untrusted', password: PASSWORD }),
     }, { incoming: { socket: { remoteAddress: '203.0.113.7' } } });
     // 直连方不在可信网段，X-Forwarded-Proto 不被采信。
     expect(response.headers.get('set-cookie') ?? '').not.toContain('Secure');
