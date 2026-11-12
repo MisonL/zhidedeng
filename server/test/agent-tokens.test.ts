@@ -332,16 +332,18 @@ describe('会话鉴权与请求边界', () => {
     expect(count()).toBe(0);
   });
 
-  it('无效 JSON 返回 400，写接口保持 application/json 防 CSRF', async () => {
+  it('无效 JSON 返回 400，带正文的写接口保持 application/json 防 CSRF', async () => {
     const cookie = account();
     const invalid = await server.app.request(PATH, { method: 'POST', headers: { ...json, cookie }, body: '{' });
     expect(invalid.status).toBe(400);
-    for (const method of ['POST', 'DELETE']) {
-      const response = await server.app.request(method === 'POST' ? PATH : PATH + '/missing', {
-        method, headers: { cookie, 'content-type': 'text/plain' }, body: '{}',
-      });
-      expect(response.status).toBe(415);
-    }
+    // POST 带 JSON 正文却用错媒体类型 → 415（防跨站表单）。
+    const post = await server.app.request(PATH, {
+      method: 'POST', headers: { cookie, 'content-type': 'text/plain' }, body: '{}',
+    });
+    expect(post.status).toBe(415);
+    // DELETE 没有正文，不带 Content-Type 应该放行（否则按直觉发的 DELETE 会被拒）。
+    const del = await server.app.request(PATH + '/missing', { method: 'DELETE', headers: { cookie } });
+    expect(del.status).toBe(404);
     expect(count()).toBe(0);
   });
 });

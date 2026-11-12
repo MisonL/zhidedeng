@@ -58,6 +58,13 @@ export interface AppOptions {
   // 导入和管理接口的 Bearer 密钥；未配置时这些接口一律拒绝。
   syncToken?: string;
   inviteCodes?: readonly string[];
+  /**
+   * 额外信任的反向代理地址（逗号分隔的 IP 或 CIDR）。
+   * 默认只信回环——直连方是 nginx 时才用 X-Forwarded-For。
+   * 容器部署时请求从 Docker 网桥（如 172.17.0.1）进来，不配这个就会让
+   * 所有用户的 IP 限流落进同一个桶。
+   */
+  trustedProxies?: string;
 }
 
 interface Bindings {
@@ -78,15 +85,50 @@ export function normalizeIp(ip: string) {
   return `${groups.slice(0, 4).map(group => group.replace(/^0+(?=.)/, '')).join(':')}::/64`;
 }
 
-/** 只监听本机，直连方是 nginx 时才信任它写入的 X-Forwarded-For；其他情况用直连地址。 */
-function clientIp(c: AppContext) {
+function ipv4ToInt(value: string): number | null {
+  const parts = value.split('.');
+  if (parts.length !== 4) return null;
+  let result = 0;
+  for (const part of parts) {
+    const byte = Number(part);
+    if (!Number.isInteger(byte) || byte < 0 || byte > 255) return null;
+    result = result * 256 + byte;
+  }
+  return result;
+}
+
+/** 判断直连方是否属于可信反代网段。只处理 IPv4 的 IP 与 CIDR，够覆盖容器与常见反代。 */
+export function isTrustedProxy(remote: string | undefined, trusted: string): boolean {
+  if (!remote) return false;
+  if (remote === '127.0.0.1' || remote === '::1' || remote === '::ffff:127.0.0.1') return true;
+  const address = remote.startsWith('::ffff:') ? remote.slice(7) : remote;
+  const target = ipv4ToInt(address);
+  if (target === null) return false;
+  for (const raw of trusted.split(',')) {
+    const entry = raw.trim();
+    if (!entry) continue;
+    const [base, bitsText] = entry.split('/');
+    const bits = bitsText === undefined ? 32 : Number(bitsText);
+    if (!Number.isInteger(bits) || bits < 0 || bits > 32) continue;
+    const network = ipv4ToInt(base ?? '');
+    if (network === null) continue;
+    // 前缀比较：掩掉低位后相等，说明在同一个网络里。
+    const mask = bits === 0 ? 0 : (0xffffffff << (32 - bits)) >>> 0;
+    if (((network & mask) >>> 0) === ((target & mask) >>> 0)) return true;
+  }
+  return false;
+}
+
+/** 直连方是可信反代时才用 X-Forwarded-For；其他情况用直连地址，避免被伪造头绕过限流。 */
+function clientIp(c: AppContext, trustedProxies: string) {
   const remote = c.env?.incoming?.socket.remoteAddress;
-  const fromProxy = remote === '127.0.0.1' || remote === '::1' || remote === '::ffff:127.0.0.1';
+  const fromProxy = isTrustedProxy(remote, trustedProxies);
   return normalizeIp((fromProxy ? c.req.header('x-forwarded-for')?.split(',').at(-1)?.trim() : undefined) ?? remote ?? 'unknown');
 }
 
 export function buildApp(store: Store, now: () => Date, options: AppOptions = {}) {
   const secure = options.secureCookie ?? false;
+  const trustedProxies = options.trustedProxies ?? '';
   const loginByTarget = new AttemptLimiter(5, LOGIN_WINDOW_MS);
   const loginByIp = new AttemptLimiter(30, LOGIN_WINDOW_MS);
   // 不随 IP 变化：防多个 IP 轮流猜同一账号。代价是别人可以把某个账号暂时挡在登录外。
@@ -115,10 +157,14 @@ export function buildApp(store: Store, now: () => Date, options: AppOptions = {}
   });
 
   // 跨站表单发不出 application/json，配合 SameSite=Lax 防 CSRF。
+  // 带请求体的写接口必须有这个头；不带请求体的（DELETE、restore）允许没有，
+  // 否则调用方按直觉发的 DELETE 会被拒，报错还指向一个它根本没打算发的正文。
   app.use('/api/*', async (c, next) => {
-    if (!['GET', 'HEAD', 'OPTIONS'].includes(c.req.method) && !/^application\/json\b/i.test(c.req.header('content-type') ?? '')) {
-      throw new ApiError(415, 'UNSUPPORTED_MEDIA_TYPE', '写接口要求 Content-Type: application/json');
-    }
+    const method = c.req.method;
+    if (['GET', 'HEAD', 'OPTIONS'].includes(method)) return next();
+    if (/^application\/json\b/i.test(c.req.header('content-type') ?? '')) return next();
+    const hasBody = method !== 'DELETE' && Boolean(await c.req.raw.text().catch(() => ''));
+    if (hasBody) throw new ApiError(415, 'UNSUPPORTED_MEDIA_TYPE', '写接口要求 Content-Type: application/json');
     await next();
   });
 
@@ -179,11 +225,11 @@ export function buildApp(store: Store, now: () => Date, options: AppOptions = {}
       payload: z.unknown(),
       actorHandle: z.string().trim().max(200).nullish(),
     }).parse(await c.req.json());
-    return c.json(enqueueSubmission(store, { ...input, ip: clientIp(c), now: now() }));
+    return c.json(enqueueSubmission(store, { ...input, ip: clientIp(c, trustedProxies), now: now() }));
   });
   app.post(SUBMISSION_BATCH_PATH, async c => {
     const input = submissionBatchSchema.parse(await c.req.json());
-    return c.json(enqueueBatch(store, { ...input, ip: clientIp(c), now: now() }));
+    return c.json(enqueueBatch(store, { ...input, ip: clientIp(c, trustedProxies), now: now() }));
   });
   app.get('/api/admin/submissions/state', c => c.json(submissionState(store)));
   app.get('/api/admin/settings', c => c.json({ autoApprove: autoApproveEnabled(store) }));
@@ -255,7 +301,7 @@ export function buildApp(store: Store, now: () => Date, options: AppOptions = {}
       if (!handle && (method !== 'GET' || PERSONAL_READS.has(name))) throw new ApiError(401, 'UNAUTHENTICATED', '请先登录');
       const body = method === 'GET' ? '' : await c.req.text();
       const raw: unknown = method === 'GET' ? { ...c.req.query(), ...c.req.param() } : JSON.parse(body || '{}');
-      return c.json(handler(new Service(store, now, handle), schema.parse(raw), clientIp(c)));
+      return c.json(handler(new Service(store, now, handle), schema.parse(raw), clientIp(c, trustedProxies)));
     });
   }
 
@@ -264,7 +310,7 @@ export function buildApp(store: Store, now: () => Date, options: AppOptions = {}
     const time = now();
     const authorization = c.req.header('authorization');
     const handle = agentHandle(store, authorization, time);
-    return { handle, tokenHash: agentTokenHash(authorization), ip: clientIp(c), now: time };
+    return { handle, tokenHash: agentTokenHash(authorization), ip: clientIp(c, trustedProxies), now: time };
   }
   app.post(API_ROUTES.createAgentStation.path, async c => {
     const request = agentRequest(c);
@@ -290,7 +336,7 @@ export function buildApp(store: Store, now: () => Date, options: AppOptions = {}
   app.post(API_ROUTES.register.path, async c => {
     const input = registerSchema.parse(JSON.parse(await c.req.text() || '{}'));
     if (isWeakPassword(input.password)) throw new ApiError(400, 'WEAK_PASSWORD', '这个密码太常见了，请换一个');
-    const ip = `register:${clientIp(c)}`;
+    const ip = `register:${clientIp(c, trustedProxies)}`;
     refuseIfLimited(c, [registerByIp.retryAfter(ip, now().getTime())]);
     registerByIp.record(ip, now().getTime());
     const usernameKey = input.username.toLowerCase();
@@ -315,7 +361,7 @@ export function buildApp(store: Store, now: () => Date, options: AppOptions = {}
   app.post(API_ROUTES.login.path, async c => {
     const input = loginSchema.parse(JSON.parse(await c.req.text() || '{}'));
     const usernameKey = input.username.toLowerCase();
-    const ip = `login:${clientIp(c)}`;
+    const ip = `login:${clientIp(c, trustedProxies)}`;
     const pair = `${ip}:${usernameKey}`;
     const time = now().getTime();
     refuseIfLimited(c, [loginByTarget.retryAfter(pair, time), loginByIp.retryAfter(ip, time), loginByUsername.retryAfter(usernameKey, time)]);
@@ -380,7 +426,7 @@ export function buildApp(store: Store, now: () => Date, options: AppOptions = {}
     // 邀请码兑换要同时看「这把码被用过多少次」和「这个尝试者试过几次」，否则
     // 码泄露后可以用它把无限多个新号提权。
     const byUser = `agentToken:${handle}`;
-    const byIp = `agentTokenIp:${clientIp(c)}`;
+    const byIp = `agentTokenIp:${clientIp(c, trustedProxies)}`;
     refuseIfLimited(c, [agentTokenByUser.retryAfter(byUser, time.getTime()), agentTokenByIp.retryAfter(byIp, time.getTime()),
       ...(input.inviteCode === undefined ? [] : [inviteByCode.retryAfter(`invite:${input.inviteCode}`, time.getTime())])]);
     agentTokenByUser.record(byUser, time.getTime());

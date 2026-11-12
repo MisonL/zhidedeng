@@ -16,6 +16,12 @@ services:
       DB_PATH: /data/zhidedeng.db
       # 管理接口的 Bearer 密钥；少于 32 位会被当成未配置、管理接口直接关闭。
       SYNC_TOKEN: ${SYNC_TOKEN:?需要先设置 SYNC_TOKEN（至少 32 位）}
+      # 端口映射进来时直连方是 Docker 网桥，不是 127.0.0.1——具体网段由 Docker 决定，
+      # 每台机器可能不同（本机实测是 192.168.32.0/20，默认 bridge 是 172.17.0.0/16）。
+      # 不配这一项，所有用户的 IP 限流会共用同一个桶：31 个不同来源就一起被 429。
+      # 查自己机器上的网段：docker network inspect <项目名>_default --format '{{range .IPAM.Config}}{{.Subnet}}{{end}}'
+      # 留空则退化成「只有本机可信」，容器部署下等于全站共用一个限流桶。
+      TRUSTED_PROXIES: ${TRUSTED_PROXIES:-}
       INVITE_CODES: ${INVITE_CODES:-}
     volumes:
       - zhidedeng-data:/data

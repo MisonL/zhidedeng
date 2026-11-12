@@ -15,7 +15,13 @@ const hostname = process.env.HOST ?? '127.0.0.1';
 if (hostname !== '127.0.0.1') {
   console.warn(`正在监听 ${hostname}，不再是仅本机。确认前面有反向代理再这么做。`);
 }
-const server = serve({ fetch: app.fetch, port, hostname }, info => console.log(`API listening on http://${info.address}:${info.port}`));
+const server = serve({ fetch: app.fetch, port, hostname }, info => {
+  console.log(`API listening on http://${info.address}:${info.port}`);
+  // 监听非回环又没配可信反代：来源地址只能是网关，按 IP 的限流会退化成一个全站共用桶。
+  if (hostname !== '127.0.0.1' && !process.env.TRUSTED_PROXIES) {
+    console.warn('未配置 TRUSTED_PROXIES：所有请求的来源都会记成网关地址，按 IP 的限流与审计会失真。前面有反向代理时请填它的网段。');
+  }
+});
 
 for (const signal of ['SIGINT', 'SIGTERM'] as const) {
   process.once(signal, () => server.close(() => {
