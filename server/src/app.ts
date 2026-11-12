@@ -120,20 +120,6 @@ export function isTrustedProxy(remote: string | undefined, trusted: string): boo
   return false;
 }
 
-/**
- * 请求实际走的协议。只有直连方是可信反代时才看 X-Forwarded-Proto——
- * 否则客户端自己能声称是 https，把本该带 Secure 的 cookie 降级。
- */
-function isSecureRequest(c: AppContext, trustedProxies: string): boolean {
-  const remote = c.env?.incoming?.socket.remoteAddress;
-  if (isTrustedProxy(remote, trustedProxies)) {
-    const forwarded = c.req.header('x-forwarded-proto')?.split(',')[0]?.trim().toLowerCase();
-    if (forwarded) return forwarded === 'https';
-  }
-  // 直连时没有 TLS 信息可查（这里不直接跑 TLS），只能按配置判断。
-  return false;
-}
-
 /** 直连方是可信反代时才用 X-Forwarded-For；其他情况用直连地址，避免被伪造头绕过限流。 */
 function clientIp(c: AppContext, trustedProxies: string) {
   const remote = c.env?.incoming?.socket.remoteAddress;
@@ -145,12 +131,14 @@ export function buildApp(store: Store, now: () => Date, options: AppOptions = {}
   const secureConfigured = options.secureCookie ?? false;
   const trustedProxies = options.trustedProxies ?? '';
   /**
-   * 只在「配置要求 Secure」且「本次请求确实是 https」时才加标记。
-   * 反过来（配置没要求却走 https）不加是安全的；配置要求但请求是 http 时
-   * 加 Secure 会让浏览器直接丢弃这个 cookie——登录看起来成功、状态却没保存，
-   * 排查起来非常费劲。这种情况下面宁可先不加，由启动警告提示去配好 TLS。
+   * TLS_ENABLED=1 就是运维在断言「本站对外是 HTTPS」，此时一律加 Secure。
+   *
+   * 早先还要求「直连方是可信反代」才加，导致 TLS_ENABLED=1 但 TRUSTED_PROXIES
+   * 没配时静默降级成不带 Secure——HTTPS 站点上会话 cookie 会随任意明文请求
+   * 一起发出去。这个组合很难自己发现，所以把两个条件解耦：只要声明了 TLS 就加。
+   * 反过来的风险（声明了 TLS 实际走 http）由启动警告兜底，那种情况本来就登不上。
    */
-  const cookieSecure = (c: AppContext) => secureConfigured && isSecureRequest(c, trustedProxies);
+  const cookieSecure = () => secureConfigured;
   const loginByTarget = new AttemptLimiter(5, LOGIN_WINDOW_MS, store, 'login-target');
   const loginByIp = new AttemptLimiter(30, LOGIN_WINDOW_MS, store, 'login-ip');
   // 不随 IP 变化：防多个 IP 轮流猜同一账号。代价是别人可以把某个账号暂时挡在登录外。
@@ -398,7 +386,7 @@ export function buildApp(store: Store, now: () => Date, options: AppOptions = {}
       store.put('user', handle, { handle, nickname: input.nickname ?? input.username, avatar: '', bio: '', tokens: INITIAL_TOKENS });
       return createSession(store, handle, now());
     });
-    c.header('set-cookie', sessionCookie(token, cookieSecure(c)));
+    c.header('set-cookie', sessionCookie(token, cookieSecure()));
     return c.json(new Service(store, now, handle).getMe());
   });
 
@@ -431,7 +419,7 @@ export function buildApp(store: Store, now: () => Date, options: AppOptions = {}
     refund();
     loginByTarget.clear(pair);
     const handle = account.handle as string;
-    c.header('set-cookie', sessionCookie(createSession(store, handle, now()), cookieSecure(c)));
+    c.header('set-cookie', sessionCookie(createSession(store, handle, now()), cookieSecure()));
     return c.json(new Service(store, now, handle).getMe());
   });
 
@@ -507,7 +495,7 @@ export function buildApp(store: Store, now: () => Date, options: AppOptions = {}
 
   app.post(API_ROUTES.logout.path, c => {
     deleteSession(store, c.req.header('cookie'));
-    c.header('set-cookie', clearedSessionCookie(cookieSecure(c)));
+    c.header('set-cookie', clearedSessionCookie(cookieSecure()));
     return c.json({ ok: true });
   });
 

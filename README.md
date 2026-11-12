@@ -200,7 +200,8 @@ pnpm sync:feishu --allow-skipped     # 显式跳过坏记录，本次只提交 u
 - 禁用账号不会自动隐藏它已发布的内容，要逐条隐藏评论或拒绝投稿。
 - 中转站 URL 只去掉 query 和 fragment，路径里的邀请码过滤不到，靠人工审核。
 - 容器部署要显式配置 `TRUSTED_PROXIES`（反代网段），否则所有请求的来源都记成 Docker 网关，按 IP 的限流会退化成全站共用一个桶。具体网段每台机器不同，用 `docker network inspect <项目名>_default --format '{{range .IPAM.Config}}{{.Subnet}}{{end}}'` 查，别照抄示例。
-- 生产环境要设 `TLS_ENABLED=1` 并让反代透传 `X-Forwarded-Proto`。否则会话 cookie 不带 `Secure`，登录态在 HTTPS 页面上仍然可用，但少了这层保护；反过来如果强行加 `Secure` 而请求是 http，浏览器会丢弃 cookie，表现为登录成功却立刻变回未登录。
+- 生产环境要设 `TLS_ENABLED=1`，此时会话 cookie 一律带 `Secure`。这个开关就是运维在断言「本站对外是 HTTPS」，所以它不看请求头、也不依赖 `TRUSTED_PROXIES`——早先三者耦合，导致开了 TLS 但漏配反代时 Secure 被静默丢掉，HTTPS 站点上的会话 cookie 会随任意明文请求发出去。
+  反过来的误配（声明了 TLS 实际却在 http 上访问）会让浏览器丢弃 cookie，表现为登录成功却立刻变回未登录，启动日志会对此告警。纯本机 http 试用保持 `TLS_ENABLED=0`。
 - Docker 镜像是单进程、单库的部署形态。要横向扩到多容器，SQLite 与 `rate_limits` 都不再适用，需要换共享存储。
 - 真实站没有可用率，默认排序排在演示站之后；前端站点目录只取 50 个，超过后部分文章卡片缺站名。
 

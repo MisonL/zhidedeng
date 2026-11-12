@@ -111,20 +111,31 @@ describe('cookie 的 Secure 标记', () => {
     expect(await login(server, { 'x-forwarded-proto': 'https' })).toContain('Secure');
   });
 
-  it('生产 + 开启 TLS 但请求是 http 时不带 Secure（否则浏览器会丢弃 cookie）', async () => {
-    const server = createApp({ dbPath: ':memory:', now: () => clock, trustedProxies: '172.16.0.0/12', secureCookie: true });
-    expect(await login(server, { 'x-forwarded-proto': 'http' })).not.toContain('Secure');
+  it('开了 TLS 就一律带 Secure，不因代理未配置而静默降级', async () => {
+    // 早先要求「直连方是可信反代」才加 Secure，TLS_ENABLED=1 但 TRUSTED_PROXIES
+    // 没配时会降级成不带 Secure，HTTPS 站点上的会话 cookie 就随明文请求一起发出去。
+    const server = createApp({ dbPath: ':memory:', now: () => clock, secureCookie: true });
+    expect(await login(server, { 'x-forwarded-proto': 'http' })).toContain('Secure');
   });
 
-  it('不可信来源自称 https 不算数', async () => {
-    const server = createApp({ dbPath: ':memory:', now: () => clock, trustedProxies: '172.16.0.0/12', secureCookie: true });
-    const response = await server.app.request('/api/auth/register', {
+  it('Secure 不再取决于请求头：伪造 X-Forwarded-Proto 也改不了结果', async () => {
+    // 两个方向都钉住：没开 TLS 时不带 Secure（伪造 https 也不行），
+    // 开了 TLS 时一定带（伪造 http 也不行）。
+    const insecure = createApp({ dbPath: ':memory:', now: () => clock, trustedProxies: '172.16.0.0/12' });
+    const forged = await insecure.app.request('/api/auth/register', {
       method: 'POST',
       headers: { ...json, 'x-forwarded-proto': 'https' },
       body: JSON.stringify({ username: 'untrusted', password: PASSWORD }),
     }, { incoming: { socket: { remoteAddress: '203.0.113.7' } } });
-    // 直连方不在可信网段，X-Forwarded-Proto 不被采信。
-    expect(response.headers.get('set-cookie') ?? '').not.toContain('Secure');
+    expect(forged.headers.get('set-cookie') ?? '').not.toContain('Secure');
+
+    const secure = createApp({ dbPath: ':memory:', now: () => clock, secureCookie: true });
+    const downgrade = await secure.app.request('/api/auth/register', {
+      method: 'POST',
+      headers: { ...json, 'x-forwarded-proto': 'http' },
+      body: JSON.stringify({ username: 'downgrade', password: PASSWORD }),
+    }, { incoming: { socket: { remoteAddress: '203.0.113.7' } } });
+    expect(downgrade.headers.get('set-cookie') ?? '').toContain('Secure');
   });
 
   it('没开 TLS 时本机 http 能正常拿到 cookie', async () => {
