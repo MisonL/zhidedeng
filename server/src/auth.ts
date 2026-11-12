@@ -77,6 +77,21 @@ export async function burnPasswordCheck(password: string) {
 
 const tokenHash = (token: string) => createHash('sha256').update(token).digest('hex');
 
+/**
+ * 清理过期数据。原先只在 createSession 里顺手清一次 sessions——
+ * 长期没人登录就一份也不清；rate_limits 也只清自己那个桶，
+ * 某个桶从此不再写入时旧行会一直留着。
+ *
+ * 两张表的窗口都以小时计，每天清一次足够，开销可忽略。
+ */
+export function purgeExpired(store: Store, now: Date): void {
+  store.db.prepare('DELETE FROM sessions WHERE expiresAt <= ?').run(now.toISOString());
+  store.db.prepare('DELETE FROM rate_limits WHERE at <= ?').run(now.getTime() - PURGE_RATE_LIMIT_MS);
+}
+
+/** 限流记录的保留期。取最长窗口（1 小时）的两倍，任何仍在生效的计数都不会被误删。 */
+const PURGE_RATE_LIMIT_MS = 2 * 60 * 60 * 1000;
+
 export function createSession(store: Store, handle: string, now: Date) {
   const token = randomBytes(32).toString('base64url');
   store.db.prepare('DELETE FROM sessions WHERE expiresAt <= ?').run(now.toISOString());
