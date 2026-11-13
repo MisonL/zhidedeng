@@ -92,3 +92,29 @@ describe('撤销必须精确到条', () => {
     expect(limiter.remaining('t', now)).toBe(1);
   });
 });
+
+describe('内存版限流的精确撤销', () => {
+  it('同一毫秒多条记录时撤销的是本次那条，不会删错', () => {
+    // 内存版没有 rowid。早先按时间戳 lastIndexOf 定位，同一毫秒里
+    // 记录 3 次再撤销第 1 次，删掉的是第 3 次——撤销一次却抹掉别人的计数。
+    const limiter = new AttemptLimiter(5, 60_000);
+    const first = limiter.record('k', 1000);
+    limiter.record('k', 1000);
+    limiter.record('k', 1000);
+    expect(limiter.remaining('k', 1000)).toBe(2);
+    limiter.release('k', first);
+    expect(limiter.remaining('k', 1000)).toBe(3);
+  });
+
+  it('过期清理不会让后续撤销删错条目', () => {
+    const limiter = new AttemptLimiter(5, 1_000);
+    const stale = limiter.record('k', 1000);
+    limiter.record('k', 1500);
+    limiter.record('k', 5000);
+    // 前两条已过期（窗口 1 秒 @ 5000），只剩最后一条。
+    expect(limiter.remaining('k', 5000)).toBe(4);
+    // 撤销一条已过期的记录：序号对得上，但已不在窗口里，不该影响当前剩余。
+    limiter.release('k', stale);
+    expect(limiter.remaining('k', 5000)).toBe(4);
+  });
+});

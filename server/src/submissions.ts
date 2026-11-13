@@ -237,14 +237,17 @@ export function enqueueSubmission(store: Store, input: {
       options.onDeduplicated?.();
       return { submission, deduplicated: true, autoApproved: false };
     }
-    options.beforeInsert?.();
-    // 全站熔断：与渠道无关。放在幂等判定之后，重复提交不该被这里挡住。
+    // 全站熔断：与渠道无关。顺序是「幂等判定之后、beforeInsert 之前」——
+    // 重复提交不该被这里挡住；同时必须在配额预占之前，否则队列已满时
+    // Agent 拿到的错误会来自它自己账号的配额，反而被引导去「改数据」。
+    // 用独立的错误码 QUEUE_FULL：它表示「等管理员审完」，不是「你写错了」。
     if (options.globalPendingBreaker !== false) {
       const pending = Number(store.db.prepare("SELECT count(*) AS count FROM submissions WHERE status = 'pending'").get()!.count);
       if (pending >= GLOBAL_PENDING) {
-        throw new ApiError(409, 'TOO_MANY_PENDING', `全局待审队列已达 ${GLOBAL_PENDING} 条，暂停接收新投稿`);
+        throw new ApiError(409, 'QUEUE_FULL', `全站待审队列已满（${GLOBAL_PENDING} 条），请稍后再提交，不需要修改内容`);
       }
     }
+    options.beforeInsert?.();
     const submission: SubmissionRecord = {
       id: randomUUID(), kind: validated.kind, channel: validated.channel, originKey,
       batchId: validated.batchId ?? null, action: validated.action,

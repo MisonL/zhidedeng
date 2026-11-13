@@ -23,14 +23,74 @@ const WEAK_PASSWORDS = new Set([
  *
  * 早先只是一张 30 词的精确匹配表，`admin1234`、`qwerty1234`、`aaaaaaaa` 全部放行——
  * 撞库和口令喷洒（用几个常见口令打大量账号）几乎不受阻。
- * 这里补三种最容易命中的模式：单字符重复、连续序列、键盘序列，
- * 以及「包含用户名」这种最容易被定向猜中的情形。
+ *
+ * 拆成两个层次，避免用一条粗暴规则同时误伤和漏判：
+ * - **必须**满足的最低门槛：长度与种类，不满足直接拒。
+ * - 在此基础上再判「明显有规律」，这类才是真正常见的口令。
+ *   判据要覆盖整段而不是「包含某个 4 连」——后者放过 welcome123、P@ssw0rd!x，
+ *   也放过 Hunter2hunter2，因为它们只是「某一部分有规律」。
  */
-const SEQUENCES = ['0123456789', 'abcdefghijklmnopqrstuvwxyz', 'qwertyuiop', 'asdfghjkl', 'zxcvbnm'];
+const MIN_LENGTH = 10;
 
-function isKeyboardRun(lowered: string) {
-  return SEQUENCES.some(sequence => Array.from({ length: Math.max(sequence.length - 3, 0) }, (_, start) => sequence.slice(start, start + 4))
-    .some(run => lowered.includes(run) || lowered.includes([...run].reverse().join(''))));
+/** 键盘行与相邻键位。斜着按（qaz、wsx）也是常见的手指路径。 */
+const KEYBOARD_ROWS = ['1234567890', 'qwertyuiop', 'asdfghjkl', 'zxcvbnm'];
+const KEYBOARD_DIAGONALS = ['1qaz', '2wsx', '3edc', '4rfv', '5tgb', '6yhn', '7ujm', '8ik,', '9ol.', '0p;/'];
+
+/** 口令里最常见的英文词根。只用来判断「去掉数字后剩下的主体是不是个常见词」。 */
+const COMMON_WORDS = ['password', 'passwd', 'welcome', 'admin', 'qwerty', 'abc', 'iloveyou', 'letmein',
+  'monkey', 'dragon', 'master', 'sunshine', 'princess', 'football', 'baseball', 'zhidedeng', 'woaini'];
+
+const ALPHABET = 'abcdefghijklmnopqrstuvwxyz';
+const DIGITS = '0123456789';
+
+/** 该子串是否是某条序列（含反向）的连续片段。 */
+function isRunOf(value: string, sequence: string): boolean {
+  const reversed = [...sequence].reverse().join('');
+  return sequence.includes(value) || reversed.includes(value);
+}
+
+/** 找出字符串里最长的「连续序列」片段长度，键盘行与相邻键位都算。 */
+function longestRun(lowered: string): number {
+  let longest = 0;
+  for (const row of [...KEYBOARD_ROWS, ...KEYBOARD_DIAGONALS]) {
+    for (let start = 0; start < lowered.length; start++) {
+      for (let length = 2; start + length <= lowered.length; length++) {
+        if (!isRunOf(lowered.slice(start, start + length), row)) break;
+        longest = Math.max(longest, length);
+      }
+    }
+  }
+  // 字母与数字各自的正反向序列单独算：9876543210 是 0123456789 的反向。
+  for (const sequence of [ALPHABET, DIGITS]) {
+    for (let start = 0; start < lowered.length; start++) {
+      for (let length = 2; start + length <= lowered.length; length++) {
+        if (!isRunOf(lowered.slice(start, start + length), sequence)) break;
+        longest = Math.max(longest, length);
+      }
+    }
+  }
+  return longest;
+}
+
+/** 连续重复字符（aaa、1111）的最长长度。 */
+function longestRepeat(lowered: string): number {
+  let longest = 1;
+  let current = 1;
+  for (let index = 1; index < lowered.length; index++) {
+    current = lowered[index] === lowered[index - 1] ? current + 1 : 1;
+    longest = Math.max(longest, current);
+  }
+  return longest;
+}
+
+/** 「同一段重复两次以上」，例如 abcabc、Hunter2hunter2、passwordpassword。 */
+function isRepeatedBlock(lowered: string): boolean {
+  for (let size = 1; size <= Math.floor(lowered.length / 2); size++) {
+    if (lowered.length % size !== 0) continue;
+    const block = lowered.slice(0, size);
+    if (block.repeat(lowered.length / size) === lowered) return true;
+  }
+  return false;
 }
 
 /**
@@ -40,9 +100,22 @@ function isKeyboardRun(lowered: string) {
 export function isWeakPassword(password: string, username?: string): boolean {
   const lowered = password.toLowerCase();
   if (WEAK_PASSWORDS.has(lowered)) return true;
-  // 少于 10 位且字符种类单一（只靠长度撑着）也算弱。
-  if (new Set(password).size < 4) return true;
-  if (isKeyboardRun(lowered)) return true;
+  // 最低门槛：长度与字符种类。纯中文口令种类天然很少，但长度足够就放行。
+  if ([...password].length < MIN_LENGTH) return true;
+  if (new Set(password).size < 4 && !/[\u4e00-\u9fa5]/.test(password)) return true;
+  if (isRepeatedBlock(lowered)) return true;
+  if (longestRepeat(lowered) >= 4) return true;
+  if (longestRun(lowered) >= 4) return true;
+  // 「常见词 + 纯数字尾巴」是最典型的弱口令形态：welcome123、P@ssw0rd!x、
+  // 2026zhidedeng 都属于这一类，单看序列片段看不出来，必须单独判。
+  // 去掉首尾的纯数字段后，剩下的主体是否太短、或是否命中常见词。
+  // 先做 leet 归一：P@ssw0rd 与 password 是同一个词，只换写法不换熵。
+  // 数字替换要在「去掉首尾数字」之前做，否则 P@ssw0rd 的 0 会被当成尾巴剥掉。
+  const leet = lowered.replace(/[4@]/g, 'a').replace(/[3]/g, 'e').replace(/[1!|]/g, 'l')
+    .replace(/[0]/g, 'o').replace(/[5$]/g, 's').replace(/[7]/g, 't');
+  const core = leet.replace(/^[0-9]+/, '').replace(/[0-9]+$/, '').replace(/[^a-z\u4e00-\u9fa5]/g, '');
+  if (core.length < 6 && /[0-9]/.test(lowered)) return true;
+  if (COMMON_WORDS.some(word => core.includes(word))) return true;
   if (username && username.length >= 3) {
     const name = username.toLowerCase();
     if (lowered.includes(name) || name.includes(lowered)) return true;
@@ -169,7 +242,8 @@ export interface RateLimitStore {
  */
 export class AttemptLimiter {
   private readonly attempts = new Map<string, number[]>();
-  private readonly ids = new Map<string, number>();
+  /** 内存版：每个 key 已记录的自增序号，与 attempts 里的顺序一一对应。 */
+  private readonly ids = new Map<string, number[]>();
   private nextId = 1;
   private readonly max: number;
   private readonly windowMs: number;
@@ -222,9 +296,11 @@ export class AttemptLimiter {
       for (const stale of this.attempts.keys()) if (this.recent(stale, now).length === 0) this.attempts.delete(stale);
     }
     const entry = { id: this.nextId++, at: now };
-    this.attempts.set(key, [...this.recent(key, now), now]);
-    // 内存版靠平行表记住 id，与库版的 rowid 语义对齐。
-    this.ids.set(`${key}\u0000${now}\u0000${entry.id}`, entry.id);
+    // 这里存的是**未过滤**的完整列表：ids 里的序号与 attempts 的下标必须一一对应，
+    // 否则随着旧记录过期，「第几条」的映射会整体错位，撤销就删到别的条上。
+    // 过期条目的过滤放在 recent() 读取时做。
+    this.attempts.set(key, [...(this.attempts.get(key) ?? []), now]);
+    this.ids.set(key, [...(this.ids.get(key) ?? []), entry.id]);
     return entry.id;
   }
 
@@ -247,14 +323,15 @@ export class AttemptLimiter {
     const times = this.attempts.get(key);
     if (!times) return;
     if (id === undefined) { times.pop(); return; }
-    // 内存版没有 rowid，用「第几条」无法还原，这里按时间戳近似：删掉等于本次 at 的最后一条。
-    const entry = [...this.ids.entries()].find(([, value]) => value === id);
-    if (!entry) return;
-    const [token] = entry;
-    const at = Number(token.split('\u0000')[1]);
-    const index = times.lastIndexOf(at);
-    if (index >= 0) times.splice(index, 1);
-    this.ids.delete(token);
+    // 按插入序号找到它是这个 key 的第几条记录，删那一条。
+    // 只用时间戳定位会在「同一毫秒多条」时删错——撤销一次却抹掉了另一次的计数。
+    const sequence = this.ids.get(key);
+    if (!sequence) return;
+    const position = sequence.indexOf(id);
+    if (position < 0) return;
+    if (position < times.length) times.splice(position, 1);
+    sequence.splice(position, 1);
+    if (sequence.length === 0) this.ids.delete(key);
   }
 
   clear(key: string) {

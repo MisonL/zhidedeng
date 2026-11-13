@@ -1029,15 +1029,29 @@ describe('全站待审熔断', () => {
       kind: 'post', channel: 'web', originKey: 'blocked-post', ip: '1.2.3.4', now: new Date(),
       actorHandle: 'someone',
       payload: { kind: 'guide', title: '标题', summary: '摘要', body: '正文' },
-    })).toThrow(/全局待审队列已达 200 条/);
+    })).toThrow(/全站待审队列已满/);
   });
 
-  it('Agent 通道同样被拦住', async () => {
+  it('Agent 通道同样被拦住，且错误码是可区分的 QUEUE_FULL', async () => {
     fillTo(200);
+    // 错误码要能区分「队列满了等一等」与「你写错了」：Agent 的 CLI 会把
+    // 前者当成可重试，后者引导去改数据。混在一起就会去改本来正确的内容。
     expect(() => enqueueSubmission(store, {
       kind: 'station', channel: 'agent', originKey: 'blocked.example.com', ip: '1.2.3.4', now: new Date(),
       payload: { name: '站', description: 'd', url: 'https://blocked.example.com/', rechargeThreshold: null, paymentMethods: [], offers: [] },
-    })).toThrow(/全局待审队列已达 200 条/);
+    })).toThrow(expect.objectContaining({ code: 'QUEUE_FULL' }));
+  });
+
+  it('队列满时熔断先于账号配额触发，Agent 不会看到自己的配额错误', async () => {
+    // 顺序反过来的话，队列已满时 Agent 收到的是「你的待审投稿已达 N 条」，
+    // 而它明明一条都没交过 —— 会被引导去改数据而不是等待。
+    fillTo(200);
+    let reserved = false;
+    expect(() => enqueueSubmission(store, {
+      kind: 'station', channel: 'agent', originKey: 'order.example.com', ip: '9.9.9.9', now: new Date(),
+      payload: { name: '站', description: 'd', url: 'https://order.example.com/', rechargeThreshold: null, paymentMethods: [], offers: [] },
+    }, { beforeInsert: () => { reserved = true; } })).toThrow(/全站待审队列已满/);
+    expect(reserved).toBe(false);
   });
 
   it('管理端批次不受熔断影响：一次飞书全量导入天然会超过 200 条', async () => {

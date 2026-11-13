@@ -381,7 +381,9 @@ describe('六个配额维度', () => {
   it('全局 pending 达到 200 条熔断，计入其他渠道，审核后恢复', async () => {
     const key = credential();
     seedPending(200);
-    await error(await submitStation(key), 409, 'TOO_MANY_PENDING', '全局');
+    // 队列满与「你自己的配额满了」必须是不同的码：前者等一等，后者说明确实提交过多。
+    // 混在一起时 Agent 会去改数据而不是等待。
+    await error(await submitStation(key), 409, 'QUEUE_FULL', '全站待审队列已满');
     expect((await status(key)).quotas.globalPending).toEqual({ limit: 200, remaining: 0 });
     const id = server.db.prepare('SELECT id FROM submissions ORDER BY rowid LIMIT 1').get()!.id as string;
     reject(id);
