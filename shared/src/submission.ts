@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { MAX_RATE, MIN_RATE } from './domain.ts';
+import { isPrivateHostname } from './net.ts';
 
 /**
  * 投稿 payload 的校验规则。
@@ -14,12 +15,21 @@ export const offerRate = z.number().refine(rate => rate >= MIN_RATE && rate <= M
   error: issue => ({ message: `倍率 ${String(issue.input)} 超出 ${MIN_RATE}~${MAX_RATE} 范围` }),
 });
 
-/** 可入库的站点网址：http/https，不带查询串、片段和账号密码。 */
+/**
+ * 可入库的站点网址：http/https，不带查询串、片段和账号密码，且不指向内网。
+ *
+ * 内网判定与 Agent 通道共用同一套规则。原先这里完全不判，导致同一个地址
+ * 在 Agent 通道 400、在飞书/站内投稿与全量导入却能 200 入库并展示给全站用户，
+ * 弹到 127.0.0.1 或云元数据地址上。服务端目前不抓取站点 URL，所以现在的影响
+ * 是「把内网地址当站点链接发布」；将来加可用性探测时它就是 SSRF。
+ */
 export const httpUrl = z.string().max(300).refine(value => {
   if (value.includes('?') || value.includes('#')) return false;
   try {
     const url = new URL(value);
-    return (url.protocol === 'http:' || url.protocol === 'https:') && !url.username && !url.password;
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') return false;
+    if (url.username || url.password) return false;
+    return !isPrivateHostname(url.hostname);
   } catch {
     return false;
   }

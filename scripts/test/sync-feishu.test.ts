@@ -264,7 +264,7 @@ describe('命令行', () => {
     writeFileSync(join(dir, 'lark-cli'), `#!/usr/bin/env node
 const fs = require('node:fs');
 const args = process.argv.slice(2);
-fs.appendFileSync(${JSON.stringify(join(dir, 'calls.jsonl'))}, JSON.stringify({ args, configDir: process.env.LARKSUITE_CLI_CONFIG_DIR, home: process.env.HOME }) + '\\n');
+fs.appendFileSync(${JSON.stringify(join(dir, 'calls.jsonl'))}, JSON.stringify({ args, configDir: process.env.LARKSUITE_CLI_CONFIG_DIR, home: process.env.HOME, baseToken: process.env.LARK_BASE_TOKEN, hasSyncToken: process.env.SYNC_TOKEN !== undefined }) + '\\n');
 if (process.env.FAKE_LARK_FAIL) { console.error('boom ' + args.join(' ')); process.exit(3); }
 const offset = args[args.indexOf('--offset') + 1];
 if (process.env.FAKE_LARK_RECORDS) {
@@ -345,7 +345,7 @@ process.stdout.write(fs.readFileSync(${JSON.stringify(dir)} + '/' + fixture + '.
 
   const larkCalls = () => {
     try {
-      return readFileSync(join(dir, 'calls.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line) as { args: string[]; configDir: string; home: string });
+      return readFileSync(join(dir, 'calls.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line) as { args: string[]; configDir: string; home: string; baseToken?: string; hasSyncToken?: boolean });
     } catch {
       return [];
     }
@@ -357,12 +357,18 @@ process.stdout.write(fs.readFileSync(${JSON.stringify(dir)} + '/' + fixture + '.
     expect(code).toBe(0);
     const calls = larkCalls();
     expect(calls.map(call => call.args)).toEqual([
-      ['base', '+record-list', '--as', 'bot', '--base-token', BASE_TOKEN, '--table-id', 'tblTest', '--offset', '0', '--limit', '200'],
-      ['base', '+record-list', '--as', 'bot', '--base-token', BASE_TOKEN, '--table-id', 'tblTest', '--offset', '4', '--limit', '200'],
+      ['base', '+record-list', '--as', 'bot', '--table-id', 'tblTest', '--offset', '0', '--limit', '200'],
+      ['base', '+record-list', '--as', 'bot', '--table-id', 'tblTest', '--offset', '4', '--limit', '200'],
     ]);
     for (const call of calls) {
       expect(call.configDir).toBe(join(dir, 'lark-config'));
       expect(call.home).toBe(process.env.HOME);
+      // base token 只能经环境变量传递：放进 argv 的话，同步期间同机任何用户
+      // `ps` 都能读到，拿到就能读整张收集表（含未审核内容）。
+      expect(call.args.join(' ')).not.toContain(BASE_TOKEN);
+      expect(call.baseToken).toBe(BASE_TOKEN);
+      // 子进程不该拿到管理密钥：Sync 只需要自己的 Bearer。
+      expect(call.hasSyncToken).toBe(false);
     }
     expect(imports).toHaveLength(1);
     expect(imports[0].authorization).toBe(`Bearer ${SYNC_TOKEN}`);

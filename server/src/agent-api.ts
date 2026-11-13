@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { isIP } from 'node:net';
 import { z } from 'zod';
+import { isPrivateHostname } from '@zhidedeng/shared';
 import type { AgentRateQuota, AgentSubmitResponse, GetAgentStatusResponse, SubmissionKind } from '@zhidedeng/shared';
 import { agentModelSchema, agentPostSchema, agentStationSchema, findForbiddenAgentField } from '@zhidedeng/shared/submission';
 import { activeAgentHandle } from './agent-auth.ts';
@@ -43,59 +44,13 @@ function objectPayload(input: unknown): Record<string, unknown> {
   return input as Record<string, unknown>;
 }
 
-/** 把 IPv6 的两个 16 位分组还原成点分 IPv4，用于识别内嵌 IPv4 的转换前缀。 */
-function wordsToIpv4(high: number, low: number): number[] {
-  return [high >> 8, high & 255, low >> 8, low & 255];
-}
-
-function privateIpv4(parts: number[]): boolean {
-  const [first, second] = parts;
-  return first === 0 || first === 10 || first === 127
-    || (first === 172 && second >= 16 && second <= 31)
-    || (first === 192 && second === 168) || (first === 169 && second === 254)
-    // 运营商级 NAT、基准测试网段、文档保留段、组播与保留段都不能作为公开站点目标。
-    || (first === 100 && second >= 64 && second <= 127)
-    || (first === 198 && (second === 18 || second === 19))
-    || (first === 192 && second === 0) || (first === 198 && second === 51) || (first === 203 && second === 113)
-    || first >= 224;
-}
-
-function privateHostname(hostname: string): boolean {
-  const host = hostname.replace(/^\[|\]$/g, '').toLowerCase();
-  if (host === 'localhost' || host === 'localhost.localdomain' || host === 'local' || host === 'internal'
-    || ['.localhost', '.local', '.internal', '.example'].some(suffix => host.endsWith(suffix))) return true;
-  const version = isIP(host);
-  if (version === 4) return privateIpv4(host.split('.').map(Number));
-  if (version !== 6) return false;
-  // WHATWG URL 已将 IPv4 的简写、整数、八进制和 IPv6 内嵌 IPv4 规范化。
-  const [head, tail] = host.split('::');
-  const leading = head ? head.split(':') : [];
-  const trailing = tail ? tail.split(':') : [];
-  const groups = host.includes('::') ? [...leading, ...Array<string>(8 - leading.length - trailing.length).fill('0'), ...trailing] : leading;
-  const words = groups.map(group => parseInt(group, 16));
-  if ((words[0] & 0xfe00) === 0xfc00 || (words[0] & 0xffc0) === 0xfe80 || (words[0] & 0xffc0) === 0xfec0) return true;
-  // 未指定、回环和旧 IPv4-compatible 地址都不能作为公网目标。
-  if (words.slice(0, 6).every(word => word === 0)) return true;
-  if (words.slice(0, 5).every(word => word === 0) && words[5] === 0xffff) {
-    return privateIpv4(wordsToIpv4(words[6]!, words[7]!));
-  }
-  // NAT64 `64:ff9b::/96`：末尾 32 位是 IPv4。`[64:ff9b::7f00:1]` 经 NAT64 网关
-  // 到达的就是 127.0.0.1，只看字面前缀会把它当成公网地址放行。
-  if (words[0] === 0x64 && words[1] === 0xff9b && words.slice(2, 6).every(word => word === 0)) {
-    return privateIpv4(wordsToIpv4(words[6]!, words[7]!));
-  }
-  // 6to4 `2002::/16`：第 2、3 个分组嵌入 IPv4。
-  if (words[0] === 0x2002) return privateIpv4(wordsToIpv4(words[1]!, words[2]!));
-  return false;
-}
-
 function agentUrl(input: unknown, field = 'url'): string {
   if (typeof input !== 'string') throw new ApiError(400, 'INVALID_INPUT', `${field} 必须是 http/https 网址`);
   let url: URL;
   try { url = new URL(input); } catch { throw new ApiError(400, 'INVALID_INPUT', `${field} 不是有效网址`); }
   if (url.protocol !== 'http:' && url.protocol !== 'https:') throw new ApiError(400, 'INVALID_INPUT', `${field} 只允许 http/https`);
   const hostname = url.hostname.replace(/\.+$/, '');
-  if (!hostname || privateHostname(hostname)) throw new ApiError(400, 'INVALID_INPUT', `${field} 不允许内网、回环或本地地址`);
+  if (!hostname || isPrivateHostname(hostname)) throw new ApiError(400, 'INVALID_INPUT', `${field} 不允许内网、回环或本地地址`);
   url.hostname = hostname;
   url.username = '';
   url.password = '';

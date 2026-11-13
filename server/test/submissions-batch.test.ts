@@ -296,17 +296,20 @@ describe('批次入队与审核', () => {
 
   it('不存在的下架目标也按 hostname 规范化检查同批冲突', async () => {
     const response = await send('/api/admin/submissions/batch', { channel: 'feishu', items: [
-      { kind: 'station', originKey: 'BÜCHER.EXAMPLE:443', action: 'remove', payload: { slug: 'sub-missing-one', submissionId: 'missing-a' } },
-      { kind: 'station', originKey: 'xn--bcher-kva.example:8443', action: 'remove', payload: { slug: 'sub-missing-two', submissionId: 'missing-b' } },
+      // 用 .com：.example 是 RFC 2606 保留域名，下载目标会被 httpUrl 直接拒掉，
+      // 那样就测不到「按规范化后的 hostname 判同批冲突」这条逻辑了。
+      { kind: 'station', originKey: 'BÜCHER.COM:443', action: 'remove', payload: { slug: 'sub-missing-one', submissionId: 'missing-a' } },
+      { kind: 'station', originKey: 'xn--bcher-kva.com:8443', action: 'remove', payload: { slug: 'sub-missing-two', submissionId: 'missing-b' } },
     ] });
     expect(response.status).toBe(400);
-    expect(await response.json()).toMatchObject({ error: { code: 'INVALID_INPUT', message: expect.stringContaining('xn--bcher-kva.example') } });
+    expect(await response.json()).toMatchObject({ error: { code: 'INVALID_INPUT', message: expect.stringContaining('xn--bcher-kva.com') } });
     expect(listSubmissions(store, {}).total).toBe(0);
   });
 
   it.each([
     ['https://API.EXAMPLE.COM/', 'api.example.com'],
-    ['https://bücher.example/', 'xn--bcher-kva.example'],
+    // 用 .com 而不是 .example：后者是 RFC 2606 保留域名，httpUrl 现在会按内网/保留地址拒绝。
+    ['https://bücher.com/', 'xn--bcher-kva.com'],
     ['https://port.example.com:8443/', 'port.example.com'],
     ['https://WWW.EXAMPLE.COM/', 'www.example.com'],
   ])('单条和批量 station 的 %s 覆盖客户端 originKey 为 %s', async (url, hostname) => {

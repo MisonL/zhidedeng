@@ -368,7 +368,10 @@ function stationSlug(store: Store, url: string | null, originKey: string): strin
   const identity = hostname ?? originKey.trim().toLowerCase();
   // 先认领：只要已有站点的 hostname 相同，就沿用它的 slug——不管当初落在可读形式
   // 还是哈希后缀上。否则 base 被别的站占走又释放时，同一站点会在两种 slug 间横跳。
-  const mine = hostname === null ? undefined : store.all('station').find(station => hostnameOf(station.url) === hostname);
+  // 已下架的行也要认：软删除保留了实体，就是为了恢复后还是同一个站点。
+  // 只看在线的话，重新上架会被当成全新站点而分配带哈希的 slug，原来挂在
+  // 旧 slug 上的文章与互动记录全部变成孤儿——数据没丢，但再也显示不出来。
+  const mine = hostname === null ? undefined : store.allWithRemoved('station').find(station => hostnameOf(station.url) === hostname);
   if (mine) return mine.slug;
 
   // 分配 slug 时必须把已下架的行也算作「已占用」（用 getWithRemoved）。

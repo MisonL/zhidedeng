@@ -393,3 +393,30 @@ describe('站内发帖统一入队', () => {
     expect(store.get('post', submission.id)?.status).toBe('approved');
   });
 });
+
+describe('下架后重新上架', () => {
+  it('沿用原来的 slug，挂在它上面的文章不会变成孤儿', async () => {
+    const at = (hour: number) => new Date(`2026-11-06T0${hour}:00:00Z`);
+    const payload = { name: '老站', description: 'd', url: 'https://readd.example.com/', rechargeThreshold: null, paymentMethods: [], offers: [] };
+    const first = enqueueSubmission(store, {
+      kind: 'station', channel: 'agent', originKey: 'readd.example.com', ip: '1.2.3.4', now: at(1), payload,
+    }, { globalPendingBreaker: false });
+    reviewSubmission(store, at(2), first.submission.id, { status: 'approved' });
+    const slug = store.all('station').find(station => station.url === 'https://readd.example.com/')!.slug;
+    store.put('post', 'readd-post', {
+      id: 'readd-post', kind: 'review', title: 't', summary: 's', body: 'b', authorHandle: 'x', authorNickname: 'x',
+      stationSlug: slug, modelSlug: null, cover: null, source: 'submission', status: 'approved', publishedAt: at(2).toISOString(),
+    });
+    store.markRemoved('station', slug, at(3).toISOString());
+
+    // 重新提交同一站点：分配 slug 时必须认领已下架的那条，
+    // 否则会分到一个带哈希后缀的新 slug，文章就再也挂不上去了。
+    const second = enqueueSubmission(store, {
+      kind: 'station', channel: 'agent', originKey: 'readd.example.com', ip: '1.2.3.4', now: at(4), payload,
+    }, { globalPendingBreaker: false });
+    reviewSubmission(store, at(5), second.submission.id, { status: 'approved' });
+    const online = store.all('station').filter(station => station.url === 'https://readd.example.com/');
+    expect(online.map(station => station.slug)).toEqual([slug]);
+    expect(store.get('post', 'readd-post')!.stationSlug).toBe(online[0]!.slug);
+  });
+});

@@ -167,6 +167,12 @@ export class Store {
     return row ? JSON.parse(row.data as string) as Entities[K] : undefined;
   }
 
+  /** 含已下架的全部条目，只给需要认领 slug、判重和恢复的内部逻辑用。 */
+  allWithRemoved<K extends keyof Entities>(kind: K): Entities[K][] {
+    return this.db.prepare('SELECT data FROM entities WHERE kind = ? ORDER BY rowid').all(kind)
+      .map(row => JSON.parse(row.data as string) as Entities[K]);
+  }
+
   /** 恢复：把 removedAt 清空。返回是否真的恢复了一个已下架条目。 */
   restore(kind: keyof Entities, id: string): boolean {
     const result = this.db.prepare('UPDATE entities SET removedAt = NULL WHERE kind = ? AND id = ? AND removedAt IS NOT NULL').run(kind, id) as { changes?: number };

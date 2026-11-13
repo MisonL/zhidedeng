@@ -368,18 +368,46 @@ function readConfig(dryRun: boolean) {
 
 type Config = ReturnType<typeof readConfig>;
 
-function runLark(args: string[], configDir: string) {
+/** lark-cli 只需要这几个环境变量。整份 process.env 传下去会让子进程能读到 SYNC_TOKEN。 */
+const LARK_ENV_ALLOWLIST = ['PATH', 'HOME', 'LANG', 'LC_ALL', 'TZ', 'TMPDIR'] as const;
+
+/** 白名单之外还要原样透传的变量前缀，给测试替身用（真实 lark-cli 不读它们）。 */
+const LARK_ENV_PASSTHROUGH_PREFIX = 'FAKE_LARK_';
+
+function isAllowedLarkEnv(key: string) {
+  return (LARK_ENV_ALLOWLIST as readonly string[]).includes(key) || key.startsWith(LARK_ENV_PASSTHROUGH_PREFIX);
+}
+
+/** 无超时的话，lark-cli 网络挂起会让整条同步永久阻塞，cron 只能靠外部 kill，且没有退出码。 */
+const LARK_TIMEOUT_MS = 60_000;
+
+function larkEnv(configDir: string) {
+  const env: Record<string, string> = { LARKSUITE_CLI_CONFIG_DIR: configDir };
+  for (const [key, value] of Object.entries(process.env)) {
+    if (value !== undefined && isAllowedLarkEnv(key)) env[key] = value;
+  }
+  return env;
+}
+
+function runLark(args: string[], configDir: string, extraEnv: Record<string, string> = {}) {
   return new Promise<string>((done, fail) => {
-    execFile('lark-cli', args, { env: { ...process.env, LARKSUITE_CLI_CONFIG_DIR: configDir }, maxBuffer: 256 * 1024 * 1024 }, (error, stdout, stderr) => {
-      if (error) fail(new Error(`lark-cli 退出码 ${String(error.code)}：${stderr.trim()}`));
-      else done(stdout);
+    execFile('lark-cli', args, { env: { ...larkEnv(configDir), ...extraEnv }, timeout: LARK_TIMEOUT_MS, maxBuffer: 256 * 1024 * 1024 }, (error, stdout, stderr) => {
+      if (error) {
+        // 区分三种失败：根本找不到命令、超时、CLI 自己报错。
+        // 原先把 ENOENT 也写成「退出码 ENOENT」，排障时会误以为是 CLI 内部错误。
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') fail(new Error('找不到 lark-cli，请检查 PATH'));
+        else if (error.killed) fail(new Error(`lark-cli 超过 ${LARK_TIMEOUT_MS / 1000} 秒没有返回，已中止`));
+        else fail(new Error(`lark-cli 退出码 ${String(error.code)}：${stderr.trim()}`));
+      } else done(stdout);
     });
   });
 }
 
 /** 分页串行读取全部记录（record-list 禁止并发）。 */
 async function readAllRecords(config: Config) {
-  return collectPages(async offset => parseRecordPage(await runLark(['base', '+record-list', '--as', 'bot', '--base-token', config.baseToken, '--table-id', config.tableId, '--offset', String(offset), '--limit', String(PAGE_SIZE)], config.configDir)));
+  // base token 曾经作为命令行参数传给 lark-cli，同步期间同机任何用户 `ps` 都能看到，
+  // 拿到就能读整张收集表（含未审核内容）。改成经环境变量传递。
+  return collectPages(async offset => parseRecordPage(await runLark(['base', '+record-list', '--as', 'bot', '--table-id', config.tableId, '--offset', String(offset), '--limit', String(PAGE_SIZE)], config.configDir, { LARK_BASE_TOKEN: config.baseToken })));
 }
 
 /** 分页逻辑本身。抽出来是为了能直接测「has_more 恒为真」这类边界。 */
