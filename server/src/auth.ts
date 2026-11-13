@@ -299,8 +299,10 @@ export class AttemptLimiter {
     // 这里存的是**未过滤**的完整列表：ids 里的序号与 attempts 的下标必须一一对应，
     // 否则随着旧记录过期，「第几条」的映射会整体错位，撤销就删到别的条上。
     // 过期条目的过滤放在 recent() 读取时做。
-    this.attempts.set(key, [...(this.attempts.get(key) ?? []), now]);
-    this.ids.set(key, [...(this.ids.get(key) ?? []), entry.id]);
+    const times = this.attempts.get(key);
+    if (times) times.push(now); else this.attempts.set(key, [now]);
+    const sequence = this.ids.get(key);
+    if (sequence) sequence.push(entry.id); else this.ids.set(key, [entry.id]);
     return entry.id;
   }
 
