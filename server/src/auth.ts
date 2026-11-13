@@ -18,7 +18,37 @@ const WEAK_PASSWORDS = new Set([
   'abc12345', 'abcd1234', 'abcdefgh', '1q2w3e4r', '1qaz2wsx', 'admin123', 'administrator', 'iloveyou',
   'woaini1314', 'a1234567', 'aa123456', 'letmein1', 'welcome1', 'zhidedeng',
 ]);
-export const isWeakPassword = (password: string) => WEAK_PASSWORDS.has(password.toLowerCase());
+/**
+ * 口令强度检查。
+ *
+ * 早先只是一张 30 词的精确匹配表，`admin1234`、`qwerty1234`、`aaaaaaaa` 全部放行——
+ * 撞库和口令喷洒（用几个常见口令打大量账号）几乎不受阻。
+ * 这里补三种最容易命中的模式：单字符重复、连续序列、键盘序列，
+ * 以及「包含用户名」这种最容易被定向猜中的情形。
+ */
+const SEQUENCES = ['0123456789', 'abcdefghijklmnopqrstuvwxyz', 'qwertyuiop', 'asdfghjkl', 'zxcvbnm'];
+
+function isKeyboardRun(lowered: string) {
+  return SEQUENCES.some(sequence => Array.from({ length: Math.max(sequence.length - 3, 0) }, (_, start) => sequence.slice(start, start + 4))
+    .some(run => lowered.includes(run) || lowered.includes([...run].reverse().join(''))));
+}
+
+/**
+ * @param password 待检查的口令
+ * @param username 可选：口令里包含用户名（或反之）时视为弱口令
+ */
+export function isWeakPassword(password: string, username?: string): boolean {
+  const lowered = password.toLowerCase();
+  if (WEAK_PASSWORDS.has(lowered)) return true;
+  // 少于 10 位且字符种类单一（只靠长度撑着）也算弱。
+  if (new Set(password).size < 4) return true;
+  if (isKeyboardRun(lowered)) return true;
+  if (username && username.length >= 3) {
+    const name = username.toLowerCase();
+    if (lowered.includes(name) || name.includes(lowered)) return true;
+  }
+  return false;
+}
 
 /** 限制同时运行的任务数，多余的排队，队列也满时拒绝。 */
 export class ConcurrencyGate {

@@ -7,8 +7,22 @@ import { isPrivateHostname } from './net.ts';
  * 服务端和 `zdd` CLI 共用这一份定义，避免本地通过、服务端拒绝的漂移。
  */
 
-/** 单行文本：非空，长度受限，去掉首尾后仍非空。 */
-export const text = (max: number) => z.string().min(1).max(max).refine(value => value.trim().length > 0, '内容不能为空');
+/**
+ * 控制字符与双向控制符。
+ *
+ * NUL、C0 控制符和 U+202A–202E / U+2066–2069 这类双向覆盖符不是正常内容：
+ * 它们会破坏下游的文本处理（日志、导出、搜索），双向符还能在标题里制造
+ * 「看到的是 A、实际是 B」的视觉欺骗。允许 \n 与 \t，其余拒绝。
+ */
+const CONTROL_CHARS = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F\u202A-\u202E\u2066-\u2069]/u;
+
+/** 单行文本：非空，长度受限，不含控制字符，去掉首尾后仍非空。 */
+export const text = (max: number) => z.string().min(1).max(max)
+  .refine(value => !CONTROL_CHARS.test(value), '内容包含不可见的控制字符')
+  .refine(value => value.trim().length > 0, '内容不能为空');
+
+/** 多行文本：额外允许换行，其余规则同上。 */
+export const multiline = (max: number) => text(max);
 
 /** 价格倍率，范围来自领域常量。 */
 export const offerRate = z.number().refine(rate => rate >= MIN_RATE && rate <= MAX_RATE, {

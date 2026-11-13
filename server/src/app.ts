@@ -409,7 +409,7 @@ export function buildApp(store: Store, now: () => Date, options: AppOptions = {}
 
   app.post(API_ROUTES.register.path, async c => {
     const input = registerSchema.parse(JSON.parse(await c.req.text() || '{}'));
-    if (isWeakPassword(input.password)) throw new ApiError(400, 'WEAK_PASSWORD', '这个密码太常见了，请换一个');
+    if (isWeakPassword(input.password, input.username)) throw new ApiError(400, 'WEAK_PASSWORD', '这个密码太容易被猜到，请换一个（避免常见词、连续字符或包含用户名）');
     const ip = `register:${clientIp(c, trustedProxies)}`;
     refuseIfLimited(c, [registerByIp.retryAfter(ip, now().getTime())]);
     const registerHandle = registerByIp.record(ip, now().getTime());
@@ -480,7 +480,7 @@ export function buildApp(store: Store, now: () => Date, options: AppOptions = {}
     const handle = sessionHandle(store, cookie, now());
     if (!handle) throw new ApiError(401, 'UNAUTHENTICATED', '请先登录');
     const input = changePasswordSchema.parse(JSON.parse(await c.req.text() || '{}'));
-    if (isWeakPassword(input.newPassword)) throw new ApiError(400, 'WEAK_PASSWORD', '这个密码太常见了，请换一个');
+    if (isWeakPassword(input.newPassword, handle)) throw new ApiError(400, 'WEAK_PASSWORD', '这个密码太容易被猜到，请换一个（避免常见词、连续字符或包含用户名）');
     const time = now().getTime();
     refuseIfLimited(c, [passwordChangeByUser.retryAfter(handle, time)]);
     passwordChangeByUser.record(handle, time);
@@ -497,6 +497,11 @@ export function buildApp(store: Store, now: () => Date, options: AppOptions = {}
     store.transaction(() => {
       store.db.prepare('UPDATE accounts SET passwordHash = ? WHERE handle = ?').run(passwordHash, handle);
       deleteOtherSessions(store, handle, cookie);
+      // Agent 凭证也要一起吊销。它是长期有效的 bearer token，且没有过期时间；
+      // 攻击者盗到会话 cookie 后签发一把，受害者改密码只会清掉会话，
+      // 那把凭证仍然能继续提交投稿、占满审核队列。禁用账号时本来就会吊销，
+      // 改密码属于同一类「账号被盗后的补救动作」，不能漏。
+      store.db.prepare('UPDATE agent_tokens SET revokedAt = ? WHERE handle = ? AND revokedAt IS NULL').run(now().toISOString(), handle);
     });
     return c.json({ ok: true });
   });

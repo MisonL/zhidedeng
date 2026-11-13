@@ -433,3 +433,21 @@ describe('旧库启动兼容', () => {
     }
   });
 });
+
+describe('改密码与凭证吊销', () => {
+  it('改密码会一并吊销 Agent 凭证，盗号者拿到的长期凭证同时失效', async () => {
+    const cookie = account();
+    const token = await issued(cookie);
+    const active = (id: string) => Number(server.db.prepare('SELECT count(*) AS c FROM agent_tokens WHERE id = ? AND revokedAt IS NULL').get(id)!.c);
+    expect(active(token.id)).toBe(1);
+
+    // 攻击者可以先盗会话签发凭证，受害者随后改密码。只清会话的话，
+    // 那把凭证没有过期时间，仍然能继续提交投稿、占满审核队列。
+    const response = await server.app.request('/api/auth/password', {
+      method: 'POST', headers: { ...json, cookie },
+      body: JSON.stringify({ currentPassword: 'agent-tests-correct-horse', newPassword: 'another-strong-passphrase' }),
+    });
+    expect(response.status).toBe(200);
+    expect(active(token.id)).toBe(0);
+  });
+});
