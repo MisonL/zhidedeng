@@ -120,11 +120,33 @@ export function isTrustedProxy(remote: string | undefined, trusted: string): boo
   return false;
 }
 
-/** 直连方是可信反代时才用 X-Forwarded-For；其他情况用直连地址，避免被伪造头绕过限流。 */
+/** 是否是合法 IP 字面量（v4 或 v6）。用来把伪造头里的垃圾段直接丢掉。 */
+function isIpLiteral(value: string): boolean {
+  if (ipv4ToInt(value) !== null) return true;
+  // v6 至少要有一个冒号且只含十六进制、冒号、点和百分号作用域。
+  return value.includes(':') && /^[0-9a-fA-F:.%]+$/.test(value);
+}
+
+/**
+ * 直连方是可信反代时才用 X-Forwarded-For；其他情况用直连地址。
+ *
+ * 取最右一段：反代覆写 X-Forwarded-For 时最右就是真实客户端，左边全是客户端
+ * 自己塞的。逐段做 IP 校验，非法段直接丢弃——否则限流键会变成任意字符串，
+ * 换一次头就是一个新桶，等于把按 IP 的限流整个取消。
+ *
+ * 注意这条防线的前提是「可信反代确实覆写了这个头」。端口直映射进容器时前面
+ * 没有任何代理，此时**不能**配置 TRUSTED_PROXIES，否则客户端自带的头会被
+ * 原样采信。这是部署约定，启动日志会针对这个组合告警。
+ */
 function clientIp(c: AppContext, trustedProxies: string) {
   const remote = c.env?.incoming?.socket.remoteAddress;
-  const fromProxy = isTrustedProxy(remote, trustedProxies);
-  return normalizeIp((fromProxy ? c.req.header('x-forwarded-for')?.split(',').at(-1)?.trim() : undefined) ?? remote ?? 'unknown');
+  if (isTrustedProxy(remote, trustedProxies)) {
+    const forwarded = (c.req.header('x-forwarded-for') ?? '')
+      .split(',').map(part => part.trim()).filter(part => part !== '' && isIpLiteral(part));
+    const candidate = forwarded.at(-1);
+    if (candidate) return normalizeIp(candidate);
+  }
+  return normalizeIp(remote ?? 'unknown');
 }
 
 export function buildApp(store: Store, now: () => Date, options: AppOptions = {}) {

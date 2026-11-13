@@ -32,6 +32,9 @@ const server = serve({ fetch: app.fetch, port, hostname }, info => {
   }
   // 生产环境靠 Secure cookie 保会话；请求若不是 https，cookie 会被浏览器丢弃，
   // 表现为「登录成功但立刻又变回未登录」。这里提前说清楚，别让人去猜。
+  if (process.env.TRUSTED_PROXIES) {
+    console.warn('已配置 TRUSTED_PROXIES：来自该网段的请求，其 X-Forwarded-For 会被采信为真实来源。仅当这个网段里确实有反代在**覆写**该请求头时才是对的；端口直映射进容器（没有反代）却配了它，等于允许客户端伪造来源 IP，按 IP 的限流会失效。');
+  }
   if (process.env.TLS_ENABLED === '1' && !process.env.TRUSTED_PROXIES) {
     console.warn('已启用 TLS_ENABLED 但未配置 TRUSTED_PROXIES：cookie 的 Secure 标记不受影响，但所有请求的来源都会记成网关地址，按 IP 的限流会退化成全站共用一个桶。');
   }

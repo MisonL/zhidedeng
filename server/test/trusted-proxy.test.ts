@@ -96,6 +96,31 @@ describe('无请求体的写接口', () => {
   });
 });
 
+describe('X-Forwarded-For 逐段校验', () => {
+  const register = (xff: string, server: ReturnType<typeof createApp>) => server.app.request('/api/auth/register', {
+    method: 'POST',
+    headers: { ...json, 'x-forwarded-for': xff },
+    body: JSON.stringify({ username: 'u' + Math.random().toString(36).slice(2, 10), password: PASSWORD }),
+  }, { incoming: { socket: { remoteAddress: '172.17.0.1' } } });
+
+  it('非 IP 的伪造段被丢弃，退回直连地址而不是变成新的限流桶', async () => {
+    // 不校验的话限流键会变成任意字符串，换一次头就是一个新桶，
+    // 按 IP 的注册上限（10/小时）等于被取消。
+    const server = createApp({ dbPath: ':memory:', now: () => clock, trustedProxies: '172.16.0.0/12' });
+    const codes: number[] = [];
+    for (let index = 0; index < 12; index += 1) codes.push((await register(`<script>${index}</script>`, server)).status);
+    expect(codes.slice(0, 10).every(code => code === 200)).toBe(true);
+    expect(codes.slice(10).every(code => code === 429)).toBe(true);
+  });
+
+  it('多段里只有非法段时同样退回直连地址', async () => {
+    const server = createApp({ dbPath: ':memory:', now: () => clock, trustedProxies: '172.16.0.0/12' });
+    const codes: number[] = [];
+    for (let index = 0; index < 12; index += 1) codes.push((await register(`evil-${index}, also-bad`, server)).status);
+    expect(codes.at(-1)).toBe(429);
+  });
+});
+
 describe('cookie 的 Secure 标记', () => {
   const login = async (server: ReturnType<typeof createApp>, headers: Record<string, string> = {}) => {
     const response = await server.app.request('/api/auth/register', {

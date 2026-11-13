@@ -21,6 +21,10 @@ services:
       # 不配这一项，所有用户的 IP 限流会共用同一个桶：31 个不同来源就一起被 429。
       # 查自己机器上的网段：docker network inspect <项目名>_default --format '{{range .IPAM.Config}}{{.Subnet}}{{end}}'
       # 留空则退化成「只有本机可信」，容器部署下等于全站共用一个限流桶。
+      # 只有「前面确实有一个会覆写 X-Forwarded-For 的反代」时才填它的网段。
+      # 本文件是端口直映射进容器（127.0.0.1:8788 -> 8787），前面没有代理，
+      # 填了反而会让客户端自带的 X-Forwarded-For 被采信，换一次头就是一个新
+      # 限流桶，按 IP 的注册/登录上限直接归零。保持为空。
       TRUSTED_PROXIES: ${TRUSTED_PROXIES:-}
       # 公网部署时置 1：会话 cookie 会按请求的实际协议加 Secure。
       # 前面必须挂 HTTPS 反代并透传 X-Forwarded-Proto，否则登录态不被浏览器保存。

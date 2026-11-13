@@ -199,7 +199,11 @@ pnpm sync:feishu --allow-skipped     # 显式跳过坏记录，本次只提交 u
 - 存量飞书站点（只有实体、没有投稿记录）在切到队列模式后无法下架：下架要根据投稿记录比对版本，查不到就永远返回 `STALE_REMOVAL`。上线前跑一次 `pnpm backfill:submissions --db=<路径> [--apply]` 补出 approved 投稿记录；默认是 dry-run，只打印不写库，可重复执行。
 - 禁用账号不会自动隐藏它已发布的内容，要逐条隐藏评论或拒绝投稿。
 - 中转站 URL 只去掉 query 和 fragment，路径里的邀请码过滤不到，靠人工审核。
-- 容器部署要显式配置 `TRUSTED_PROXIES`（反代网段），否则所有请求的来源都记成 Docker 网关，按 IP 的限流会退化成全站共用一个桶。具体网段每台机器不同，用 `docker network inspect <项目名>_default --format '{{range .IPAM.Config}}{{.Subnet}}{{end}}'` 查，别照抄示例。
+- `TRUSTED_PROXIES` 的含义是「这个网段里有一个反代在**覆写** `X-Forwarded-For`」，不是「请求来自这个网段」。两者搞混的后果方向相反：
+  - 该配没配：所有请求的来源都记成网关地址，按 IP 的限流退化成全站共用一个桶（一个人就能把全站注册/登录打到 429）。
+  - 不该配却配了：端口直映射进容器时前面没有任何代理，客户端自带的 `X-Forwarded-For` 会被原样采信，换一次头就是一个新桶，按 IP 的上限直接归零。
+  仓库里的 `docker-compose.yml` 是端口直映射形态，所以默认留空；`deploy/nginx-site.conf.template` 那套（nginx 用 `proxy_set_header X-Forwarded-For $remote_addr` 覆写）才需要配。启动日志会针对这两种组合分别告警。
+- 代码侧对 `X-Forwarded-For` 逐段做 IP 校验，非法段直接丢弃，避免限流键变成任意字符串。但这挡不住「伪造一个合法 IP」——那只能靠上面这条部署约定。
 - 生产环境要设 `TLS_ENABLED=1`，此时会话 cookie 一律带 `Secure`。这个开关就是运维在断言「本站对外是 HTTPS」，所以它不看请求头、也不依赖 `TRUSTED_PROXIES`——早先三者耦合，导致开了 TLS 但漏配反代时 Secure 被静默丢掉，HTTPS 站点上的会话 cookie 会随任意明文请求发出去。
   反过来的误配（声明了 TLS 实际却在 http 上访问）会让浏览器丢弃 cookie，表现为登录成功却立刻变回未登录，启动日志会对此告警。纯本机 http 试用保持 `TLS_ENABLED=0`。
 - Docker 镜像是单进程、单库的部署形态。要横向扩到多容器，SQLite 与 `rate_limits` 都不再适用，需要换共享存储。
