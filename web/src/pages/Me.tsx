@@ -2,6 +2,7 @@ import { useState } from 'react';
 import type { FormEvent } from 'react';
 import { Link, useSearchParams } from 'react-router';
 import type { CurrentUser } from '@zhidedeng/shared';
+import { PROFILE_LIMITS } from '@zhidedeng/shared';
 import { api } from '../api';
 import AsyncView, { Empty, LoadMore, Skeleton } from '../components/AsyncView';
 import PostCard from '../components/PostCard';
@@ -74,11 +75,11 @@ function Settings({ user }: { user: CurrentUser }) {
     <form className="settings-form" onSubmit={save} noValidate>
       <div className="field">
         <label className="field-label" htmlFor="me-nickname">昵称</label>
-        <input id="me-nickname" maxLength={30} value={nickname} onChange={(event) => setNickname(event.target.value)} />
+        <input id="me-nickname" maxLength={PROFILE_LIMITS.nickname} value={nickname} onChange={(event) => setNickname(event.target.value)} />
       </div>
       <div className="field">
         <label className="field-label" htmlFor="me-bio">简介</label>
-        <textarea id="me-bio" rows={3} maxLength={200} value={bio} onChange={(event) => setBio(event.target.value)} />
+        <textarea id="me-bio" rows={3} maxLength={PROFILE_LIMITS.bio} value={bio} onChange={(event) => setBio(event.target.value)} />
       </div>
       {message && <p className={message.ok ? 'form-success' : 'form-error'} role={message.ok ? 'status' : 'alert'}>{message.text}</p>}
       <button type="submit" className="btn btn-red submit-btn" disabled={saving}>{saving ? '保存中…' : '保存'}</button>

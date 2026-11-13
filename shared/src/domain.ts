@@ -207,3 +207,10 @@ export interface ExpertRanking {
   shareCount: number;
   upCount: number;
 }
+
+/**
+ * 前后端共用的展示类字段长度上限。
+ * 分开写死会让前端放行、后端 400——用户只看到「请求参数无效」，不知道是长度问题。
+ * 放在这里而不是 submission.ts：后者依赖 zod，前端只引常量时不该把 zod 带进产物。
+ */
+export const PROFILE_LIMITS = { nickname: 20, bio: 500 } as const;

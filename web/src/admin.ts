@@ -90,14 +90,19 @@ export const admin = {
     request<PendingSubmissions>(`/api/admin/submissions?status=${encodeURIComponent(status)}&pageSize=50`, { signal }),
   listAllSubmissions: async (status: string, signal?: AbortSignal): Promise<SubmissionRecord[]> => {
     const all: SubmissionRecord[] = [];
-    for (let page = 1; page <= MAX_PAGES; page += 1) {
+    // 页数上限按 total 动态算：写死 20 页（1000 条）时，超出部分被静默丢掉，
+    // 「全部通过」会漏条目而界面上完全看不出来。
+    let maxPages = MAX_PAGES;
+    for (let page = 1; page <= maxPages; page += 1) {
       const chunk = await request<PendingSubmissions>(
         `/api/admin/submissions?status=${encodeURIComponent(status)}&pageSize=50&page=${page}`, { signal },
       );
+      if (page === 1) maxPages = Math.max(maxPages, Math.ceil(chunk.total / 50));
       all.push(...chunk.items);
       if (all.length >= chunk.total || chunk.items.length === 0) return all;
     }
-    return all;
+    // 到上限还没取完：宁可报错，也不能假装取全了。
+    throw new AdminError(`待审条目过多（超过 ${all.length} 条），请先分批处理`, 'TOO_MANY');
   },
   reviewSubmission: (id: string, status: 'approved' | 'rejected', reason?: string) =>
     request<SubmissionRecord>(`/api/admin/submissions/${encodeURIComponent(id)}/review`, {

@@ -5,6 +5,9 @@ import { admin, adminToken, AdminError } from '../admin';
 import type { AdminPostRow, RemovedStation } from '../admin';
 import { Skeleton } from '../components/AsyncView';
 
+/** 服务端 ids 模式的单批上限，与 submissions.ts 的 schema 保持一致。 */
+const BATCH_REVIEW_LIMIT = 100;
+
 const displayTime = (iso: string) => {
   const date = new Date(iso);
   // removedAt 是库里的原始字段，没有格式校验；非法值不该渲染成 "Invalid Date"。
@@ -115,7 +118,13 @@ export default function Admin() {
     setError(undefined);
     setMessage(undefined);
     try {
-      const { results } = await admin.batchReview(ids, 'approved');
+      // 服务端 ids 模式一次最多 100 条，超过是整个请求 400（不是逐条失败）。
+      // 飞书全量导入一次就可能推入几百条，所以这里必须分批。
+      const results: Awaited<ReturnType<typeof admin.batchReview>>['results'] = [];
+      for (let start = 0; start < ids.length; start += BATCH_REVIEW_LIMIT) {
+        const chunk = await admin.batchReview(ids.slice(start, start + BATCH_REVIEW_LIMIT), 'approved');
+        results.push(...chunk.results);
+      }
       const failed = results.filter(result => result.error);
       const ok = results.length - failed.length;
       if (failed.length === 0) setMessage(`已通过 ${ok} 条`);
