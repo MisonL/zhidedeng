@@ -60,14 +60,28 @@ describe('登录限制', () => {
     expect((await login('alice', PASSWORD)).status).toBe(429);
   }, 30_000);
 
-  it('成功登录也计入总量配额，但会清掉「这个 IP 猜这个账号」的失败计数', async () => {
+  it('成功登录也计入按账号的配额，单人拿自己账号刷不穿密码校验闸门', async () => {
     await register('alice');
-    // 成功登录不再退还按用户名（20）与按 IP（30）的预占：
-    // 全退的话任何注册用户拿自己的正确密码循环打登录，就能一直占住密码校验的
-    // 并发闸门，把登录、注册、改密一起打成 503，代价只是一个自建账号。
+    // 按账号这一维不退：退掉的话任何注册用户拿自己的正确密码循环打登录，
+    // 就能一直占住密码校验的并发闸门（2 执行 + 16 排队），把登录、注册、
+    // 改密一起打成 503，代价只是一个自建账号。
     for (let index = 0; index < 20; index++) expect((await login('alice', PASSWORD)).status).toBe(200);
     expect((await login('alice', PASSWORD)).status).toBe(429);
   }, 30_000);
+
+  it('按 IP 的配额在成功后退还，共用出口 IP 的人不会被邻居拖累', async () => {
+    // 办公室、学校、运营商 CGNAT 后面几十个人共用一个出口 IP。
+    // 按 IP 这一维若不退，5 个人各登录 6 次就用光 30 次/15 分钟，
+    // 第 31 次起整个 IP 的人都要 429——无论密码对错。
+    for (const name of ['nat_a', 'nat_b', 'nat_c', 'nat_d', 'nat_e']) await register(name);
+    for (let round = 0; round < 6; round++) {
+      for (const name of ['nat_a', 'nat_b', 'nat_c', 'nat_d', 'nat_e']) {
+        expect((await login(name, PASSWORD)).status).toBe(200);
+      }
+    }
+    // 第 31 次仍然成功：这一维已经被成功登录退回去了。
+    expect((await login('nat_a', PASSWORD)).status).toBe(200);
+  }, 60_000);
 
   it('成功登录清掉该 IP 对该账号的失败计数，不会被自己之前的失误挡住', async () => {
     await register('alice');

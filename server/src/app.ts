@@ -98,7 +98,13 @@ export function normalizeIp(ip: string) {
   const [head, tail] = address.split('::');
   const leading = head ? head.split(':') : [];
   const trailing = tail ? tail.split(':') : [];
-  const groups = address.includes('::') ? [...leading, ...Array<string>(8 - leading.length - trailing.length).fill('0'), ...trailing] : leading;
+  // 分组数要夹在 0..8 之间再做减法和 Array()。
+  // 原先直接写 Array(8 - leading.length - trailing.length)：`1:2:3:4:5:6:7:8::9:2:3:4:5:6:7:8`
+  // 这种畸形输入会让长度变成负数，Node 抛 RangeError: Invalid array length，
+  // 一路冒到 500——而它来自客户端完全可控的 X-Forwarded-For 头。
+  if (!address.includes('::')) return `${leading.slice(0, 4).map(group => group.replace(/^0+(?=.)/, '')).join(':')}::/64`;
+  const width = Math.max(0, 8 - leading.length - trailing.length);
+  const groups = [...leading, ...Array<string>(width).fill('0'), ...trailing];
   return `${groups.slice(0, 4).map(group => group.replace(/^0+(?=.)/, '')).join(':')}::/64`;
 }
 
@@ -453,15 +459,23 @@ export function buildApp(store: Store, now: () => Date, options: AppOptions = {}
       loginByUsername.release(usernameKey, loginUsernameHandle);
     };
     /**
-     * 登录成功只退「这个 IP 猜这个账号」的失败计数，不退按 IP 与按账号的总量。
+     * 登录成功后的退还策略。
      *
      * 三个都退会让成功登录完全不计入配额：任何注册用户拿自己的正确密码循环打
      * /api/auth/login，就能一直占用密码校验的并发闸门（2 执行 + 16 排队），
-     * 把登录、注册、改密一起打成 503，代价只是一个自建账号。
+     * 把登录、注册、改密一起打成 503，代价只是一个自建账号。所以按账号的
+     * loginByUsername **不退**——它防的正是「单人拿自己账号刷」。
+     *
+     * 按 IP 的 loginByIp 要退：它是按失败次数不该累加的那个维度。办公室、
+     * 学校、运营商 CGNAT 后面几十个人共用一个出口 IP，若不退，5 个人各登录
+     * 6 次就把 30 次/15 分钟用光，第 31 次起整个 IP 的人都要 429——无论密码对错。
+     * 不退那个维度换来的是「同一 IP 的其他人被误伤」，而不退账号维度换来的是
+     * 「单人刷自己的账号被挡住」，后者才是我们要防的攻击面。
      */
     const refundOnSuccess = () => {
       loginByTarget.release(pair, loginTargetHandle);
       loginByTarget.clear(pair);
+      loginByIp.release(ip, loginIpHandle);
     };
     const account = store.db.prepare('SELECT handle, passwordHash, disabledAt FROM accounts WHERE usernameKey = ?').get(usernameKey);
     let valid: boolean;

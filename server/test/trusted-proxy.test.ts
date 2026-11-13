@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../src/node-app.ts';
-import { isTrustedProxy } from '../src/app.ts';
+import { isTrustedProxy, normalizeIp } from '../src/app.ts';
 
 const json = { 'content-type': 'application/json' };
 // 复用 auth.test.ts 的约定。之前这里写了一个大小写+数字+符号的字面量，
@@ -166,5 +166,23 @@ describe('cookie 的 Secure 标记', () => {
   it('没开 TLS 时本机 http 能正常拿到 cookie', async () => {
     const server = createApp({ dbPath: ':memory:', now: () => clock });
     expect(await login(server)).not.toContain('Secure');
+  });
+});
+
+describe('来源地址归一化', () => {
+  it('畸形 IPv6 不会抛异常变成 500', async () => {
+    // 这个头完全由客户端控制。原先 normalizeIp 里 Array(8 - 14 - 8) 得到负长度，
+    // Node 抛 RangeError: Invalid array length，一路冒到 500。
+    const server = createApp({ dbPath: ':memory:', now: () => clock, trustedProxies: '172.16.0.0/12' });
+    const response = await server.app.request('/api/models', {
+      headers: { 'x-forwarded-for': '1:2:3:4:5:6:7:8::9:2:3:4:5:6:7:8' },
+    }, { incoming: { socket: { remoteAddress: '172.17.0.1' } } });
+    expect(response.status).toBe(200);
+  });
+
+  it('各种畸形写法都不崩', () => {
+    for (const value of [':::', 'a:::b', '1:2:3:4:5:6:7:8:9', 'fe80::1%eth0', '::']) {
+      expect(() => normalizeIp(value)).not.toThrow();
+    }
   });
 });
