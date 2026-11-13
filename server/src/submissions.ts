@@ -333,12 +333,18 @@ export function listSubmissions(store: Store, input: {
   // 用 DEFERRED 而不是 store.transaction 的 BEGIN IMMEDIATE：这是纯读操作，
   // 拿写锁会让「有人在写」时列表接口一起 503——只读查询不该排队等写锁。
   // DEFERRED 在第一条 SELECT 时开启读事务，两条查询看到同一个快照。
-  store.db.prepare('BEGIN DEFERRED').run();
-  try {
+  // 已经在外层事务里（调用方自己开的事务）就不要再开一个：SQLite 不允许嵌套
+  // 裸 BEGIN。外层事务本身就是同一个快照，直接读即可。
+  const read = () => {
     const total = Number(store.db.prepare(`SELECT COUNT(*) AS total FROM submissions${where}`).get(...params)!.total);
     const rows = store.db.prepare(`SELECT * FROM submissions${where} ORDER BY createdAt, rowid LIMIT ? OFFSET ?`)
       .all(...params, pageSize, (page - 1) * pageSize);
     return { items: rows.map(submissionRecord), total, page, pageSize };
+  };
+  if (store.inTransaction()) return read();
+  store.db.prepare('BEGIN DEFERRED').run();
+  try {
+    return read();
   } finally {
     store.db.prepare('COMMIT').run();
   }

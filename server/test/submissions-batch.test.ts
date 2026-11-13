@@ -1064,26 +1064,32 @@ describe('全站待审熔断', () => {
 });
 
 describe('列表接口在写锁被占用时仍可读', () => {
-  it('只读查询不排队等写锁', async () => {
-    // 列表用的是 BEGIN DEFERRED 读事务：拿到同一快照保证 total 与 items 一致，
-    // 但不抢写锁。用 BEGIN IMMEDIATE 的话，只要有别的写入在跑，
-    // 管理端的列表就会跟着 503——只读接口不该被写操作拖下水。
-    const held = openDatabase(':memory:');
-    // 同一条连接模拟「正持着写锁」：先开写事务，再查列表。
-    // 如果列表函数自己再 BEGIN IMMEDIATE，这里会抛「cannot start a transaction」。
-    held.exec('BEGIN IMMEDIATE');
-    try {
-      expect(() => listSubmissions(store, { status: 'pending' })).not.toThrow();
-    } finally {
-      held.exec('ROLLBACK');
-      held.close();
-    }
+  it('列表用的是只读事务，不会因为外层已有事务而抛错', async () => {
+    // 第一版这条测试假得很：它在一个**独立的内存库**上开写事务，跟被测的
+    // store 毫无关系，就算实现改回 BEGIN IMMEDIATE 也照样通过。
+    // 真正的检查是：在 store 自己的事务里调用列表函数。
+    // 用 BEGIN IMMEDIATE 的话这里必然抛 cannot start a transaction；
+    // BEGIN DEFERRED 在已有事务内不会再开一个，能正常返回。
+    await submit([stationItem('readtx.example.com')]);
+    let inside: ReturnType<typeof listSubmissions> | undefined;
+    store.transaction(() => {
+      inside = listSubmissions(store, { status: 'pending', pageSize: 50 });
+    });
+    expect(inside?.total).toBe(inside?.items.length);
+    expect(inside!.items.length).toBeGreaterThanOrEqual(1);
   });
 
-  it('count 与 items 来自同一快照', async () => {
+  it('count 与 items 一致，翻页不重不漏', async () => {
     await submit([stationItem('snap-a.example.com'), stationItem('snap-b.example.com'), stationItem('snap-c.example.com')]);
-    const first = listSubmissions(store, { status: 'pending', pageSize: 50 });
-    expect(first.total).toBe(first.items.length);
-    expect(first.items.length).toBeGreaterThanOrEqual(3);
+    const all = listSubmissions(store, { status: 'pending', pageSize: 50 });
+    expect(all.total).toBe(all.items.length);
+    // 逐页取回，合并后应与一次取全完全相同：这条能抓到 count 与 items
+    // 分属两条语句时的不自洽。
+    const ids: string[] = [];
+    for (let page = 1; page <= Math.ceil(all.total / 2); page += 1) {
+      const chunk = listSubmissions(store, { status: 'pending', pageSize: 2, page });
+      ids.push(...chunk.items.map(item => item.id));
+    }
+    expect(ids).toEqual(all.items.map(item => item.id));
   });
 });

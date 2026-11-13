@@ -148,8 +148,11 @@ export type SqlRow = Record<string, unknown>;
 export class Store {
   readonly db: SqlDatabase;
   readonly transaction: <T>(action: () => T) => T;
+  /** 当前是否已在事务里。只读函数据此决定要不要自己开读事务，避免嵌套。 */
+  readonly inTransaction: () => boolean;
 
-  constructor(db: SqlDatabase, transaction: <T>(action: () => T) => T) {
+  constructor(db: SqlDatabase, transaction: <T>(action: () => T) => T, inTransaction: () => boolean = () => false) {
+    this.inTransaction = inTransaction;
     this.db = db;
     this.transaction = transaction;
   }

@@ -49,7 +49,7 @@ export function openStore(db: DatabaseSync) {
   // 里那句 ROLLBACK 会把**外层未提交的写入全部丢掉**，还会把本应回滚的
   // 记录继续写下去——比直接报错更糟。
   let depth = 0;
-  return new Store(db as unknown as SqlDatabase, action => {
+  const store = new Store(db as unknown as SqlDatabase, action => {
     if (depth > 0) {
       const savepoint = `nested_${depth}`;
       depth += 1;
@@ -79,7 +79,8 @@ export function openStore(db: DatabaseSync) {
     } finally {
       depth = 0;
     }
-  });
+  }, () => depth > 0);
+  return store;
 }
 
 export function createApp(options: { dbPath?: string; now?: () => Date; syncToken?: string; inviteCodes?: readonly string[]; webRoot?: string; trustedProxies?: string; secureCookie?: boolean } = {}) {
