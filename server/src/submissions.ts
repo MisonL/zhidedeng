@@ -327,10 +327,21 @@ export function listSubmissions(store: Store, input: {
   if (kind) { filters.push('kind = ?'); params.push(kind); }
   if (batchId) { filters.push('batchId = ?'); params.push(batchId); }
   const where = filters.length ? ` WHERE ${filters.join(' AND ')}` : '';
-  const total = Number(store.db.prepare(`SELECT COUNT(*) AS total FROM submissions${where}`).get(...params)!.total);
-  const rows = store.db.prepare(`SELECT * FROM submissions${where} ORDER BY createdAt, rowid LIMIT ? OFFSET ?`)
-    .all(...params, pageSize, (page - 1) * pageSize);
-  return { items: rows.map(submissionRecord), total, page, pageSize };
+  // 两条语句要在同一个读快照里：否则中间插入一条，total 与 items 就对不上，
+  // 管理端会显示「共 51 条」却只列出 50 条。
+  //
+  // 用 DEFERRED 而不是 store.transaction 的 BEGIN IMMEDIATE：这是纯读操作，
+  // 拿写锁会让「有人在写」时列表接口一起 503——只读查询不该排队等写锁。
+  // DEFERRED 在第一条 SELECT 时开启读事务，两条查询看到同一个快照。
+  store.db.prepare('BEGIN DEFERRED').run();
+  try {
+    const total = Number(store.db.prepare(`SELECT COUNT(*) AS total FROM submissions${where}`).get(...params)!.total);
+    const rows = store.db.prepare(`SELECT * FROM submissions${where} ORDER BY createdAt, rowid LIMIT ? OFFSET ?`)
+      .all(...params, pageSize, (page - 1) * pageSize);
+    return { items: rows.map(submissionRecord), total, page, pageSize };
+  } finally {
+    store.db.prepare('COMMIT').run();
+  }
 }
 
 /** 从站点 url 取归一化 hostname，用于判断某个 slug 是不是同一个站点。 */

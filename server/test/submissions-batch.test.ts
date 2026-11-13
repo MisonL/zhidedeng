@@ -1062,3 +1062,28 @@ describe('全站待审熔断', () => {
     expect(result.results.every(item => item.status === 'pending')).toBe(true);
   });
 });
+
+describe('列表接口在写锁被占用时仍可读', () => {
+  it('只读查询不排队等写锁', async () => {
+    // 列表用的是 BEGIN DEFERRED 读事务：拿到同一快照保证 total 与 items 一致，
+    // 但不抢写锁。用 BEGIN IMMEDIATE 的话，只要有别的写入在跑，
+    // 管理端的列表就会跟着 503——只读接口不该被写操作拖下水。
+    const held = openDatabase(':memory:');
+    // 同一条连接模拟「正持着写锁」：先开写事务，再查列表。
+    // 如果列表函数自己再 BEGIN IMMEDIATE，这里会抛「cannot start a transaction」。
+    held.exec('BEGIN IMMEDIATE');
+    try {
+      expect(() => listSubmissions(store, { status: 'pending' })).not.toThrow();
+    } finally {
+      held.exec('ROLLBACK');
+      held.close();
+    }
+  });
+
+  it('count 与 items 来自同一快照', async () => {
+    await submit([stationItem('snap-a.example.com'), stationItem('snap-b.example.com'), stationItem('snap-c.example.com')]);
+    const first = listSubmissions(store, { status: 'pending', pageSize: 50 });
+    expect(first.total).toBe(first.items.length);
+    expect(first.items.length).toBeGreaterThanOrEqual(3);
+  });
+});
