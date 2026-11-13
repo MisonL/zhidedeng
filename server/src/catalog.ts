@@ -61,7 +61,9 @@ function importCatalog(store: Store, input: CatalogImportRequest): CatalogImport
       }
       return true;
     });
-    const offers = stations.flatMap(({ slug, offers: stationOffers }) => stationOffers.map(offer => ({ stationSlug: slug, ...offer })));
+    // 模型 slug 统一按 adminSlug 解析后再入队：自动收录时用的是解析后的值，
+    // 报价却用原值的话，' m1 ' 会写成一条查不到模型的孤儿报价，页面上渲染不出来。
+    const offers = stations.flatMap(({ slug, offers: stationOffers }) => stationOffers.map(offer => ({ stationSlug: slug, ...offer, modelSlug: adminSlug.parse(offer.modelSlug) })));
 
     const models = new Set(store.all('model').map(model => model.slug));
     const unknown = [...new Set(offers.map(offer => offer.modelSlug).filter(slug => !models.has(slug)))];
@@ -80,10 +82,15 @@ function importCatalog(store: Store, input: CatalogImportRequest): CatalogImport
       }
       if (!store.get('vendor', 'unknown')) store.put('vendor', 'unknown', { slug: 'unknown', name: '未知厂商', iconKey: 'unknown' });
       for (const slug of resolved) {
+        // 已存在的模型一律不动：这里只是补录缺失的占位模型，
+        // 无条件 put 会把管理员维护好的厂商、名称、描述整个覆盖成占位内容。
+        if (store.get('model', slug)) throw new ApiError(400, 'INVALID_INPUT', `模型 ${slug} 已存在，报价里请直接用它的 slug`);
         store.put('model', slug, { slug, vendor: 'unknown', name: slug, description: '群友/Agent 提交时自动创建，待补全', tags: [] });
       }
     }
-    store.db.prepare(`DELETE FROM offers WHERE stationSlug IN ${SUBMITTED_STATIONS}`).run();
+    // 只删在线站点的报价。已下架站点的报价要留着，否则恢复之后变成没有报价的空站，
+    // 而「可恢复」正是软删除存在的理由——全量导入不该把它变成「恢复了一半」。
+    store.db.prepare(`DELETE FROM offers WHERE stationSlug IN (SELECT id FROM entities WHERE kind = 'station' AND ${IS_SUBMISSION} AND removedAt IS NULL)`).run();
     // 只清在线的：已下架的行留着，恢复接口还要用。
     // 全量导入再干净也不该把「可恢复」变成「永久没了」。
     // 先把旧指标抄下来再删。删完再 store.get() 只会拿到 undefined，
@@ -181,9 +188,20 @@ export function deleteModel(store: Store, slug: string): AdminDeleteModelRespons
     // 文章也会关联模型，直接删会留下指向不存在模型的引用。
     const posts = store.db.prepare("SELECT COUNT(*) AS count FROM entities WHERE kind = 'post' AND removedAt IS NULL AND json_extract(data,'$.modelSlug') = ?").get(slug)!;
     const postCount = Number(posts.count);
-    if (stationCount + postCount > 0) {
-      const used = [stationCount && `${stationCount} 个站点的报价`, postCount && `${postCount} 篇文章`].filter(Boolean).join('和');
-      throw new ApiError(409, 'MODEL_IN_USE', `模型仍被${used}引用`, { stationCount, postCount });
+    // 待审投稿也算引用：站点投稿在入队时就校验过模型，删掉模型之后它再也没法
+    // 通过审核，会变成一条永远拒绝的记录——而管理员并不知道自己刚删的模型
+    // 还在队列里等着。
+    const pending = store.db.prepare(`SELECT COUNT(*) AS count FROM submissions WHERE status = 'pending'
+      AND (json_extract(payload,'$.modelSlug') = ? OR EXISTS (SELECT 1 FROM json_each(json_extract(payload,'$.offers')) WHERE json_extract(value,'$.modelSlug') = ?))`)
+      .get(slug, slug)!;
+    const pendingCount = Number(pending.count);
+    if (stationCount + postCount + pendingCount > 0) {
+      const used = [
+        stationCount && `${stationCount} 个站点的报价`,
+        postCount && `${postCount} 篇文章`,
+        pendingCount && `${pendingCount} 条待审投稿`,
+      ].filter(Boolean).join('和');
+      throw new ApiError(409, 'MODEL_IN_USE', `模型仍被${used}引用`, { stationCount, postCount, pendingCount });
     }
     store.db.prepare('DELETE FROM entities WHERE kind = ? AND id = ?').run('model', slug);
     return { slug, deleted: true };
