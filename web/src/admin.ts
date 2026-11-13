@@ -29,19 +29,25 @@ export class AdminError extends Error {
   }
 }
 
+/** 与公开接口一致：没有超时时，后端不响应会让按钮永远转圈。 */
+const ADMIN_TIMEOUT_MS = 30_000;
+
 async function request<T>(path: string, init: { method?: string; body?: unknown; signal?: AbortSignal } = {}): Promise<T> {
   const token = adminToken.get();
   if (!token) throw new AdminError('请先填写管理密钥', 'NO_TOKEN');
+  // 批量审核一次要发 100 个 id，给的时间比普通请求宽。
+  const timeout = AbortSignal.timeout(ADMIN_TIMEOUT_MS);
   const response = await fetch(path, {
     method: init.method ?? 'GET',
-    signal: init.signal,
+    signal: init.signal ? AbortSignal.any([init.signal, timeout]) : timeout,
     headers: {
       authorization: `Bearer ${token}`,
       ...(init.body === undefined ? {} : { 'content-type': 'application/json' }),
     },
     body: init.body === undefined ? undefined : JSON.stringify(init.body),
-  }).catch(() => {
-    throw new AdminError('网络连接失败，请稍后再试');
+  }).catch((error: unknown) => {
+    if (timeout.aborted && !init.signal?.aborted) throw new AdminError('请求超时，请稍后重试', 'TIMEOUT');
+    throw new AdminError(error instanceof Error && error.name === 'AbortError' ? '请求已取消' : '网络连接失败，请稍后再试');
   });
   const payload = await response.json().catch(() => null);
   if (!response.ok) {

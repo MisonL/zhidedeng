@@ -12,13 +12,23 @@ export interface AsyncState<T> {
 export function useAsync<T>(fetcher: (signal: AbortSignal) => Promise<T>, deps: DependencyList) {
   const [state, setState] = useState<{ data?: T; error?: Error }>({});
   const [attempt, setAttempt] = useState(0);
+  /**
+   * 外部状态代次。
+   *
+   * 初次挂载的请求可能在 signIn/signOut 之后才返回，那时它带的是**旧身份**，
+   * 直接 setState 会把刚登录的账号覆盖成匿名、或把已退出的账号又显示出来。
+   * setData 递增这里，仍在飞行中的旧请求看到代次变了就丢弃自己的结果。
+   */
+  const generation = useRef(0);
 
   useEffect(() => {
     const controller = new AbortController();
+    const started = generation.current;
     setState({});
+    const stale = () => controller.signal.aborted || started !== generation.current;
     fetcher(controller.signal).then(
-      (data) => { if (!controller.signal.aborted) setState({ data }); },
-      (error: Error) => { if (!controller.signal.aborted) setState({ error }); },
+      (data) => { if (!stale()) setState({ data }); },
+      (error: Error) => { if (!stale()) setState({ error }); },
     );
     return () => controller.abort();
     // 请求由调用方的 deps 决定，fetcher 每次渲染都是新函数，不参与依赖。
@@ -27,7 +37,7 @@ export function useAsync<T>(fetcher: (signal: AbortSignal) => Promise<T>, deps: 
   return {
     ...state,
     reload: () => setAttempt((value) => value + 1),
-    setData: (data: T) => setState({ data }),
+    setData: (data: T) => { generation.current += 1; setState({ data }); },
   };
 }
 

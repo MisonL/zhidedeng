@@ -1,4 +1,5 @@
 import { Route, Routes } from 'react-router';
+import ErrorBoundary from './components/ErrorBoundary';
 import Layout from './components/Layout';
 import Admin from './pages/Admin';
 import { Login, Register } from './pages/Auth';
@@ -17,7 +18,8 @@ import Submit from './pages/Submit';
 
 export default function App() {
   return (
-    <Routes>
+    <ErrorBoundary>
+      <Routes>
       <Route element={<Layout />}>
         <Route index element={<Home />} />
         <Route path="models" element={<Models />} />
@@ -39,6 +41,7 @@ export default function App() {
         <Route path="business" element={<Business />} />
         <Route path="*" element={<NotFound />} />
       </Route>
-    </Routes>
+      </Routes>
+    </ErrorBoundary>
   );
 }
