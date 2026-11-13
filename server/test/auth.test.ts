@@ -269,3 +269,21 @@ describe('互动按账号存、对所有人累计', () => {
     expect((await a.call('POST', '/api/me/checkin')).status).toBe(409);
   });
 });
+
+describe('用户名探测的限流', () => {
+  it('同一用户名被反复探测时返回 429，不能无限枚举', async () => {
+    // 用户名是否被占用只能从响应推断，所以按用户名维度限流，
+    // 让人没法用字典把注册名一个个试出来。
+    const a = browser();
+    await a.register('taken_name');
+    // 每次都换一个来源 IP：否则先撞上的是按 IP 的 10 次上限，
+    // 验不到「按用户名」这一维。
+    const codes: number[] = [];
+    for (let index = 0; index < 22; index += 1) {
+      codes.push((await browser(`198.51.100.${index + 1}`).register('taken_name')).status);
+    }
+    // 首次注册也算一次该用户名的计数，所以前 19 次探测是 409，第 20 次起 429。
+    expect(codes.slice(0, 19).every(code => code === 409)).toBe(true);
+    expect(codes.slice(19).every(code => code === 429)).toBe(true);
+  });
+});

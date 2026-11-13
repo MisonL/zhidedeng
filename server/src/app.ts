@@ -183,6 +183,9 @@ export function buildApp(store: Store, now: () => Date, options: AppOptions = {}
   const loginByUsername = new AttemptLimiter(20, LOGIN_WINDOW_MS, store, 'login-username');
   const passwordChangeByUser = new AttemptLimiter(5, LOGIN_WINDOW_MS, store, 'password-change');
   const registerByIp = new AttemptLimiter(10, REGISTER_WINDOW_MS, store, 'register-ip');
+  // 按用户名维度限流：用户名是否被占用只能通过响应推断，所以必须让人没法
+  // 大批量探测。20 次/小时足够正常用户改几次名，挡得住字典式枚举。
+  const registerByUsername = new AttemptLimiter(20, REGISTER_WINDOW_MS, store, 'register-username');
   const inviteByCode = new AttemptLimiter(INVITE_PER_CODE_LIMIT, INVITE_WINDOW_MS, store, 'invite-code');
   const agentTokenByUser = new AttemptLimiter(AGENT_TOKEN_PER_USER, AGENT_TOKEN_WINDOW_MS, store, 'agent-token-user');
   const agentTokenByIp = new AttemptLimiter(AGENT_TOKEN_PER_IP, AGENT_TOKEN_WINDOW_MS, store, 'agent-token-ip');
@@ -411,11 +414,12 @@ export function buildApp(store: Store, now: () => Date, options: AppOptions = {}
     const input = registerSchema.parse(JSON.parse(await c.req.text() || '{}'));
     if (isWeakPassword(input.password, input.username)) throw new ApiError(400, 'WEAK_PASSWORD', '这个密码太容易被猜到，请换一个（避免常见词、连续字符或包含用户名）');
     const ip = `register:${clientIp(c, trustedProxies)}`;
-    refuseIfLimited(c, [registerByIp.retryAfter(ip, now().getTime())]);
-    const registerHandle = registerByIp.record(ip, now().getTime());
     const usernameKey = input.username.toLowerCase();
+    refuseIfLimited(c, [registerByIp.retryAfter(ip, now().getTime()), registerByUsername.retryAfter(usernameKey, now().getTime())]);
+    const registerHandle = registerByIp.record(ip, now().getTime());
+    registerByUsername.record(usernameKey, now().getTime());
     const taken = () => store.db.prepare('SELECT 1 FROM accounts WHERE usernameKey = ?').get(usernameKey);
-    if (taken()) throw new ApiError(409, 'USERNAME_TAKEN', '这个用户名已被注册');
+    if (taken()) throw new ApiError(409, 'USERNAME_TAKEN', '这个用户名无法使用，请换一个');
     const passwordHash = await hashPassword(input.password).catch((error: unknown) => {
       registerByIp.release(ip, registerHandle);
       throw error;
@@ -423,7 +427,7 @@ export function buildApp(store: Store, now: () => Date, options: AppOptions = {}
     const handle = input.username;
     const token = store.transaction(() => {
       // 哈希期间可能有同名注册抢先。
-      if (taken()) throw new ApiError(409, 'USERNAME_TAKEN', '这个用户名已被注册');
+      if (taken()) throw new ApiError(409, 'USERNAME_TAKEN', '这个用户名无法使用，请换一个');
       store.db.prepare('INSERT INTO accounts (handle, usernameKey, passwordHash, createdAt) VALUES (?, ?, ?, ?)').run(handle, usernameKey, passwordHash, now().toISOString());
       store.put('user', handle, { handle, nickname: input.nickname ?? input.username, avatar: '', bio: '', tokens: INITIAL_TOKENS });
       return createSession(store, handle, now());

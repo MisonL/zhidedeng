@@ -162,12 +162,12 @@ describe('注册页', () => {
     expect(callsTo(fetchMock, 'POST', '/api/auth/register')).toEqual([]);
   });
 
-  it('用户名已被注册时显示服务端文案', async () => {
-    stubApi({ ...signedOut, 'POST /api/auth/register': () => apiError(409, 'USERNAME_TAKEN', '这个用户名已被注册') });
+  it('用户名被占用时显示服务端文案', async () => {
+    stubApi({ ...signedOut, 'POST /api/auth/register': () => apiError(409, 'USERNAME_TAKEN', '这个用户名无法使用，请换一个') });
     renderApp('/register');
     fill('alice', 'correct-horse');
     fireEvent.click(screen.getByRole('button', { name: '注册' }));
-    expect(await screen.findByRole('alert')).toHaveTextContent('这个用户名已被注册');
+    expect(await screen.findByRole('alert')).toHaveTextContent('这个用户名无法使用，请换一个');
   });
 
   it('成功后回跳，昵称可选', async () => {
