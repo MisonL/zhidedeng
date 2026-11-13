@@ -44,8 +44,22 @@ const server = serve({ fetch: app.fetch, port, hostname }, info => {
 });
 
 for (const signal of ['SIGINT', 'SIGTERM'] as const) {
-  process.once(signal, () => server.close(() => {
-    db.close();
-    process.exit(0);
-  }));
+  process.once(signal, () => {
+    // 停掉每日清理，别让它在关库之后还去写库。
+    clearInterval(purgeTimer);
+    // server.close 要等所有连接结束；keep-alive 长连接可能一直不放手，
+    // 回调就永远不来，db.close() 也就永远不执行。给一个上限，
+    // 到点仍然关库退出——SQLite 有 WAL 兜底，硬退出不会损坏数据。
+    const forceExit = setTimeout(() => {
+      console.warn('关停超时，强制退出');
+      try { db.close(); } catch { /* 已经关过 */ }
+      process.exit(0);
+    }, 8_000);
+    forceExit.unref();
+    server.close(() => {
+      clearTimeout(forceExit);
+      db.close();
+      process.exit(0);
+    });
+  });
 }

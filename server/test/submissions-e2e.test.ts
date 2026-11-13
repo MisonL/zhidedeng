@@ -45,6 +45,8 @@ describe('投稿全链路（HTTP 层）', () => {
     queue('feishu', { description: '另一份描述' });
     const result = await list();
     expect(result.total).toBe(2);
+    // 只断言 total 的话，items 为空数组也能过——返回没带数据也会显示「通过」。
+    expect(result.items).toHaveLength(2);
     expect(result.items.every(item => item.status === 'pending')).toBe(true);
   });
 

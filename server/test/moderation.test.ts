@@ -53,6 +53,8 @@ describe('投稿审核', () => {
   it('种子和群友提交视为 approved', async () => {
     expect((await anonymous.get<Post>('/api/posts/post-1')).status).toBe('approved');
     const { items } = await anonymous.get<GetPostsResponse>('/api/posts?pageSize=50');
+    // every 对空数组恒为真——没有条目时这个断言等于什么都没测。
+    expect(items.length).toBeGreaterThan(0);
     expect(items.every(p => p.status === 'approved')).toBe(true);
   });
 

@@ -6,6 +6,9 @@ services:
     image: zhidedeng:deploy-test
     container_name: zhidedeng-deploy-test
     restart: unless-stopped
+    # 应用的关停逻辑最多等 8 秒再强制退出，给它一点余量；
+    # 否则 docker 默认 10 秒就 SIGKILL，db.close() 来不及执行。
+    stop_grace_period: 15s
     ports:
       # 只绑本机回环：这是部署测试，不该顺手把服务暴露到局域网。
       - "127.0.0.1:8788:8787"
