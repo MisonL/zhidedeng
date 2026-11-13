@@ -13,6 +13,7 @@ import xai from '@lobehub/icons-static-svg/icons/xai.svg';
 import zhipu from '@lobehub/icons-static-svg/icons/zhipu-color.svg';
 import { formatLatency, formatRate, NOT_AVAILABLE } from '../format';
 import { useCatalog } from '../state';
+import { normalizeDisplay } from '../format';
 
 // 厂商图标仅作分类标识；tint 是封面底色，deep 是同色系的深色，用于水印和纹理。
 const VENDOR_ART: Record<string, { src: string; tint: string; deep: string }> = {
@@ -85,7 +86,7 @@ export function PostCover({ post }: { post: Post }) {
   const art = vendor ? VENDOR_ART_OR_FALLBACK(vendor.iconKey) : SEAL_ART;
   // 种子文章标题是「站名 · 标题」，封面只留标题；用户自己写的间隔号不动。
   const seedPrefix = station ? `${station.name.replace(/^虚构·/, '')} · ` : '';
-  const pitch = <span className="cover-pitch" data-pitch={post.title.startsWith(seedPrefix) ? post.title.slice(seedPrefix.length) : post.title} />;
+  const pitch = <span className="cover-pitch" data-pitch={normalizeDisplay(post.title.startsWith(seedPrefix) ? post.title.slice(seedPrefix.length) : post.title)} />;
   const seal = <img className="cover-seal" src="/favicon.svg" alt="" />;
   const foot = model && (
     <span className="cover-foot" data-label={model.name}>{vendor && <VendorIcon iconKey={vendor.iconKey} size={14} />}</span>

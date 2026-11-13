@@ -38,3 +38,15 @@ export const formatPercent = (ratio: number) => `${Math.round(ratio * 100)}%`;
 // 与服务端日期口径一致；en-CA 输出 YYYY-MM-DD。
 const shanghaiDate = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit' });
 export const formatDate = (iso: string) => shanghaiDate.format(new Date(iso));
+
+/**
+ * 展示前清掉会破坏排版的不可见字符。
+ *
+ * 换行、制表符之外的 C0/C1 控制符，以及 U+2028/2029 这两个「行分隔符」，
+ * 在 HTML 里不换行但会进入 attr()、复制粘贴与无障碍播报，制造出看起来
+ * 没问题但内容错位的文本。后端已经拦了大部分，这里是渲染层的兜底。
+ */
+export function normalizeDisplay(value: string): string {
+  // eslint-disable-next-line no-control-regex
+  return value.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F\u0085\u2028\u2029\u202A-\u202E\u2066-\u2069]/gu, '');
+}
