@@ -425,7 +425,8 @@ export async function collectPages(fetchPage: (offset: number) => Promise<{ reco
     const pageColumns = new Set(page.columns);
     const missingOnPage = REQUIRED_COLUMNS.filter(column => !pageColumns.has(column));
     if (page.records.length > 0 && missingOnPage.length > 0) {
-      throw new Error(`第 ${records.length / PAGE_SIZE + 1} 页缺少字段：${missingOnPage.join('、')}，中止同步`);
+      // 用循环计数而不是 records.length/PAGE_SIZE：后者在不满一页时会算出 1.5 这种页号。
+      throw new Error(`第 ${pageCount} 页缺少字段：${missingOnPage.join('、')}，中止同步`);
     }
     records.push(...page.records);
     page.columns.forEach(column => columns.add(column));
@@ -457,14 +458,22 @@ export async function collectPages(fetchPage: (offset: number) => Promise<{ reco
   return records;
 }
 
+/** 与读投稿状态保持一致的超时。没有它时，站点无响应会让整条同步永久挂住。 */
+const MODELS_TIMEOUT_MS = 30_000;
+/** 翻页兜底：total 缺失或恒大于实际条目时，不能无限翻下去。 */
+const MODELS_MAX_PAGES = 200;
+
 async function readModels(site: URL) {
   const models: SiteModel[] = [];
   for (let page = 1; ; page++) {
-    const response = await fetch(new URL(`/api/models?page=${page}&pageSize=50`, site));
+    if (page > MODELS_MAX_PAGES) throw new Error(`读取模型列表超过 ${MODELS_MAX_PAGES} 页仍未结束，中止同步`);
+    const response = await fetch(new URL(`/api/models?page=${page}&pageSize=50`, site), { signal: AbortSignal.timeout(MODELS_TIMEOUT_MS) });
     if (!response.ok) throw new Error(`读取模型列表失败：HTTP ${response.status}`);
     const body = await response.json() as { items: SiteModel[]; total: number };
     models.push(...body.items);
-    if (body.items.length === 0 || models.length >= body.total) return models;
+    // total 缺失或不是数字时，仅靠 items 为空判断结束。
+    const total = typeof body.total === 'number' && Number.isFinite(body.total) ? body.total : Number.POSITIVE_INFINITY;
+    if (body.items.length === 0 || models.length >= total) return models;
   }
 }
 
