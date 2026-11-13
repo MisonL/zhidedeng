@@ -271,15 +271,30 @@ export function buildBatch(records: RawRecord[], models: SiteModel[]) {
   submissions.sort((a, b) => b.time - a.time || a.recordId.localeCompare(b.recordId));
 
   // 没填网址的评价按站名归到已有站点。
-  const hostByName = new Map<string, string>();
+  //
+  // 只在站名对应**唯一**域名时才自动归组。早先是「先到先得」：两个不同域名
+  // 用了同一个站名时，缺网址的评价会被任意挂到其中一个域名上；而评价是公开
+  // 展示的，挂错等于把 A 站的评价发到 B 站页面上。有歧义时宁可跳过并报出来，
+  // 让人补网址。
+  const hostsByName = new Map<string, Set<string>>();
   for (const { site, name } of submissions) {
-    if (site && !hostByName.has(name.toLowerCase())) hostByName.set(name.toLowerCase(), site.host);
+    if (!site) continue;
+    const key = name.toLowerCase();
+    hostsByName.set(key, (hostsByName.get(key) ?? new Set()).add(site.host));
+  }
+  const hostByName = new Map<string, string>();
+  const ambiguousNames = new Set<string>();
+  for (const [name, hosts] of hostsByName) {
+    if (hosts.size === 1) hostByName.set(name, [...hosts][0]!);
+    else ambiguousNames.add(name);
   }
   const groups = new Map<string, Submission[]>();
   for (const submission of submissions) {
     const host = submission.site?.host ?? hostByName.get(submission.name.toLowerCase());
     if (!host) {
-      skipped.push(`${submission.recordId}：缺少网址，也找不到同名站点`);
+      skipped.push(ambiguousNames.has(submission.name.toLowerCase())
+        ? `${submission.recordId}：缺少网址，且站名「${submission.name}」对应多个域名，无法确定归属`
+        : `${submission.recordId}：缺少网址，也找不到同名站点`);
       continue;
     }
     groups.set(host, [...(groups.get(host) ?? []), submission]);

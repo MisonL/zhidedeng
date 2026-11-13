@@ -67,7 +67,9 @@ describe('真实进程冒烟', () => {
     expect(code).toBe(0);
     expect(stderr).toContain('zdd ——');
     expect(JSON.parse(stdout)).toMatchObject({ ok: true });
-  });
+    // 这条要起一个真实 node 进程并做类型剥离，默认 5 秒在机器负载高时不够，
+    // 会变成偶发失败。同组其他用例都给了 30 秒。
+  }, 30_000);
 
   it('catalog 从真实接口读出非空目录', async () => {
     const { code, stdout } = await zdd(['catalog']);

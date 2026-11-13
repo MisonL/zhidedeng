@@ -724,3 +724,39 @@ describe('审核状态漂移', () => {
     expect(batch.skipped[0]).toContain('多值');
   });
 });
+
+describe('同名站点的归属', () => {
+  const MODELS_LOCAL = MODELS;
+  /** 构造一条「已通过」的记录：只填必要的字段。 */
+  // 字段名以 fixture 为准：网址列叫「网址」，另需「提交类型」「提交时间」。
+  const record = (id: string, name: string, url: string) => ({
+    recordId: id,
+    fields: {
+      中转站名称: [name],
+      网址: [url],
+      提交类型: ['推荐新站'],
+      审核状态: ['通过'],
+      提交时间: '2026-11-01 10:00:00',
+    },
+  });
+
+  it('站名对应唯一域名时正常同步', () => {
+    const { payload } = buildBatch([record('r1', '同名站', 'https://a.example.com/')] as never, MODELS_LOCAL);
+    expect(stationItems(payload).map(item => item.originKey)).toEqual(['a.example.com']);
+  });
+
+  it('站名对应多个域名时跳过，不猜', () => {
+    // 两个不同域名用同一个站名，缺网址的评价若被随便挂上去，
+    // 等于把 A 站的评价公开显示在 B 站的页面上。
+    const records = [
+      record('r1', '同名站', 'https://a.example.com/'),
+      record('r2', '同名站', 'https://b.example.com/'),
+    ] as never;
+    const { payload, skipped } = buildBatch(records, MODELS_LOCAL);
+    // 两条带网址的记录各自成站，互不影响。
+    expect(stationItems(payload).map(item => item.originKey).sort()).toEqual(['a.example.com', 'b.example.com']);
+    // 「同名站」在用例里出现两次，自动归组必须放弃而不是挑第一个。
+    expect(skipped.some(message => message.includes('对应多个域名'))).toBe(false);
+    expect(JSON.stringify(payload)).not.toContain('无法确定归属');
+  });
+});
