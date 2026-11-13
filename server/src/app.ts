@@ -18,6 +18,22 @@ import { createInviteCode, listInviteCodes, revokeInviteCode } from './invite-co
 import { listPosts, reviewPost, setAccountDisabled, setCommentHidden } from './moderation.ts';
 import { autoApproveEnabled, enqueueBatch, enqueueSubmission, listSubmissions, reviewSubmission, setAutoApprove, submissionBatchReviewSchema, submissionBatchSchema, submissionQuerySchema, submissionReviewSchema, submissionState } from './submissions.ts';
 
+/**
+ * GET 参数归一。schema 是 strictObject 的，未知键会让整页 400，
+ * 但对读接口来说多一个统计参数就整页失败显然不合理——直接丢掉未知键。
+ * 空串按「没传」处理，否则 `?vendor=` 会命中 min(1) 校验。
+ */
+function normalizeQuery(schema: z.ZodType<unknown>, query: Record<string, string>): Record<string, string> {
+  const shape = schema instanceof z.ZodObject ? Object.keys(schema.shape) : null;
+  const result: Record<string, string> = {};
+  for (const [key, value] of Object.entries(query)) {
+    if (value === '') continue;
+    if (shape && !shape.includes(key)) continue;
+    result[key] = value;
+  }
+  return result;
+}
+
 const pagination = {
   page: z.coerce.number().int().min(1).max(1_000_000).optional(),
   pageSize: z.coerce.number().int().min(1).transform(size => Math.min(size, 50)).optional(),
@@ -354,7 +370,11 @@ export function buildApp(store: Store, now: () => Date, options: AppOptions = {}
       const handle = sessionHandle(store, c.req.header('cookie'), now());
       if (!handle && (method !== 'GET' || PERSONAL_READS.has(name))) throw new ApiError(401, 'UNAUTHENTICATED', '请先登录');
       const body = method === 'GET' ? '' : await c.req.text();
-      const raw: unknown = method === 'GET' ? { ...c.req.query(), ...c.req.param() } : JSON.parse(body || '{}');
+      // GET 的 query 先归一：丢掉 schema 不认识的键，空串当作没传。
+      // 不加这层的话，分享链接带上 utm_source、监控面板带上 _t 这类无关参数就会
+      // 被 strictObject 拒成 400，而调用方完全看不出是自己多带了一个参数；
+      // `?vendor=` 这种空值同理（前端靠过滤空值绕过去了，外部调用方不会）。
+      const raw: unknown = method === 'GET' ? normalizeQuery(schema, { ...c.req.query(), ...c.req.param() }) : JSON.parse(body || '{}');
       return c.json(handler(new Service(store, now, handle), schema.parse(raw), clientIp(c, trustedProxies)));
     });
   }

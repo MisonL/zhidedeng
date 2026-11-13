@@ -204,3 +204,26 @@ describe('导入时放宽模型校验', () => {
     expect(Number(row.count)).toBe(2);
   });
 });
+
+describe('GET 参数归一', () => {
+  const get = (path: string) => server.app.request(path, {}, { incoming: { socket: { remoteAddress: '127.0.0.1' } } });
+
+  it('无关的查询参数被丢弃，不会让整页 400', async () => {
+    // 分享链接会带 utm_source，监控会带 _t。读接口不该因为这些整页失败。
+    expect((await get('/api/models?page=1&utm_source=wechat')).status).toBe(200);
+    expect((await get('/api/models?page=1&_t=1700000000')).status).toBe(200);
+  });
+
+  it('空串按没传处理', async () => {
+    // 外部调用方拼 `?vendor=${vendor}` 而 vendor 为空时，不该被 min(1) 挡下。
+    expect((await get('/api/models?vendor=')).status).toBe(200);
+  });
+
+  it('认识的参数照常生效', async () => {
+    const ok = await get('/api/models?pageSize=2');
+    const body = await ok.json() as { items: unknown[]; pageSize: number };
+    expect(ok.status).toBe(200);
+    expect(body.pageSize).toBe(2);
+    expect(body.items.length).toBeLessThanOrEqual(2);
+  });
+});
