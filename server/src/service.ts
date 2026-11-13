@@ -37,7 +37,18 @@ const descendingNullsLast = (a: number | null, b: number | null) => (b ?? -Infin
  * 展示名里的保留词。界面只显示 nickname 不显示 handle，
  * 昵称叫「什么值得蹬官方」就能冒充平台身份。
  */
-const RESERVED_NICKNAMES = ['官方', '管理员', 'admin', 'administrator', '客服', '版主', '小编', '系统'];
+/**
+ * 展示名里的保留身份。
+ *
+ * 只在**整段归一后完全相等**时拒绝，不做「包含」判断：
+ * 「官方粉丝」「系统工程师」「中国女排官方」都是正常昵称，
+ * 按包含判定会把它们一起挡掉。
+ * 代价是「什么值得蹬官方」这类带前后缀的写法拦不住——那由审核界面
+ * 的高亮与重名判定兜底，比误伤一大片正常用户划算。
+ */
+const RESERVED_NICKNAMES = new Set([
+  '官方', '管理员', 'admin', 'administrator', '客服', '版主', '小编', '系统',
+]);
 
 export class Service {
   readonly store: Store;
@@ -205,8 +216,9 @@ export class Service {
     if (nickname !== undefined) {
       // 列表和详情只渲染 nickname，不渲染 handle，所以「官方」「管理员」这类
       // 展示名一旦能随便取，就等于可以冒充平台身份做钓鱼。
-      const reserved = RESERVED_NICKNAMES.find(word => nickname.includes(word));
-      if (reserved) throw new ApiError(400, 'INVALID_INPUT', `昵称不能包含「${reserved}」，请换一个`);
+      if (RESERVED_NICKNAMES.has(nickname.trim().toLowerCase())) {
+        throw new ApiError(400, 'INVALID_INPUT', `「${nickname}」是保留身份，请换一个昵称`);
+      }
       // 与站内其他用户重名同样会让人分不清谁是谁；注册时也走这条。
       const taken = this.store.all('user').find(other => other.handle !== this.user
         && other.nickname.trim().toLowerCase() === nickname.trim().toLowerCase());

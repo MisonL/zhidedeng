@@ -60,7 +60,10 @@ export function isPrivateHostname(hostname: string): boolean {
   const words = groups.map(group => parseInt(group, 16));
   if (words.length !== 8 || words.some(word => !Number.isInteger(word) || word < 0 || word > 0xffff)) return true;
 
-  if ((words[0]! & 0xfe00) === 0xfc00 || (words[0]! & 0xffc0) === 0xfe80 || (words[0]! & 0xffc0) === 0xfec0) return true;
+  // 唯一本地 fc00::/8、链路本地 fe80::/10、站点本地 fec0::/10，以及组播 ff00::/8。
+  // 组播早先漏了：IPv4 侧 `first >= 224` 已经把组播挡掉，IPv6 侧没有对应分支。
+  if ((words[0]! & 0xfe00) === 0xfc00 || (words[0]! & 0xffc0) === 0xfe80
+    || (words[0]! & 0xffc0) === 0xfec0 || (words[0]! & 0xff00) === 0xff00) return true;
   // 未指定、回环、IPv4-mapped（::ffff:0:0/96）与 IPv4-compatible 都带内嵌 IPv4 或本身就是零地址。
   if (words.slice(0, 6).every(word => word === 0)) {
     // ::、::1 与 ::x.x.x.x：未指定地址与回环，一律拒绝。

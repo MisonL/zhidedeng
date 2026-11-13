@@ -3,7 +3,7 @@ import { Hono } from 'hono';
 import type { Context } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
 import { z, ZodError } from 'zod';
-import { API_ROUTES } from '@zhidedeng/shared';
+import { API_ROUTES, PROFILE_LIMITS } from '@zhidedeng/shared';
 import type { ApiContracts, ApiRouteName, ChangePasswordRequest, LoginRequest, RegisterRequest } from '@zhidedeng/shared';
 import { modelSchema } from '@zhidedeng/shared/submission';
 import { AttemptLimiter, burnPasswordCheck, clearedSessionCookie, createSession, deleteOtherSessions, deleteSession, hashPassword, INITIAL_TOKENS, isWeakPassword, sessionCookie, sessionHandle, USERNAME, verifyPassword } from './auth.ts';
@@ -42,7 +42,7 @@ const queryText = z.string().trim().max(200).optional();
 const identifier = z.string().trim().min(1).max(200);
 const target = { targetType: z.enum(['post', 'station']), targetId: identifier };
 const kind = z.enum(['deal', 'review', 'community', 'guide']);
-const nickname = z.string().trim().min(1).max(20);
+const nickname = z.string().trim().min(1).max(PROFILE_LIMITS.nickname);
 const registerSchema: z.ZodType<RegisterRequest> = z.strictObject({ username: z.string().regex(USERNAME), password: z.string().min(8).max(128), nickname: nickname.optional() });
 const loginSchema: z.ZodType<LoginRequest> = z.strictObject({ username: z.string().min(1).max(100), password: z.string().min(1).max(128) });
 
@@ -575,7 +575,7 @@ export function buildApp(store: Store, now: () => Date, options: AppOptions = {}
   });
 
   route('getMe', z.strictObject({}), service => service.getMe());
-  route('updateMe', z.strictObject({ nickname: nickname.optional(), bio: z.string().trim().max(500).optional() }).refine(input => Object.keys(input).length > 0), (service, input) => service.updateMe(input));
+  route('updateMe', z.strictObject({ nickname: nickname.optional(), bio: z.string().trim().max(PROFILE_LIMITS.bio).optional() }).refine(input => Object.keys(input).length > 0), (service, input) => service.updateMe(input));
   route('checkIn', z.strictObject({}), service => {
     // 没限流时脚本可以循环打点；虽然一天只成功一次，
     // 但每次都要走一遍事务和写库，足以把库压住。

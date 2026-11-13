@@ -20,6 +20,10 @@ describe('热门文章空态', () => {
       'GET /api/vendors': page([]),
     });
     renderWithProviders(<FeedSidebar />);
+    // 两块侧栏都要有空态。热门中转站那一块的 children 不读 state.data，
+    // 数组默认空态对它不生效，必须显式传 isEmpty——漏了的话页面只剩标题，
+    // 看起来像坏了一个区块。
     expect(await screen.findByText('这里还没有内容')).toBeInTheDocument();
+    expect(await screen.findByText('还没有收录站点')).toBeInTheDocument();
   });
 });
