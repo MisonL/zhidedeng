@@ -211,21 +211,26 @@ export class Service {
   }
 
   updateMe(input: UpdateMeRequest): CurrentUser {
-    const user = this.store.get('user', this.user)!;
-    const nickname = input.nickname;
-    if (nickname !== undefined) {
-      // 列表和详情只渲染 nickname，不渲染 handle，所以「官方」「管理员」这类
-      // 展示名一旦能随便取，就等于可以冒充平台身份做钓鱼。
-      if (RESERVED_NICKNAMES.has(nickname.trim().toLowerCase())) {
-        throw new ApiError(400, 'INVALID_INPUT', `「${nickname}」是保留身份，请换一个昵称`);
+    // 整个「读-查重-写」必须在事务里。两个并发请求（一个改昵称、一个改简介）
+    // 各自读到旧 user 再整体展开覆写时，后写的会把先写的改动抹掉；
+    // 昵称查重与写入之间也有 TOCTOU：两人可同时通过查重拿到同一个昵称。
+    return this.store.transaction(() => {
+      const user = this.store.get('user', this.user)!;
+      const nickname = input.nickname;
+      if (nickname !== undefined) {
+        // 列表和详情只渲染 nickname，不渲染 handle，所以「官方」「管理员」这类
+        // 展示名一旦能随便取，就等于可以冒充平台身份做钓鱼。
+        if (RESERVED_NICKNAMES.has(nickname.trim().toLowerCase())) {
+          throw new ApiError(400, 'INVALID_INPUT', `「${nickname}」是保留身份，请换一个昵称`);
+        }
+        // 与站内其他用户重名同样会让人分不清谁是谁；注册时也走这条。
+        const taken = this.store.all('user').find(other => other.handle !== this.user
+          && other.nickname.trim().toLowerCase() === nickname.trim().toLowerCase());
+        if (taken) throw new ApiError(409, 'NICKNAME_TAKEN', '这个昵称已被使用，请换一个');
       }
-      // 与站内其他用户重名同样会让人分不清谁是谁；注册时也走这条。
-      const taken = this.store.all('user').find(other => other.handle !== this.user
-        && other.nickname.trim().toLowerCase() === nickname.trim().toLowerCase());
-      if (taken) throw new ApiError(409, 'NICKNAME_TAKEN', '这个昵称已被使用，请换一个');
-    }
-    this.store.put('user', this.user, { ...user, ...input });
-    return this.getMe();
+      this.store.put('user', this.user, { ...user, ...input });
+      return this.getMe();
+    });
   }
 
   checkIn(): CheckInResponse {

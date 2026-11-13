@@ -1,4 +1,6 @@
 import { createHash } from 'node:crypto';
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
 import { Hono } from 'hono';
 import type { Context } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
@@ -82,6 +84,12 @@ export interface AppOptions {
    * 所有用户的 IP 限流落进同一个桶。
    */
   trustedProxies?: string;
+  /**
+   * 前端构建产物目录。有它时健康检查会顺带确认 index.html 存在——
+   * 容器里只有 `SELECT 1` 的话，前端文件缺失/挂载失败时健康检查照样通过，
+   * deploy.sh 会报告「部署完成」，而用户打开是白屏。
+   */
+  webRoot?: string;
 }
 
 interface Bindings {
@@ -237,8 +245,18 @@ export function buildApp(store: Store, now: () => Date, options: AppOptions = {}
   });
 
   app.get('/api/health', c => {
+    // 数据库可达是底线；配了静态目录时再确认前端入口还在。
     store.db.prepare('SELECT 1').get();
-    return c.json({ status: 'ok' });
+    const checks: Record<string, string> = { database: 'ok' };
+    if (options.webRoot) {
+      const index = join(options.webRoot, 'index.html');
+      if (!existsSync(index)) {
+        checks.frontend = 'missing';
+        return c.json({ status: 'degraded', checks }, 503);
+      }
+      checks.frontend = 'ok';
+    }
+    return c.json({ status: 'ok', checks });
   });
 
   // 管理接口：导入、审核投稿、隐藏评论。不进公开契约和 /docs，普通登录用户也没有权限。

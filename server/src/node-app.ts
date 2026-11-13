@@ -40,8 +40,35 @@ export function openDatabase(path: string, options: { readOnly?: boolean } = {})
 }
 
 export function openStore(db: DatabaseSync) {
+  // 嵌套事务必须支持，不能只靠「大家都别嵌套」的纪律。
+  //
+  // 最外层用 BEGIN IMMEDIATE：提前拿写锁，防并发下的「检查-再写」双插
+  // （投稿去重、限流预占都依赖这一点）。
+  // 内层用 SAVEPOINT：SQLite 原生支持嵌套，内层回滚只撤销自己那一段，
+  // 不会把外层一起带走。裸 BEGIN 嵌套会抛 SQL logic error，而外层 catch
+  // 里那句 ROLLBACK 会把**外层未提交的写入全部丢掉**，还会把本应回滚的
+  // 记录继续写下去——比直接报错更糟。
+  let depth = 0;
   return new Store(db as unknown as SqlDatabase, action => {
+    if (depth > 0) {
+      const savepoint = `nested_${depth}`;
+      depth += 1;
+      db.exec(`SAVEPOINT ${savepoint}`);
+      try {
+        const result = action();
+        db.exec(`RELEASE ${savepoint}`);
+        return result;
+      } catch (error) {
+        // 内层失败只回滚自己这一段。ROLLBACK TO 之后 savepoint 仍然存在，
+        // 必须再 RELEASE 释放，否则会一直挂在事务栈上。
+        try { db.exec(`ROLLBACK TO ${savepoint}`); db.exec(`RELEASE ${savepoint}`); } catch { /* 外层已回滚，忽略 */ }
+        throw error;
+      } finally {
+        depth -= 1;
+      }
+    }
     db.exec('BEGIN IMMEDIATE');
+    depth = 1;
     try {
       const result = action();
       db.exec('COMMIT');
@@ -49,6 +76,8 @@ export function openStore(db: DatabaseSync) {
     } catch (error) {
       db.exec('ROLLBACK');
       throw error;
+    } finally {
+      depth = 0;
     }
   });
 }
@@ -69,7 +98,7 @@ export function createApp(options: { dbPath?: string; now?: () => Date; syncToke
     // 只在生产且显式开启 TLS 时要求 Secure；本机 http 试用不该被静默登不上。
   // 显式传入的选项优先（测试用），否则按生产 + TLS_ENABLED 决定。
   const cookieSecure = options.secureCookie ?? (production && process.env.TLS_ENABLED === '1');
-  const app = buildApp(store, now, { secureCookie: cookieSecure, syncToken: usable, inviteCodes, trustedProxies });
+  const app = buildApp(store, now, { secureCookie: cookieSecure, syncToken: usable, inviteCodes, trustedProxies, webRoot: options.webRoot });
   if (options.webRoot) mountWeb(app, options.webRoot);
   return { app, db, store };
 }

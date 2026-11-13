@@ -96,9 +96,14 @@ export const SCHEMA = `
     at     INTEGER NOT NULL
   );
   CREATE INDEX IF NOT EXISTS rate_limits_lookup ON rate_limits(bucket, key, at);
+  -- 过期清理是按 (bucket, at) 删的，没有 key 前缀就用不上 rate_limits_lookup。
+  CREATE INDEX IF NOT EXISTS rate_limits_expiry ON rate_limits(bucket, at);
   CREATE INDEX IF NOT EXISTS votes_target ON votes(targetType, targetId);
   CREATE INDEX IF NOT EXISTS favorites_target ON favorites(targetType, targetId);
   CREATE INDEX IF NOT EXISTS comments_target ON comments(targetType, targetId, createdAt);
+  -- 发评论前的频率限制按 (userHandle, createdAt) 查，comments_target 那条用不上，
+  -- 之前是每次评论都全表扫一遍。
+  CREATE INDEX IF NOT EXISTS comments_author ON comments(userHandle, createdAt);
   CREATE INDEX IF NOT EXISTS offers_model ON offers(modelSlug, rate);
   CREATE TABLE IF NOT EXISTS submissions (
     id TEXT PRIMARY KEY,
