@@ -58,15 +58,35 @@ export function configPath(): string {
   return join(base, 'zdd', 'config.json');
 }
 
+/** 本机地址允许 http，其余一律要求 https。 */
+function isLocalHost(hostname: string): boolean {
+  return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '[::1]' || hostname === '::1';
+}
+
+/**
+ * 校验目标地址。凭证是长期有效的 bearer token，发到明文 HTTP 或任意主机上
+ * 等于把账号交出去。此前 ZDD_API_BASE 或配置文件里的地址可以随便填，
+ * request() 会无条件把 Authorization 带过去。
+ */
+export function assertSafeBase(raw: string): string {
+  const trimmed = raw.trim().replace(/\/+$/, '');
+  let url: URL;
+  try { url = new URL(trimmed); } catch { throw new ZdError(EXIT.usage, `服务地址不是合法 URL：${trimmed}`); }
+  if (url.protocol === 'https:') return trimmed;
+  if (url.protocol === 'http:' && isLocalHost(url.hostname)) return trimmed;
+  throw new ZdError(EXIT.usage, `服务地址必须是 https（本机地址除外），当前是 ${url.protocol}//${url.hostname}；凭证不会发往明文连接`);
+}
+
 export function apiBase(): string {
-  return (process.env.ZDD_API_BASE ?? DEFAULT_BASE).replace(/\/+$/, '');
+  return assertSafeBase(process.env.ZDD_API_BASE ?? DEFAULT_BASE);
 }
 
 /** 请求实际使用的地址：环境变量优先于登录时记住的地址。 */
 export async function resolveBase(path = configPath()): Promise<string> {
   if (process.env.ZDD_API_BASE) return apiBase();
   const config = await readConfig(path);
-  return config ? config.apiBase.replace(/\/+$/, '') : DEFAULT_BASE;
+  // 配置文件同样要校验：登录时记住的地址可能是上个版本写进去的 http 地址。
+  return config ? assertSafeBase(config.apiBase) : DEFAULT_BASE;
 }
 
 export async function readConfig(path = configPath()): Promise<Config | null> {
@@ -427,6 +447,35 @@ export interface ParsedArgs {
   flags: Record<string, string | boolean>;
 }
 
+/**
+ * 每个命令允许的 flag，以及它们会不会吃掉后面那个位置参数。
+ *
+ * 没有白名单时，`zdd submit --bogus a.json` 会把 `--bogus` 当成一个带值的 flag，
+ * 顺手把 `a.json` 吃掉，最后报「用法：zdd submit ./x.json」——Agent 会以为自己
+ * 漏了路径，然后沿错误方向改。所以未知 flag 必须自己报出来。
+ */
+const COMMAND_FLAGS: Record<string, Record<string, { takesValue: boolean; summary: string }>> = {
+  login: { key: { takesValue: true, summary: '--key <凭证>   凭证本身，也可作为位置参数传入' } },
+  whoami: {},
+  catalog: {},
+  match: {},
+  validate: {},
+  submit: { batch: { takesValue: true, summary: '--batch <目录>  批量提交目录下的所有 .json' } },
+  status: { limit: { takesValue: true, summary: '--limit <n>     列出最近 n 条投稿（1~50）' } },
+  help: {},
+};
+
+/** 子命令级用法说明。Agent 习惯 `zdd <命令> --help`，之前一律报「用法错误」。 */
+const COMMAND_USAGE: Record<string, string> = {
+  login: 'zdd login --key <凭证>',
+  whoami: 'zdd whoami',
+  catalog: 'zdd catalog',
+  match: 'zdd match "<模型名>"',
+  validate: 'zdd validate ./投稿.json',
+  submit: 'zdd submit ./投稿.json   或   zdd submit --batch ./目录/',
+  status: 'zdd status [--limit <1~50>]',
+};
+
 export function parseArgs(argv: string[]): ParsedArgs {
   const [command = '', ...rest] = argv;
   const positional: string[] = [];
@@ -443,6 +492,18 @@ export function parseArgs(argv: string[]): ParsedArgs {
       const eq = body.indexOf('=');
       if (eq >= 0) {
         flags[body.slice(0, eq)] = body.slice(eq + 1);
+        continue;
+      }
+      // 只有白名单里的 flag 才允许并吃掉下一个 token。
+      // 未知 flag 直接抛错：否则它会把后面的位置参数吞掉，报出误导性的用法提示。
+      const spec = COMMAND_FLAGS[command]?.[body];
+      if (!spec) {
+        const known = Object.keys(COMMAND_FLAGS[command] ?? {});
+        throw new ZdError(EXIT.usage,
+          `未知参数 --${body}${known.length ? `；${command} 只支持 ${known.map(name => '--' + name).join('、')}` : `；${command} 不接受任何参数`}`);
+      }
+      if (!spec.takesValue) {
+        flags[body] = true;
         continue;
       }
       const next = rest[index + 1];
@@ -515,8 +576,23 @@ export function batchExitCode(failed: readonly { code: number }[]): number {
 }
 
 export async function run(argv: string[]): Promise<number> {
-  const { command, positional, flags } = parseArgs(argv);
+  // Agent 习惯 `zdd <命令> --help`。之前一律报「用法错误」，探查路径直接撞墙。
+  const [first = '', ...restArgs] = argv;
+  if ((first === '--help' || first === 'help' || first === '') && restArgs.length === 0) {
+    // 顶层 help 走下面的 switch。
+  } else if (COMMAND_USAGE[first] && restArgs.includes('--help')) {
+    const lines = [`用法：${COMMAND_USAGE[first]}`];
+    const flagLines = Object.entries(COMMAND_FLAGS[first] ?? {}).map(([, spec]) => spec.summary);
+    if (flagLines.length) lines.push('', '参数：', ...flagLines);
+    lines.push('', '帮助：zdd help 查看全部命令', '输出：stdout 单行 JSON；提示走 stderr');
+    for (const line of lines) note(line);
+    emit({ ok: true, command: first, help: COMMAND_USAGE[first] });
+    return EXIT.ok;
+  }
   try {
+    // parseArgs 会抛 ZdError（未知 flag），必须放在 try 里才能走统一的
+    // 错误输出与退出码；否则 Agent 看到的是一串未捕获的堆栈。
+    const { command, positional, flags } = parseArgs(argv);
     switch (command) {
       case 'login': {
         const key = typeof flags.key === 'string' ? flags.key : positional[0];

@@ -3,7 +3,7 @@ import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'n
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
-  EXIT, batchExitCode, catalog, configPath, inferKind, login, matchModel, normalizeModelName, parseArgs,
+  assertSafeBase, EXIT, batchExitCode, catalog, configPath, inferKind, login, matchModel, normalizeModelName, parseArgs,
   readConfig, resolveToken, run, status, submitBatch, submitFile, submitOne, validate,
   scrubSecret, validatePayload, whoami, writeConfig, ZdError,
 } from '../zdd.ts';
@@ -57,9 +57,21 @@ const statusBody = {
 
 describe('参数解析', () => {
   it('把 --flag value 和位置参数分开', () => {
-    expect(parseArgs(['match', 'Claude Sonnet', '--limit', '5'])).toEqual({
-      command: 'match', positional: ['Claude Sonnet'], flags: { limit: '5' },
+    expect(parseArgs(['submit', './x.json', '--batch', './dir/'])).toEqual({
+      command: 'submit', positional: ['./x.json'], flags: { batch: './dir/' },
     });
+  });
+
+  it('未知 flag 直接报错，不能静默吞掉后面的位置参数', () => {
+    // 不报错的话 `zdd submit --bogus a.json` 会把 a.json 当成 --bogus 的值吃掉，
+    // 最后报「用法：zdd submit ./x.json」——Agent 会以为自己漏了路径。
+    expect(() => parseArgs(['submit', '--bogus', 'a.json'])).toThrow(/未知参数 --bogus/);
+    expect(() => parseArgs(['validate', '--bogus', 'x.json'])).toThrow(/未知参数 --bogus/);
+  });
+
+  it('命令不接受的 flag 也会被挡下', () => {
+    // match 没有 --limit，误用时应该明确说「不接受任何参数」。
+    expect(() => parseArgs(['match', '--limit', '5'])).toThrow(/match 不接受任何参数/);
   });
 
   it('末尾没有值的 --flag 视为布尔真', () => {
@@ -679,5 +691,22 @@ describe('批量失败的退出码分类', () => {
 
   it('凭证问题优先于数据问题', () => {
     expect(batchExitCode([{ code: EXIT.validation }, { code: EXIT.unauthorized }])).toBe(EXIT.unauthorized);
+  });
+});
+
+describe('服务地址安全', () => {
+  it('拒绝把凭证发往明文 http 的远端地址', () => {
+    expect(() => assertSafeBase('http://evil.example.com/')).toThrow(/必须是 https/);
+    expect(() => assertSafeBase('http://192.168.1.5:8787/')).toThrow(/必须是 https/);
+  });
+
+  it('本机地址与 https 都放行', () => {
+    expect(assertSafeBase('http://127.0.0.1:8788/')).toBe('http://127.0.0.1:8788');
+    expect(assertSafeBase('http://localhost:8788/')).toBe('http://localhost:8788');
+    expect(assertSafeBase('https://zhidedeng.example.com/')).toBe('https://zhidedeng.example.com');
+  });
+
+  it('非法 URL 明确报错', () => {
+    expect(() => assertSafeBase('not-a-url')).toThrow(/不是合法 URL/);
   });
 });
