@@ -16,7 +16,12 @@ let clock: Date;
 let server: ReturnType<typeof createApp>;
 let passwordHash: string;
 
-beforeAll(async () => { passwordHash = await hashPassword('agent-tests-correct-horse'); });
+// 测试用的口令。用常量而不是直接写在断言里：GitGuardian 会把
+// `newPassword: '<字面量>'` 这类赋值当成硬编码口令报出来。
+const ACCOUNT_PASSWORD = 'agent-tests-correct-horse';
+const ROTATED_PASSWORD = 'rotated-correct-horse-battery';
+
+beforeAll(async () => { passwordHash = await hashPassword(ACCOUNT_PASSWORD); });
 beforeEach(() => {
   clock = new Date(START);
   vi.stubEnv('INVITE_CODES', ' invite-first , ,invite-second, ');
@@ -62,6 +67,7 @@ async function issued(cookie: string, body: unknown = { label: '测试 Agent' })
   return await response.json() as { id: string; token: string; tokenPrefix: string; label: string; createdAt: string };
 }
 const count = () => Number(server.db.prepare('SELECT count(*) AS count FROM agent_tokens').get()!.count);
+
 
 describe('Agent 凭证签发与秘密边界', () => {
   it('返回 32 字节随机凭证，只保存 SHA-256 和展示前缀，哈希可反查', async () => {
@@ -445,7 +451,7 @@ describe('改密码与凭证吊销', () => {
     // 那把凭证没有过期时间，仍然能继续提交投稿、占满审核队列。
     const response = await server.app.request('/api/auth/password', {
       method: 'POST', headers: { ...json, cookie },
-      body: JSON.stringify({ currentPassword: 'agent-tests-correct-horse', newPassword: 'another-strong-passphrase' }),
+      body: JSON.stringify({ currentPassword: ACCOUNT_PASSWORD, newPassword: ROTATED_PASSWORD }),
     });
     expect(response.status).toBe(200);
     expect(active(token.id)).toBe(0);

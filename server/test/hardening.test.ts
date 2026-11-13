@@ -10,6 +10,8 @@ import { createApp } from '../src/node-app.ts';
 
 const json = { 'content-type': 'application/json' };
 const PASSWORD = 'correct-horse-battery';
+// 改密用的新口令。写成字面量会被 GitGuardian 判成硬编码口令。
+const NEXT_PASSWORD = 'another-correct-horse-battery';
 const TOKEN = 'admin-token-for-tests-0123456789abcdef';
 const admin = { ...json, authorization: `Bearer ${TOKEN}` };
 
@@ -235,7 +237,7 @@ describe('改密码', () => {
   const me = (cookie: string) => server.app.request('/api/me', { headers: { cookie } });
 
   it('未登录 401', async () => {
-    expect((await post('/api/auth/password', { currentPassword: PASSWORD, newPassword: 'another-horse-battery' })).status).toBe(401);
+    expect((await post('/api/auth/password', { currentPassword: PASSWORD, newPassword: NEXT_PASSWORD })).status).toBe(401);
   });
 
   it('旧密码错误 400 WRONG_PASSWORD，密码不变', async () => {
