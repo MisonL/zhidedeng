@@ -18,6 +18,24 @@ export function paginate<T>(items: T[], query: PaginationQuery) {
   return { items: items.slice((page - 1) * pageSize, page * pageSize), total: items.length, page, pageSize };
 }
 
+/**
+ * 分页后再逐条组装。
+ *
+ * `paginate(records.map(toDto), query)` 会把**全库**记录都转成 DTO 再丢掉
+ * 除本页之外的全部——每条 DTO 都要查票数、收藏、评论数、作者，一次请求的
+ * 数据库工作量因此随全库增长，而不是随页大小。排序仍需要全量记录，所以这里
+ * 只把「组装」推迟到切片之后：排序用记录本身的字段，组装只做本页。
+ */
+export function paginateThen<T, D>(items: T[], query: PaginationQuery, project: (item: T) => D) {
+  const page = query.page ?? 1;
+  const pageSize = query.pageSize ?? 20;
+  return { items: items.slice((page - 1) * pageSize, page * pageSize).map(project), total: items.length, page, pageSize };
+}
+
+function emptyInteraction(): InteractionState {
+  return { votes: { up: 0, down: 0, total: 0, upRatio: 0 }, currentUserVote: null, favorited: false, favoriteCount: 0, commentCount: 0 };
+}
+
 function matches(query: string | undefined, ...texts: string[]) {
   return !query || texts.join(' ').toLocaleLowerCase().includes(query.toLocaleLowerCase());
 }
@@ -71,6 +89,49 @@ export class Service {
     return { handle, nickname, avatar };
   }
 
+  /**
+   * 一次性取回某类目标的全部互动数据，按 targetId 建索引。
+   *
+   * 列表页原先对每条记录调用 interaction()，各查票数、收藏、评论数三张表；
+   * 站点有几百个时，取 20 条的一页要发近千条 SQL。三条聚合查询换成三次
+   * 全表分组，工作量与页大小无关。
+   */
+  private interactionMap(targetType: Target['targetType']): Map<string, InteractionState> {
+    const votes = this.store.db.prepare(
+      `SELECT targetId, userHandle, value FROM votes WHERE targetType = ?`,
+    ).all(targetType) as unknown as (Pick<Vote, 'userHandle' | 'value'> & { targetId: string })[];
+    const favorites = this.store.db.prepare(
+      'SELECT targetId, userHandle FROM favorites WHERE targetType = ?',
+    ).all(targetType) as { targetId: string; userHandle: string }[];
+    const comments = this.store.db.prepare(
+      `SELECT targetId, count(*) AS count FROM comments WHERE targetType = ? AND ${COMMENT_VISIBLE} GROUP BY targetId`,
+    ).all(targetType) as { targetId: string; count: number }[];
+
+    const map = new Map<string, InteractionState>();
+    const state = (id: string) => {
+      let entry = map.get(id);
+      if (!entry) {
+        entry = { votes: { up: 0, down: 0, total: 0, upRatio: 0 }, currentUserVote: null, favorited: false, favoriteCount: 0, commentCount: 0 };
+        map.set(id, entry);
+      }
+      return entry;
+    };
+    for (const vote of votes) {
+      const entry = state(vote.targetId);
+      if (vote.value === 'up') entry.votes.up += 1; else entry.votes.down += 1;
+      entry.votes.total = entry.votes.up + entry.votes.down;
+      entry.votes.upRatio = entry.votes.total ? entry.votes.up / entry.votes.total : 0;
+      if (vote.userHandle === this.handle) entry.currentUserVote = vote.value;
+    }
+    for (const favorite of favorites) {
+      const entry = state(favorite.targetId);
+      entry.favoriteCount += 1;
+      if (favorite.userHandle === this.handle) entry.favorited = true;
+    }
+    for (const comment of comments) state(comment.targetId).commentCount = Number(comment.count);
+    return map;
+  }
+
   private interaction(target: Target): InteractionState {
     const { targetType, targetId } = target;
     const votes = this.store.db.prepare('SELECT userHandle,value FROM votes WHERE targetType=? AND targetId=?').all(targetType, targetId) as unknown as Pick<Vote, 'userHandle' | 'value'>[];
@@ -85,8 +146,12 @@ export class Service {
     };
   }
 
-  private station(record: StationRecord): Station {
-    const interaction = this.interaction({ targetType: 'station', targetId: record.slug });
+  private station(record: StationRecord, prefetched?: Map<string, InteractionState>): Station {
+    // 传了预取表就一律走表：没有互动的站点不在表里，此时要用「全零」而不是
+    // 回退到单条查询——否则「零互动的站点」恰好是最多的那一类，等于没优化。
+    const interaction = prefetched
+      ? (prefetched.get(record.slug) ?? emptyInteraction())
+      : this.interaction({ targetType: 'station', targetId: record.slug });
     const offers = this.offers().filter(offer => offer.stationSlug === record.slug);
     const lowestRate = offers.length ? Math.min(...offers.map(offer => offer.rate)) : null;
     const score = record.uptime === null ? null : Number((record.uptime * 0.6 + (interaction.votes.total ? interaction.votes.upRatio : 0.5) * 30 + (1 / (lowestRate ?? 1)) * 3).toFixed(2));
@@ -102,10 +167,13 @@ export class Service {
     }));
   }
 
-  private post(record: PostRecord): Post {
+  private post(record: PostRecord, prefetched?: Map<string, InteractionState>): Post {
     const { authorHandle, authorNickname, source, ...fields } = record;
     const author = authorNickname ? { handle: authorHandle, nickname: authorNickname, avatar: '' } : this.author(authorHandle);
-    return { ...fields, author, source: source ?? 'user', ...this.interaction({ targetType: 'post', targetId: record.id }) };
+    const interaction = prefetched
+      ? (prefetched.get(record.id) ?? emptyInteraction())
+      : this.interaction({ targetType: 'post', targetId: record.id });
+    return { ...fields, author, source: source ?? 'user', ...interaction };
   }
 
   // 每个站都要用，同一请求内只读一次。
@@ -291,7 +359,10 @@ export class Service {
     const vendorModels = new Set(this.store.all('model').filter(m => m.vendor === query.vendor).map(m => m.slug));
     const offers = this.offers();
     const vendorStations = new Set(offers.filter(o => vendorModels.has(o.modelSlug)).map(o => o.stationSlug));
-    const items = this.store.all('station').filter(s => (!query.vendor || vendorStations.has(s.slug)) && matches(query.q, s.name, s.slug, s.description)).map(s => this.station(s));
+    // 这里先留在记录层：score 依赖互动数，排序要用它，所以不能先转 DTO 再排序。
+    const records = this.store.all('station').filter(s => (!query.vendor || vendorStations.has(s.slug)) && matches(query.q, s.name, s.slug, s.description));
+    const interactions = this.interactionMap('station');
+    const items = records.map(s => this.station(s, interactions));
     if (query.sort === 'rate') {
       const offersByStation = new Map<string, StationOffer[]>();
       for (const offer of offers) offersByStation.set(offer.stationSlug, [...(offersByStation.get(offer.stationSlug) ?? []), offer]);
@@ -314,19 +385,39 @@ export class Service {
       .flatMap(o => { const model = this.store.get('model', o.modelSlug); return model ? [{ ...o, model }] : []; }) };
   }
 
-  private hotScore(post: Post): number {
+  /**
+   * 一次性取出某类目标的净票数（up - down），供 hot 排序使用。
+   *
+   * 原先排序时每条都组装成 DTO，等于每篇文章各查一次票数与收藏与评论数；
+   * hot 只需要净票数，一条 GROUP BY 就够，排序阶段不必碰互动明细。
+   */
+  private netVotes(targetType: Target['targetType']): Map<string, number> {
+    const rows = this.store.db.prepare(
+      `SELECT targetId, SUM(CASE WHEN value = 'up' THEN 1 ELSE -1 END) AS net
+       FROM votes WHERE targetType = ? GROUP BY targetId`,
+    ).all(targetType) as { targetId: string; net: number }[];
+    return new Map(rows.map(row => [row.targetId, Number(row.net)]));
+  }
+
+  private hotScoreRecord(post: PostRecord, net: number): number {
     const ageHours = Math.max(0, (this.now().getTime() - Date.parse(post.publishedAt)) / 3600000);
-    return (post.votes.up - post.votes.down) / Math.pow(ageHours + 2, 1.3);
+    return net / Math.pow(ageHours + 2, 1.3);
   }
 
   getPosts(query: GetPostsRequest) {
     const models = new Set(this.store.all('model').filter(m => m.vendor === query.vendor).map(m => m.slug));
-    const items = this.approvedPosts().filter(p =>
+    // 排序键（publishedAt、hot 分数）都来自记录本身，不需要组装 DTO，
+    // 所以组装推迟到切片之后——否则每次请求都会把全库文章各查一遍互动数据。
+    const records = this.approvedPosts().filter(p =>
       (!query.kind || p.kind === query.kind) && (!query.station || p.stationSlug === query.station) &&
       (!query.model || p.modelSlug === query.model) && (!query.vendor || (p.modelSlug !== null && models.has(p.modelSlug))) &&
-      matches(query.q, p.title, p.summary, p.body)).map(p => this.post(p));
-    items.sort((a, b) => (query.sort === 'hot' ? this.hotScore(b) - this.hotScore(a) : 0) || b.publishedAt.localeCompare(a.publishedAt));
-    return paginate(items, query);
+      matches(query.q, p.title, p.summary, p.body));
+    const net = query.sort === 'hot' ? this.netVotes('post') : null;
+    records.sort((a, b) => (net
+      ? this.hotScoreRecord(b, net.get(b.id) ?? 0) - this.hotScoreRecord(a, net.get(a.id) ?? 0)
+      : 0) || b.publishedAt.localeCompare(a.publishedAt));
+    const interactions = this.interactionMap('post');
+    return paginateThen(records, query, record => this.post(record, interactions));
   }
 
   getPost(id: string): Post {
@@ -367,11 +458,19 @@ export class Service {
   getComments(query: GetCommentsRequest) {
     this.requireTarget(query);
     const rows = this.store.db.prepare('SELECT id,userHandle,targetType,targetId,content,parentId,createdAt FROM comments WHERE targetType=? AND targetId=? AND hidden = 0 ORDER BY createdAt DESC, rowid DESC').all(query.targetType, query.targetId) as unknown as CommentRow[];
-    const items: Comment[] = rows.filter(row => row.parentId === null).map(row => ({
+    // 回复按父评论分组，不要对每条顶层评论重扫一遍全部行：
+    // 那是 O(顶层数 × 总行数)，一条热帖几百条评论时会明显卡。
+    const repliesByParent = new Map<string, CommentRow[]>();
+    for (const row of rows) {
+      if (row.parentId === null) continue;
+      repliesByParent.set(row.parentId, [...(repliesByParent.get(row.parentId) ?? []), row]);
+    }
+    const tops = rows.filter(row => row.parentId === null);
+    // 先切页再组装：回复可能很多，没必要把后面几页的全部装配出来再丢掉。
+    return paginateThen(tops, query, row => ({
       ...this.comment(row), parentId: null,
-      replies: rows.filter(reply => reply.parentId === row.id).reverse().map(reply => ({ ...this.comment(reply), parentId: row.id })),
+      replies: (repliesByParent.get(row.id) ?? []).reverse().map(reply => ({ ...this.comment(reply), parentId: row.id })),
     }));
-    return paginate(items, query);
   }
 
   private comment(row: CommentRow) {
