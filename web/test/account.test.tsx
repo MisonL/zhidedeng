@@ -62,7 +62,7 @@ describe('账户设置里改密码', () => {
   it('成功后清空表单并说明其他设备已退出', async () => {
     const fetchMock = stubApi({ 'POST /api/auth/password': () => json({ ok: true }) });
     await open();
-    fill('old-password', 'another-horse');
+    fill(OLD_PASSWORD, NEW_PASSWORD);
     submit();
     expect(await screen.findByText('密码已修改，其他设备已退出登录')).toBeInTheDocument();
     expect(callsTo(fetchMock, 'POST', '/api/auth/password')[0].body).toEqual({ currentPassword: OLD_PASSWORD, newPassword: NEW_PASSWORD });
