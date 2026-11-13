@@ -207,18 +207,27 @@ export interface Catalog {
   stations: { slug: string; name: string; url: string }[];
 }
 
-/** 分页接口最多 50 条一页，翻到 total 取完为止。页数设上限防止服务端异常时死循环。 */
-async function fetchAllPages(path: string, fetchImpl?: typeof fetch): Promise<unknown> {
+/**
+ * 分页接口最多 50 条一页，翻到 total 取完为止。
+ *
+ * 页数上限只是防止服务端 total 异常时死循环的兜底。原先写死 40 页（2000 条），
+ * 超过之后静默返回不完整的列表——`zdd catalog` 看起来成功，但少了东西，
+ * 而 `zdd match` 恰恰依赖这份列表判断「站点是否已收录」。
+ * 现在按 total 算需要多少页；仍然没取完就明确报错，不假装成功。
+ */
+async function fetchAllPages(path: string, fetchImpl?: typeof fetch): Promise<unknown[]> {
   const pageSize = 50;
   const collected: unknown[] = [];
-  for (let page = 1; page <= 40; page++) {
+  let maxPages = 40;
+  for (let page = 1; page <= maxPages; page++) {
     const payload = await request(`${path}?page=${page}&pageSize=${pageSize}`, { fetchImpl }) as { items?: unknown; total?: unknown };
     const items = Array.isArray(payload?.items) ? payload.items : [];
     collected.push(...items);
     const total = typeof payload?.total === 'number' ? payload.total : items.length;
-    if (items.length < pageSize || collected.length >= total) break;
+    if (page === 1) maxPages = Math.max(maxPages, Math.ceil(total / pageSize) + 1);
+    if (items.length < pageSize || collected.length >= total) return collected;
   }
-  return collected;
+  throw new Error(`读取 ${path} 时超过 ${collected.length} 条仍未取完，请改用分页参数单独查询`);
 }
 
 export async function catalog(options: { fetchImpl?: typeof fetch } = {}): Promise<Catalog> {
@@ -493,6 +502,18 @@ function note(message: string): void {
   process.stderr.write(message + '\n');
 }
 
+/** 批量失败时按原因归类退出码。抽出来便于单测，不用起整个进程。 */
+export function batchExitCode(failed: readonly { code: number }[]): number {
+  if (failed.length === 0) return EXIT.ok;
+  // 网络故障最优先：这种情况下重发同样的文件就行，让 Agent 去「按 message 修正数据」
+  // 反而会把本来正确的数据改坏。
+  const codes = new Set(failed.map(item => item.code));
+  if (codes.has(EXIT.network)) return EXIT.network;
+  if (codes.has(EXIT.unauthorized)) return EXIT.unauthorized;
+  if (codes.has(EXIT.validation)) return EXIT.validation;
+  return EXIT.rejected;
+}
+
 export async function run(argv: string[]): Promise<number> {
   const { command, positional, flags } = parseArgs(argv);
   try {
@@ -532,7 +553,12 @@ export async function run(argv: string[]): Promise<number> {
         if (batch !== undefined) {
           const result = await submitBatch(batch);
           emit(result);
-          return result.failed.length === 0 ? EXIT.ok : EXIT.rejected;
+          if (result.failed.length === 0) return EXIT.ok;
+          // 按失败原因归类，不要一律报 rejected。原先网络故障也返回 4，
+          // Agent 会被告知「按 message 修正后再试」——但网络问题重发同样的文件就行，
+          // 数据本身没错，让它去改数据只会改坏。
+          // 优先级：有网络错误就报可重试（最紧急），其次是凭证，最后才是数据问题。
+          return batchExitCode(result.failed);
         }
         const path = positional[0];
         if (!path) throw new ZdError(EXIT.usage, '用法：zdd submit ./x.json 或 zdd submit --batch ./dir/');

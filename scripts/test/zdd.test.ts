@@ -3,7 +3,7 @@ import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'n
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
-  EXIT, catalog, configPath, inferKind, login, matchModel, normalizeModelName, parseArgs,
+  EXIT, batchExitCode, catalog, configPath, inferKind, login, matchModel, normalizeModelName, parseArgs,
   readConfig, resolveToken, run, status, submitBatch, submitFile, submitOne, validate,
   scrubSecret, validatePayload, whoami, writeConfig, ZdError,
 } from '../zdd.ts';
@@ -660,5 +660,24 @@ describe('模型投稿', () => {
     const result = await submitOne(model, { token: TOKEN, fetchImpl: impl });
     expect(result.submission.id).toBe('m1');
     expect(calls[0]!.url).toContain('/api/agent/models');
+  });
+});
+
+describe('批量失败的退出码分类', () => {
+  it('全部成功返回 0', () => {
+    expect(batchExitCode([])).toBe(EXIT.ok);
+  });
+
+  it('只有数据问题时返回 rejected', () => {
+    expect(batchExitCode([{ code: EXIT.rejected }, { code: EXIT.rejected }])).toBe(EXIT.rejected);
+  });
+
+  it('混入网络故障时优先返回可重试的 network', () => {
+    // 网络问题重发同样的文件就行；报成 rejected 会让 Agent 去改本来正确的数据。
+    expect(batchExitCode([{ code: EXIT.rejected }, { code: EXIT.network }])).toBe(EXIT.network);
+  });
+
+  it('凭证问题优先于数据问题', () => {
+    expect(batchExitCode([{ code: EXIT.validation }, { code: EXIT.unauthorized }])).toBe(EXIT.unauthorized);
   });
 });
