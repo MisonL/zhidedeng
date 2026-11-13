@@ -1,5 +1,6 @@
 import { fireEvent, screen, within } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { admin, adminToken } from '../src/admin';
 import { callsTo, renderApp, stubApi } from './helpers';
 import type { StubRequest } from './helpers';
 
@@ -222,5 +223,15 @@ describe('拒绝理由与时间兜底', () => {
     fireEvent.click(await screen.findByRole('button', { name: /已下架站点/ }));
     expect(await screen.findByText('下架于 时间未知')).toBeInTheDocument();
     expect(screen.queryByText(/Invalid Date/)).not.toBeInTheDocument();
+  });
+});
+
+describe('管理接口被反代挡住时的提示', () => {
+  it('404 解释成「未对公网开放」而不是「请求失败」', async () => {
+    // nginx 模板对 /api/admin/ 直接 return 404。不解释的话，运维只会看到
+    // 「请求失败（404）」然后去翻后端日志，而后端根本没收到请求。
+    adminToken.set('k'.repeat(32));
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('', { status: 404 }));
+    await expect(admin.listSubmissions('pending')).rejects.toThrow(/未对公网开放/);
   });
 });

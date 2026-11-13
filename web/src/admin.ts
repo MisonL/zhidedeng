@@ -53,7 +53,12 @@ async function request<T>(path: string, init: { method?: string; body?: unknown;
   if (!response.ok) {
     const unauthorized = response.status === 401 || response.status === 403;
     if (unauthorized) adminToken.clear();
-    throw new AdminError(payload?.error?.message ?? `请求失败（${response.status}）`, payload?.error?.code, unauthorized);
+    // 404 在这里几乎总是「nginx 把 /api/admin/ 挡了」，而不是接口真的不存在。
+    // 不解释的话，运维只会看到「请求失败（404）」然后去翻后端日志。
+    const message = response.status === 404
+      ? '管理接口未对公网开放。请从服务器本机访问，或先建 SSH 隧道：ssh -L 8787:127.0.0.1:8787 <主机>，然后打开 http://127.0.0.1:8787/admin'
+      : payload?.error?.message ?? `请求失败（${response.status}）`;
+    throw new AdminError(message, payload?.error?.code, unauthorized);
   }
   return payload as T;
 }
