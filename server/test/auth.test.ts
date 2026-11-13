@@ -287,3 +287,26 @@ describe('用户名探测的限流', () => {
     expect(codes.slice(19).every(code => code === 429)).toBe(true);
   });
 });
+
+describe('注册时的昵称校验', () => {
+  it('注册不能直接占用保留身份', async () => {
+    // 只挡「改资料」的话，注册时直接填「管理员」就是一条现成的绕过路径。
+    const response = await browser().register('nasty_user', { nickname: '管理员' });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ error: { code: 'INVALID_INPUT' } });
+  });
+
+  it('注册不能与他人重名', async () => {
+    await browser().register('first_user', { nickname: '独一无二' });
+    const response = await browser('198.51.100.77').register('second_user', { nickname: '独一无二' });
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ error: { code: 'NICKNAME_TAKEN' } });
+  });
+
+  it('正常昵称不受影响，包括含保留词的普通昵称', async () => {
+    for (const [index, nickname] of ['系统工程师', '中国女排官方', '官方粉丝'].entries()) {
+      const response = await browser(`198.51.100.${100 + index}`).register(`nick_user_${index}`, { nickname });
+      expect(response.status).toBe(200);
+    }
+  });
+});

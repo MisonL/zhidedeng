@@ -14,7 +14,7 @@ import { agentHandle, agentTokenHash } from './agent-auth.ts';
 import { AgentApi } from './agent-api.ts';
 import { authorizeAdmin, adminSlug, createModel, createVendor, deleteModel, importResponse, updateModel } from './catalog.ts';
 import type { Store } from './database.ts';
-import { Service } from './service.ts';
+import { Service, isReservedNickname } from './service.ts';
 import { ApiError, isDatabaseBusyError } from './errors.ts';
 import { createInviteCode, listInviteCodes, revokeInviteCode } from './invite-codes.ts';
 import { listPosts, reviewPost, setAccountDisabled, setCommentHidden } from './moderation.ts';
@@ -443,7 +443,18 @@ export function buildApp(store: Store, now: () => Date, options: AppOptions = {}
     const registerHandle = registerByIp.record(ip, now().getTime());
     registerByUsername.record(usernameKey, now().getTime());
     const taken = () => store.db.prepare('SELECT 1 FROM accounts WHERE usernameKey = ?').get(usernameKey);
+    // 昵称在注册时也要过一遍保留词与重名：只挡「改资料」的话，注册直接填
+    // 「管理员」就是一条现成的绕过路径。
+    // 顺序有讲究：昵称默认取用户名，先查昵称的话「重复注册同一个用户名」
+    // 会先撞成 NICKNAME_TAKEN，把人引向错误的修改方向。
+    const wantedNickname = (input.nickname ?? input.username).trim();
+    const checkNickname = () => {
+      if (isReservedNickname(wantedNickname)) throw new ApiError(400, 'INVALID_INPUT', `「${wantedNickname}」是保留身份，请换一个昵称`);
+      const nicknameTaken = store.all('user').some(user => user.nickname.trim().toLowerCase() === wantedNickname.toLowerCase());
+      if (nicknameTaken) throw new ApiError(409, 'NICKNAME_TAKEN', '这个昵称已被使用，请换一个');
+    };
     if (taken()) throw new ApiError(409, 'USERNAME_TAKEN', '这个用户名无法使用，请换一个');
+    checkNickname();
     const passwordHash = await hashPassword(input.password).catch((error: unknown) => {
       registerByIp.release(ip, registerHandle);
       throw error;
@@ -452,8 +463,11 @@ export function buildApp(store: Store, now: () => Date, options: AppOptions = {}
     const token = store.transaction(() => {
       // 哈希期间可能有同名注册抢先。
       if (taken()) throw new ApiError(409, 'USERNAME_TAKEN', '这个用户名无法使用，请换一个');
+      // 昵称查重也必须在事务内再确认一次：两人同时用同一昵称注册，
+      // 事务外那次检查都会通过。
+      checkNickname();
       store.db.prepare('INSERT INTO accounts (handle, usernameKey, passwordHash, createdAt) VALUES (?, ?, ?, ?)').run(handle, usernameKey, passwordHash, now().toISOString());
-      store.put('user', handle, { handle, nickname: input.nickname ?? input.username, avatar: '', bio: '', tokens: INITIAL_TOKENS });
+      store.put('user', handle, { handle, nickname: wantedNickname, avatar: '', bio: '', tokens: INITIAL_TOKENS });
       return createSession(store, handle, now());
     });
     c.header('set-cookie', sessionCookie(token, cookieSecure()));
