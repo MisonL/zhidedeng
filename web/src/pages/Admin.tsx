@@ -168,6 +168,7 @@ export default function Admin() {
   if (!token) {
     return (
       <section className="page">
+        <title>审核台 · 什么值得蹬</title>
         <h1 className="page-title">审核台</h1>
         <p className="hint">
           管理接口用密钥鉴权，不是登录会话。密钥只存在本标签页，关掉就没了。
