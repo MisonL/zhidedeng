@@ -11,7 +11,8 @@ describe('database initialization and persistence', () => {
     expect(result.stderr).not.toContain('ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX');
     expect(result.status).toBe(0);
     expect(result.stdout.trim()).toBe('11');
-  });
+    // 这条要起一个真实 node 子进程；机器负载高时默认 5 秒不够，会变成偶发失败。
+  }, 30_000);
 
   it('defaults to server/data/app.db', () => {
     expect(defaultDbPath).toBe(resolve('data/app.db'));

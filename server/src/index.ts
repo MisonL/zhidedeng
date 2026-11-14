@@ -26,9 +26,13 @@ purgeTimer.unref();
 
 const server = serve({ fetch: app.fetch, port, hostname }, info => {
   console.log(`API listening on http://${info.address}:${info.port}`);
-  // 监听非回环又没配可信反代：来源地址只能是网关，按 IP 的限流会退化成一个全站共用桶。
+  // 监听非回环又没配可信反代：**如果**前面有反代，来源会全部记成网关地址。
+  // 这句话是有条件的：端口直映射进容器时（docker -p / compose ports），
+  // Docker 会保留真实客户端 IP，来源是准的——实测同一服务上不同客户端
+  // 分别记成各自的地址。早先这条警告写成了断言，在最常见的容器部署下是误报，
+  // 只会让人以为限流坏了。只有当 traffic 真的先经过反代才会退化。
   if (hostname !== '127.0.0.1' && !process.env.TRUSTED_PROXIES) {
-    console.warn('未配置 TRUSTED_PROXIES：所有请求的来源都会记成网关地址，按 IP 的限流与审计会失真。前面有反向代理时请填它的网段。');
+    console.warn('正在监听非回环地址且未配置 TRUSTED_PROXIES：如果前面有反向代理，所有请求的来源都会记成该代理的地址，按 IP 的限流与审计会失真；那种情况要填代理网段。端口直映射进容器（docker -p）时客户端 IP 会被保留，可以忽略这条。');
   }
   // 生产环境靠 Secure cookie 保会话；请求若不是 https，cookie 会被浏览器丢弃，
   // 表现为「登录成功但立刻又变回未登录」。这里提前说清楚，别让人去猜。
