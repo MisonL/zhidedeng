@@ -1,7 +1,7 @@
 import { fireEvent, screen, within } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { admin, adminToken } from '../src/admin';
-import { callsTo, renderApp, stubApi } from './helpers';
+import { apiError, callsTo, renderApp, stubApi } from './helpers';
 import type { StubRequest } from './helpers';
 
 const submission = {
@@ -233,5 +233,20 @@ describe('管理接口被反代挡住时的提示', () => {
     adminToken.set('k'.repeat(32));
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('', { status: 404 }));
     await expect(admin.listSubmissions('pending')).rejects.toThrow(/未对公网开放/);
+  });
+});
+
+describe('管理密钥被拒时的反馈', () => {
+  it('密钥无效时退回输入态并说明原因，而不是静默清空', async () => {
+    adminToken.set('k'.repeat(32));
+    // 键是「方法 路径」；返回体用 apiError 拼成标准错误形状。
+    stubApi({ 'GET /api/admin/submissions': apiError(403, 'FORBIDDEN', 'token 无效') });
+    renderApp('/admin');
+    // 退回输入态：输入框重新出现
+    expect(await screen.findByLabelText(/管理密钥/)).toBeTruthy();
+    // 且必须给出原因，否则用户以为按钮没反应
+    expect(await screen.findByText(/管理密钥无效/)).toBeTruthy();
+    // 失效的密钥不应该留在存储里
+    expect(sessionStorage.getItem('zdd.adminToken')).toBeNull();
   });
 });

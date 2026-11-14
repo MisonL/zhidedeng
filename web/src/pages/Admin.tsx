@@ -69,6 +69,9 @@ export default function Admin() {
       // 对着一个空列表和一条「密钥无效」发呆。
       if (caught instanceof AdminError && (caught.code === 'NO_TOKEN' || caught.unauthorized)) {
         reset();
+        // 退回输入态之后必须说明原因。只清空、不提示的话，用户看到的是
+        // 「点了进入、输入框自己空了、什么都没发生」，会以为按钮坏了。
+        setError(caught.code === 'NO_TOKEN' ? '请填写管理密钥' : '管理密钥无效，请重新输入');
         return;
       }
       setError((caught as Error).message);
