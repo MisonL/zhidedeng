@@ -58,9 +58,33 @@ export function configPath(): string {
   return join(base, 'zdd', 'config.json');
 }
 
-/** 本机地址允许 http，其余一律要求 https。 */
-function isLocalHost(hostname: string): boolean {
-  return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '[::1]' || hostname === '::1';
+/**
+ * 哪些主机允许明文 http。
+ *
+ * 内网部署（10/8、172.16/12、192.168/16、CGNAT、链路本地、IPv6 ULA）通常没有
+ * 证书，一律要求 https 会让 CLI 连不上自家服务——实测部署到 172.16.81.4 就是
+ * 这种情况。这些地址的共同点是「已经在内网边界之内」，明文的风险是局域网嗅探，
+ * 不是公网中间人。
+ *
+ * 公网地址仍然只允许 https：那才是凭证被顺走的主要场景。
+ */
+function isPrivateHost(hostname: string): boolean {
+  const host = hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  if (host === 'localhost' || host.endsWith('.localhost') || host === '::1') return true;
+  const v4 = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (v4) {
+    const [a, b] = [Number(v4[1]), Number(v4[2])];
+    if (a === 10 || a === 127) return true;
+    if (a === 172 && b >= 16 && b <= 31) return true;
+    if (a === 192 && b === 168) return true;
+    if (a === 169 && b === 254) return true;
+    if (a === 100 && b >= 64 && b <= 127) return true;
+    return false;
+  }
+  // IPv6：唯一本地地址 fc00::/7 与链路本地 fe80::/10。
+  if (host.startsWith('fc') || host.startsWith('fd') || host.startsWith('fe8') || host.startsWith('fe9')
+    || host.startsWith('fea') || host.startsWith('feb')) return true;
+  return false;
 }
 
 /**
@@ -73,8 +97,12 @@ export function assertSafeBase(raw: string): string {
   let url: URL;
   try { url = new URL(trimmed); } catch { throw new ZdError(EXIT.usage, `服务地址不是合法 URL：${trimmed}`); }
   if (url.protocol === 'https:') return trimmed;
-  if (url.protocol === 'http:' && isLocalHost(url.hostname)) return trimmed;
-  throw new ZdError(EXIT.usage, `服务地址必须是 https（本机地址除外），当前是 ${url.protocol}//${url.hostname}；凭证不会发往明文连接`);
+  if (url.protocol === 'http:' && isPrivateHost(url.hostname)) {
+    // 内网用明文是常见部署形态；提示一次即可，不阻断。
+    note(`提示：${url.hostname} 走的是明文 http，凭证会在局域网内明文传输。仅在内网可信时使用。`);
+    return trimmed;
+  }
+  throw new ZdError(EXIT.usage, `公网地址必须用 https，当前是 ${url.protocol}//${url.hostname}；凭证不会发往明文的公网连接。内网地址（10/8、172.16/12、192.168/16 等）允许 http。`);
 }
 
 export function apiBase(): string {

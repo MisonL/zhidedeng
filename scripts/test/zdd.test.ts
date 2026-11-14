@@ -695,9 +695,22 @@ describe('批量失败的退出码分类', () => {
 });
 
 describe('服务地址安全', () => {
-  it('拒绝把凭证发往明文 http 的远端地址', () => {
-    expect(() => assertSafeBase('http://evil.example.com/')).toThrow(/必须是 https/);
-    expect(() => assertSafeBase('http://192.168.1.5:8787/')).toThrow(/必须是 https/);
+  it('拒绝把凭证发往明文 http 的公网地址', () => {
+    expect(() => assertSafeBase('http://evil.example.com/')).toThrow(/公网地址必须用 https/);
+    expect(() => assertSafeBase('http://8.8.8.8/')).toThrow(/公网地址必须用 https/);
+  });
+
+  it('内网地址允许 http（部署到内网时没有证书）', () => {
+    // 实测部署到 172.16.81.4 时，一律要求 https 会让 CLI 连不上自家服务。
+    for (const base of ['http://172.16.81.4:8788', 'http://192.168.1.5:8787', 'http://10.0.90.200', 'http://127.0.0.1:8788']) {
+      expect(assertSafeBase(base)).toBe(base.replace(/\/+$/, ''));
+    }
+  });
+
+  it('172.16/12 的边界不被放宽成整个 172/8', () => {
+    expect(assertSafeBase('http://172.31.255.255:1')).toBeTruthy();
+    expect(() => assertSafeBase('http://172.32.0.1:1')).toThrow(/公网地址必须用 https/);
+    expect(() => assertSafeBase('http://172.15.0.1:1')).toThrow(/公网地址必须用 https/);
   });
 
   it('本机地址与 https 都放行', () => {
