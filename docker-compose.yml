@@ -1,0 +1,45 @@
+services:
+  zhidedeng:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: zhidedeng:deploy-test
+    container_name: zhidedeng-deploy-test
+    restart: unless-stopped
+    # 应用的关停逻辑最多等 8 秒再强制退出，给它一点余量；
+    # 否则 docker 默认 10 秒就 SIGKILL，db.close() 来不及执行。
+    stop_grace_period: 15s
+    ports:
+      # 只绑本机回环：这是部署测试，不该顺手把服务暴露到局域网。
+      - "127.0.0.1:8788:8787"
+    environment:
+      # 容器内必须监听全部网卡，否则端口映射进不来。宿主机侧仍是反代结构。
+      HOST: 0.0.0.0
+      PORT: "8787"
+      DB_PATH: /data/zhidedeng.db
+      # 管理接口的 Bearer 密钥；少于 32 位会被当成未配置、管理接口直接关闭。
+      SYNC_TOKEN: ${SYNC_TOKEN:?需要先设置 SYNC_TOKEN（至少 32 位）}
+      # 端口映射进来时直连方是 Docker 网桥，不是 127.0.0.1——具体网段由 Docker 决定，
+      # 每台机器可能不同（本机实测是 192.168.32.0/20，默认 bridge 是 172.17.0.0/16）。
+      # 不配这一项，所有用户的 IP 限流会共用同一个桶：31 个不同来源就一起被 429。
+      # 查自己机器上的网段：docker network inspect <项目名>_default --format '{{range .IPAM.Config}}{{.Subnet}}{{end}}'
+      # 留空则退化成「只有本机可信」，容器部署下等于全站共用一个限流桶。
+      # 只有「前面确实有一个会覆写 X-Forwarded-For 的反代」时才填它的网段。
+      # 本文件是端口直映射进容器（127.0.0.1:8788 -> 8787），前面没有代理，
+      # 填了反而会让客户端自带的 X-Forwarded-For 被采信，换一次头就是一个新
+      # 限流桶，按 IP 的注册/登录上限直接归零。保持为空。
+      TRUSTED_PROXIES: ${TRUSTED_PROXIES:-}
+      # 公网部署时置 1：会话 cookie 会按请求的实际协议加 Secure。
+      # 前面必须挂 HTTPS 反代并透传 X-Forwarded-Proto，否则登录态不被浏览器保存。
+      # 纯本机试用（http://127.0.0.1）保持默认 0 即可。
+      TLS_ENABLED: ${TLS_ENABLED:-0}
+      INVITE_CODES: ${INVITE_CODES:-}
+    volumes:
+      - zhidedeng-data:/data
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+
+volumes:
+  zhidedeng-data:

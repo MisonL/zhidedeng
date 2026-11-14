@@ -28,6 +28,7 @@ const defaults: Record<string, Handler> = {
   'GET /api/me': me,
   'GET /api/me/posts': page([makePost('mine', { title: '我的第一篇分享' })]),
   'GET /api/me/favorites': page([]),
+  'GET /api/account/agent-tokens': [],
   'GET /api/vendors': page(vendors),
   'GET /api/stations': page([station]),
   'GET /api/models': page(vendors.flatMap((vendor) => vendor.models)),

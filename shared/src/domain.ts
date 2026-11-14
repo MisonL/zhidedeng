@@ -2,12 +2,14 @@ export type Id = string;
 export type ISODateTime = string;
 export type ISODate = string;
 export type VendorSlug = string;
+export const MIN_RATE = 0.05;
+export const MAX_RATE = 20;
 export type PostKind = 'deal' | 'review' | 'community' | 'guide';
 export type StationStatus = 'running' | 'unstable';
 export type TargetType = 'post' | 'station';
 export type VoteValue = 'up' | 'down' | null;
-// demo：虚构演示数据；submission：群友经飞书表单提交，未经平台核实。
-export type ContentSource = 'demo' | 'submission';
+// demo：虚构演示数据；submission：群友提交；agent：AI 采集。后两者未经平台核实。
+export type ContentSource = 'demo' | 'submission' | 'agent';
 export type PostStatus = 'pending' | 'approved' | 'rejected';
 
 export interface Vendor {
@@ -35,6 +37,18 @@ export interface User {
   avatar: string;
   bio: string;
   tokens: number;
+}
+
+// 凭证管理列表的元数据，不含明文和哈希。
+export interface AgentToken {
+  id: Id;
+  label: string;
+  tokenPrefix: string;
+  createdAt: ISODateTime;
+  lastUsedAt: ISODateTime | null;
+  revokedAt: ISODateTime | null;
+  useCount: number;
+  status: 'active' | 'revoked';
 }
 
 export type Author = Pick<User, 'handle' | 'nickname' | 'avatar'>;
@@ -88,7 +102,7 @@ export interface Station extends InteractionState {
   score: number | null;
   // 只含协议、主机和路径，不带 query 与 fragment。
   url: string | null;
-  source: ContentSource;
+  source: ContentSource | 'user';
 }
 
 export interface StationOffer {
@@ -193,3 +207,10 @@ export interface ExpertRanking {
   shareCount: number;
   upCount: number;
 }
+
+/**
+ * 前后端共用的展示类字段长度上限。
+ * 分开写死会让前端放行、后端 400——用户只看到「请求参数无效」，不知道是长度问题。
+ * 放在这里而不是 submission.ts：后者依赖 zod，前端只引常量时不该把 zod 带进产物。
+ */
+export const PROFILE_LIMITS = { nickname: 20, bio: 500 } as const;

@@ -10,6 +10,8 @@ import { createApp } from '../src/node-app.ts';
 
 const json = { 'content-type': 'application/json' };
 const PASSWORD = 'correct-horse-battery';
+// 改密用的新口令。写成字面量会被 GitGuardian 判成硬编码口令。
+const NEXT_PASSWORD = 'another-correct-horse-battery';
 const TOKEN = 'admin-token-for-tests-0123456789abcdef';
 const admin = { ...json, authorization: `Bearer ${TOKEN}` };
 
@@ -58,10 +60,36 @@ describe('登录限制', () => {
     expect((await login('alice', PASSWORD)).status).toBe(429);
   }, 30_000);
 
-  it('成功登录释放预占，不算失败', async () => {
+  it('成功登录也计入按账号的配额，单人拿自己账号刷不穿密码校验闸门', async () => {
     await register('alice');
-    // 超过按用户名（20）和按 IP（30）的上限，全部成功说明预占都释放了。
-    for (let index = 0; index < 32; index++) expect((await login('alice', PASSWORD)).status).toBe(200);
+    // 按账号这一维不退：退掉的话任何注册用户拿自己的正确密码循环打登录，
+    // 就能一直占住密码校验的并发闸门（2 执行 + 16 排队），把登录、注册、
+    // 改密一起打成 503，代价只是一个自建账号。
+    for (let index = 0; index < 20; index++) expect((await login('alice', PASSWORD)).status).toBe(200);
+    expect((await login('alice', PASSWORD)).status).toBe(429);
+  }, 30_000);
+
+  it('按 IP 的配额在成功后退还，共用出口 IP 的人不会被邻居拖累', async () => {
+    // 办公室、学校、运营商 CGNAT 后面几十个人共用一个出口 IP。
+    // 按 IP 这一维若不退，5 个人各登录 6 次就用光 30 次/15 分钟，
+    // 第 31 次起整个 IP 的人都要 429——无论密码对错。
+    for (const name of ['nat_a', 'nat_b', 'nat_c', 'nat_d', 'nat_e']) await register(name);
+    for (let round = 0; round < 6; round++) {
+      for (const name of ['nat_a', 'nat_b', 'nat_c', 'nat_d', 'nat_e']) {
+        expect((await login(name, PASSWORD)).status).toBe(200);
+      }
+    }
+    // 第 31 次仍然成功：这一维已经被成功登录退回去了。
+    expect((await login('nat_a', PASSWORD)).status).toBe(200);
+  }, 60_000);
+
+  it('成功登录清掉该 IP 对该账号的失败计数，不会被自己之前的失误挡住', async () => {
+    await register('alice');
+    // 先猜错 4 次（上限 5），再登录成功应当把这一维清空。
+    for (let index = 0; index < 4; index++) expect((await login('alice', 'wrong-password-1')).status).toBe(401);
+    expect((await login('alice', PASSWORD)).status).toBe(200);
+    // 清空后又能再猜 4 次，而不是紧接着就被挡。
+    for (let index = 0; index < 4; index++) expect((await login('alice', 'wrong-password-1')).status).toBe(401);
   }, 30_000);
 });
 
@@ -223,7 +251,7 @@ describe('改密码', () => {
   const me = (cookie: string) => server.app.request('/api/me', { headers: { cookie } });
 
   it('未登录 401', async () => {
-    expect((await post('/api/auth/password', { currentPassword: PASSWORD, newPassword: 'another-horse-battery' })).status).toBe(401);
+    expect((await post('/api/auth/password', { currentPassword: PASSWORD, newPassword: NEXT_PASSWORD })).status).toBe(401);
   });
 
   it('旧密码错误 400 WRONG_PASSWORD，密码不变', async () => {
@@ -258,6 +286,23 @@ describe('改密码', () => {
     for (let index = 0; index < 5; index++) await change('wrong-password', 'another-horse-battery', alice);
     expect((await change(PASSWORD, 'another-horse-battery', alice)).status).toBe(429);
   }, 30_000);
+});
+
+describe('签到限流', () => {
+  it('连续签到超限后返回 429，冷却后恢复', async () => {
+    // 签到一天只能成功一次，但每次调用都要走事务和写库。
+    // 没有闸门时脚本可以循环打点压库，这里补上 5 次/小时的限制。
+    await register('alice');
+    const session = await login('alice', PASSWORD);
+    const cookie = session.headers.getSetCookie().map(value => value.split(';')[0]).join('; ');
+    for (let index = 0; index < 5; index++) {
+      const response = await server.app.request('/api/me/checkin', { method: 'POST', headers: { cookie, 'content-type': 'application/json' } });
+      expect(response.status).toBeLessThan(500);
+    }
+    const blocked = await server.app.request('/api/me/checkin', { method: 'POST', headers: { cookie, 'content-type': 'application/json' } });
+    expect(blocked.status).toBe(429);
+    expect(await blocked.json()).toMatchObject({ error: { code: 'RATE_LIMITED', retryAfter: expect.any(Number) } });
+  });
 });
 
 describe('禁用账号', () => {
@@ -315,5 +360,58 @@ describe('数据目录权限', () => {
       opened.db.close();
       rmSync(directory, { recursive: true });
     }
+  });
+});
+describe('管理员重置密码', () => {
+  const resetAdmin = (body: unknown, auth = TOKEN) =>
+    server.app.request('/api/admin/accounts/reset-password', {
+      method: 'POST', headers: { ...json, authorization: `Bearer ${auth}` }, body: JSON.stringify(body),
+    }, proxied);
+
+  it('重置后旧密码失效、新密码可用，会话与 Agent 凭证全部吊销', async () => {
+    const cookie = await register('forgetful');
+    // 签发 Agent 凭证要求注册满 7 天（或已有通过投稿/邀请码），把时钟推过去。
+    clock = new Date(clock.getTime() + 8 * 24 * 60 * 60_000);
+    const created = await server.app.request('/api/account/agent-tokens', {
+      method: 'POST', headers: { ...json, cookie }, body: JSON.stringify({ label: 'cli' }),
+    }, proxied);
+    expect(created.status).toBe(200);
+    const { token } = await created.json() as { token: string };
+
+    const reset = await resetAdmin({ username: 'forgetful', newPassword: NEXT_PASSWORD });
+    expect(reset.status).toBe(200);
+    expect(await reset.json()).toMatchObject({ ok: true, handle: 'forgetful' });
+
+    // 旧会话失效
+    const me = await server.app.request('/api/me', { headers: { cookie } }, proxied);
+    expect(me.status).toBe(401);
+    // Agent 凭证失效
+    const submit = await server.app.request('/api/agent/stations', {
+      method: 'POST', headers: { ...json, authorization: `Bearer ${token}` },
+      body: JSON.stringify({ kind: 'station', action: 'upsert', payload: {} }),
+    }, proxied);
+    expect(submit.status).toBe(401);
+    // 旧密码登录失败，新密码成功
+    expect((await login('forgetful', PASSWORD)).status).toBe(401);
+    expect((await login('forgetful', NEXT_PASSWORD, '198.51.100.9')).status).toBe(200);
+  }, 60_000);
+
+  it('管理员设的弱密码同样被拒', async () => {
+    await register('weakadmin');
+    const reset = await resetAdmin({ username: 'weakadmin', newPassword: 'welcome123' });
+    expect(reset.status).toBe(400);
+    expect(await reset.json()).toMatchObject({ error: { code: 'WEAK_PASSWORD' } });
+  });
+
+  it('用户名不存在时 404', async () => {
+    const reset = await resetAdmin({ username: 'nobody_here', newPassword: NEXT_PASSWORD });
+    expect(reset.status).toBe(404);
+  });
+
+  it('没有管理密钥时拒绝', async () => {
+    await register('target_user');
+    // 与其它管理接口一致：密钥不对是 403，不是 404——404 留给「用户名不存在」。
+    const reset = await resetAdmin({ username: 'target_user', newPassword: NEXT_PASSWORD }, 'wrong-token');
+    expect(reset.status).toBe(403);
   });
 });

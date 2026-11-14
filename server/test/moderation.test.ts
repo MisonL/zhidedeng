@@ -53,6 +53,8 @@ describe('投稿审核', () => {
   it('种子和群友提交视为 approved', async () => {
     expect((await anonymous.get<Post>('/api/posts/post-1')).status).toBe('approved');
     const { items } = await anonymous.get<GetPostsResponse>('/api/posts?pageSize=50');
+    // every 对空数组恒为真——没有条目时这个断言等于什么都没测。
+    expect(items.length).toBeGreaterThan(0);
     expect(items.every(p => p.status === 'approved')).toBe(true);
   });
 
@@ -300,7 +302,28 @@ describe('GET /api/health', () => {
   it('不需要登录，也不写库', async () => {
     const response = await server.app.request('/api/health');
     expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({ status: 'ok' });
+    // checks 里会逐项列出检查了什么，方便排障时判断是哪一层坏了。
+    expect(await response.json()).toEqual({ status: 'ok', checks: { database: 'ok' } });
     expect(response.headers.get('set-cookie')).toBeNull();
+  });
+});
+
+describe('GET /api/health 的静态资源检查', () => {
+  it('前端入口缺失时返回 503，不再谎报健康', async () => {
+    // 容器里只查 SELECT 1 的话，前端没挂上时健康检查照样通过，
+    // deploy.sh 会报「部署完成」，用户打开却是白屏。
+    const { mkdtempSync, rmSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const dir = mkdtempSync(join(tmpdir(), 'health-'));
+    try {
+      const bare = createApp({ dbPath: ':memory:', webRoot: dir });
+      const response = await bare.app.request('/api/health');
+      expect(response.status).toBe(503);
+      expect(await response.json()).toMatchObject({ status: 'degraded', checks: { frontend: 'missing' } });
+      bare.db.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

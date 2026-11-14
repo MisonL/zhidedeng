@@ -1,6 +1,6 @@
 import { Link } from 'react-router';
 import type { Station } from '@zhidedeng/shared';
-import { formatLatency, formatRate, formatUptime, SUBMISSION_LABEL } from '../format';
+import { formatLatency, formatRate, formatUptime, sourceLabel } from '../format';
 import FavoriteButton from './FavoriteButton';
 import Icon from './Icon';
 import { StationTile } from './visuals';
@@ -8,6 +8,7 @@ import VoteButtons from './VoteButtons';
 
 export default function StationCard({ station }: { station: Station }) {
   const path = `/stations/${station.slug}`;
+  const label = sourceLabel(station.source);
   return (
     <article className="post-card">
       <Link className="post-cover" to={path} aria-hidden="true" tabIndex={-1}><StationTile station={station} /></Link>
@@ -15,7 +16,7 @@ export default function StationCard({ station }: { station: Station }) {
         <h3 className="post-title"><Link to={path}>{station.name}</Link></h3>
         <p className="post-rate">{station.lowestRate === null ? '暂无报价' : `低至 ${formatRate(station.lowestRate)}`}</p>
         <div className="tags">
-          {station.source === 'submission' && <span className="tag tag-warn">{SUBMISSION_LABEL}</span>}
+          {label && <span className="tag tag-warn">{label}</span>}
           <span className={station.uptime === null ? 'tag' : 'tag tag-good'}>可用率 {formatUptime(station.uptime)}</span>
           <span className="tag">首 token {formatLatency(station.firstTokenLatencyMs)}</span>
           {station.status === 'unstable' && <span className="tag tag-warn">运行波动</span>}

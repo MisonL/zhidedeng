@@ -1,20 +1,23 @@
 #!/usr/bin/env node
-// 把飞书收集表里审核通过的记录全量同步到站点 catalog。确定性脚本，不调用任何 LLM，对飞书只读。
+// 把飞书收集表里审核通过的记录提交到投稿队列。确定性脚本，不调用任何 LLM，对飞书只读。
 //
 //   LARKSUITE_CLI_CONFIG_DIR  lark-cli 配置目录。必填，不回落到默认的 ~/.lark-cli，防止读到其他组织的配置
 //   FEISHU_BASE_TOKEN         多维表格 token
 //   FEISHU_TABLE_ID           数据表 ID
-//   SITE_URL                  站点地址。导入接口不对公网开放，在服务器本机运行，用 http://127.0.0.1:PORT
-//   SYNC_TOKEN                导入接口密钥，至少 32 位（--dry-run 时不需要）
+//   SITE_URL                  站点地址。管理接口不对公网开放，在服务器本机运行，用 http://127.0.0.1:PORT
+//   SYNC_TOKEN                管理接口密钥，至少 32 位。dry-run 缺省时跳过下架检测
 //
-//   node scripts/sync-feishu.ts [--dry-run]
+//   node scripts/sync-feishu.ts [--dry-run] [--allow-skipped] [--no-removal]
 //
-// 任何读取失败都中止且不发布：导入是全量覆盖，把读取失败当成空表会清空全部群友提交。
+// 任何读取失败都中止且不入队：把读取失败当成空表会生成错误的下架请求。
 import { execFile } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
+import { realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { CatalogImportPost, CatalogImportRequest, CatalogImportResponse, CatalogImportStation } from '@zhidedeng/shared';
+import { feishuHostnameKey, MAX_RATE, MIN_RATE } from '@zhidedeng/shared';
+import type { AdminBatchSubmitRequest, AdminBatchSubmitResponse, AdminSubmissionStateResponse, CatalogImportPost, CatalogImportStation } from '@zhidedeng/shared';
 
 export interface RawRecord {
   recordId: string;
@@ -27,7 +30,19 @@ interface SiteModel {
 }
 
 const PAGE_SIZE = 200;
+/** 页数上限。has_more 恒为 true 或 offset 不推进时会无限循环，读到这么多页就中止。 */
+const MAX_PAGES = 500;
+const BATCH_SIZE = 500;
 const APPROVED = '通过';
+/**
+ * 明确表示「还没审 / 没通过」的状态。只有这些才允许静默跳过。
+ *
+ * 审核状态是人工在多维表格里选的下拉值，改选项名、多打一个空格都会让
+ * 整行落到「不等于通过」的分支——那个站点就会被计划下架，而 skipped 仍是 0、
+ * 日志里只有一行混在正常条目里的 [下架]，几乎发现不了。
+ * 所以不在这份名单里的非空值一律当作数据异常，计入 skipped 交给闸门处理。
+ */
+const REJECTED_STATUSES = new Set(['未审核', '待审核', '不通过', '未通过', '已拒绝', '拒绝']);
 const REQUIRED_COLUMNS = ['中转站名称', '网址', '提交类型', '审核状态', '提交时间'];
 const REVIEW_TYPES = new Set(['使用评价', '避坑反馈']);
 const SUBMISSION_TYPES = new Set(['推荐新站', '更新信息', ...REVIEW_TYPES]);
@@ -53,6 +68,9 @@ export function parseRecordPage(stdout: string): { records: RawRecord[]; columns
     if (ids.length !== data.data.length) throw new Error('记录 ID 与数据行数量不一致');
     const records = data.data.map((row: unknown, index): RawRecord => {
       if (!Array.isArray(row)) throw new Error('数据行不是数组');
+      // 行比列短意味着这一页字段对不齐：按列名取「审核状态」会拿到 undefined，
+      // 被当成未通过，进而生成下架请求。宁可中止。
+      if (row.length !== columns.length) throw new Error(`第 ${index + 1} 行有 ${row.length} 个值，但列有 ${columns.length} 个`);
       return { recordId: String(ids[index]), fields: Object.fromEntries(columns.map((column, cell) => [column, row[cell]])) };
     });
     return { records, columns, hasMore };
@@ -120,7 +138,7 @@ export function normalizeUrl(raw: string): { url: string; host: string } | null 
   url.hash = '';
   url.username = '';
   url.password = '';
-  return { url: url.href, host: url.hostname.toLowerCase().replace(/^www\./, '') };
+  return { url: url.href, host: feishuHostnameKey(url.hostname) };
 }
 
 function parseSubmittedAt(value: unknown): number | null {
@@ -151,8 +169,12 @@ function parseOffers(raw: unknown, models: Map<string, string>, report: (message
       continue;
     }
     const rate = /^\d+(\.\d+)?\s*[xX倍]?$/.test(parts[2]) ? Number.parseFloat(parts[2]) : Number.NaN;
-    if (!Number.isFinite(rate) || rate <= 0) {
+    if (!Number.isFinite(rate)) {
       report(`倍率必须是大于 0 的数字，已跳过：${line}`);
+      continue;
+    }
+    if (rate < MIN_RATE || rate > MAX_RATE) {
+      report(`倍率超出 ${MIN_RATE}~${MAX_RATE} 范围，已跳过`);
       continue;
     }
     offers.set(modelSlug, rate);
@@ -173,6 +195,15 @@ interface Submission {
   nickname: string;
   time: number;
 }
+
+type StationItem = {
+  kind: 'station'; originKey: string; action: 'upsert'; payload: Omit<CatalogImportStation, 'slug'>;
+};
+type PostItem = {
+  kind: 'post'; originKey: string;
+  payload: Omit<CatalogImportPost, 'recordId' | 'stationSlug'> & { hostname: string };
+};
+type RemovalItem = { kind: 'station'; originKey: string; action: 'remove'; payload: { slug: string; submissionId: string } };
 
 function parseSubmission(record: RawRecord, models: Map<string, string>, notes: string[]): Submission | string {
   const { recordId, fields } = record;
@@ -208,14 +239,30 @@ function parseSubmission(record: RawRecord, models: Map<string, string>, notes: 
  * 只接触审核状态严格等于「通过」的记录；其他记录连内容都不进日志。审核备注从不读取。
  * 同一站点（按主机名归并）的站点信息逐项取最新一条非空的值，所以一条没填报价的评价不会冲掉报价。
  */
-export function buildImport(records: RawRecord[], models: SiteModel[]) {
+export function buildBatch(records: RawRecord[], models: SiteModel[]) {
   const skipped: string[] = [];
   const notes: string[] = [];
   const modelIndex = new Map(models.flatMap(model => [[normalizeModelName(model.name), model.slug], [normalizeModelName(model.slug), model.slug]] as const));
 
   const submissions: Submission[] = [];
   for (const record of records) {
-    if (cellText(record.fields['审核状态']) !== APPROVED) continue;
+    // cleanLine 会 trim 并收敛内部空白：表格里常见的「通过 」尾空格不该等同于未通过。
+    // 判成未通过会把这个站点计划下架，而人工多打一个空格显然不是那个意思。
+    const rawStatus = record.fields['审核状态'];
+    // 多值单元格不猜：既可能是误操作选了「通过+拒绝」，也可能是列配置错了。
+    // 猜通过会放出被拒内容，猜未通过会下架在线站点，两种都不该由脚本决定。
+    if (Array.isArray(rawStatus) && rawStatus.length > 1) {
+      skipped.push(`${record.recordId}：审核状态是多值（${rawStatus.map(item => cellText(item)).join('/')}），无法判定`);
+      continue;
+    }
+    const status = cleanLine(cellText(Array.isArray(rawStatus) ? rawStatus[0] : rawStatus), 20);
+    if (status !== APPROVED) {
+      if (status === '' || REJECTED_STATUSES.has(status)) continue;
+      // 既不是通过、也不是已知的未通过值：多半是选项被改名或多打了字。
+      // 当成未通过会静默下架这个站点，所以记进 skipped，由既有闸门拦住整批。
+      skipped.push(`${record.recordId}：审核状态「${status}」无法识别，可能是表格选项被改名`);
+      continue;
+    }
     const parsed = parseSubmission(record, modelIndex, notes);
     if (typeof parsed === 'string') skipped.push(`${record.recordId}：${parsed}`);
     else submissions.push(parsed);
@@ -224,32 +271,50 @@ export function buildImport(records: RawRecord[], models: SiteModel[]) {
   submissions.sort((a, b) => b.time - a.time || a.recordId.localeCompare(b.recordId));
 
   // 没填网址的评价按站名归到已有站点。
-  const hostByName = new Map<string, string>();
+  //
+  // 只在站名对应**唯一**域名时才自动归组。早先是「先到先得」：两个不同域名
+  // 用了同一个站名时，缺网址的评价会被任意挂到其中一个域名上；而评价是公开
+  // 展示的，挂错等于把 A 站的评价发到 B 站页面上。有歧义时宁可跳过并报出来，
+  // 让人补网址。
+  const hostsByName = new Map<string, Set<string>>();
   for (const { site, name } of submissions) {
-    if (site && !hostByName.has(name.toLowerCase())) hostByName.set(name.toLowerCase(), site.host);
+    if (!site) continue;
+    const key = name.toLowerCase();
+    hostsByName.set(key, (hostsByName.get(key) ?? new Set()).add(site.host));
+  }
+  const hostByName = new Map<string, string>();
+  const ambiguousNames = new Set<string>();
+  for (const [name, hosts] of hostsByName) {
+    if (hosts.size === 1) hostByName.set(name, [...hosts][0]!);
+    else ambiguousNames.add(name);
   }
   const groups = new Map<string, Submission[]>();
   for (const submission of submissions) {
     const host = submission.site?.host ?? hostByName.get(submission.name.toLowerCase());
     if (!host) {
-      skipped.push(`${submission.recordId}：缺少网址，也找不到同名站点`);
+      skipped.push(ambiguousNames.has(submission.name.toLowerCase())
+        ? `${submission.recordId}：缺少网址，且站名「${submission.name}」对应多个域名，无法确定归属`
+        : `${submission.recordId}：缺少网址，也找不到同名站点`);
       continue;
     }
     groups.set(host, [...(groups.get(host) ?? []), submission]);
   }
 
-  const stations: CatalogImportStation[] = [];
-  const posts: CatalogImportPost[] = [];
+  const stations: StationItem[] = [];
+  const posts: PostItem[] = [];
   for (const [host, group] of groups) {
-    const slug = clip(`sub-${host.replace(/[^a-z0-9]+/g, '-')}`, 124);
     const name = group[0].name;
+    const site = group.find(item => item.site)!.site!;
+    const hostname = new URL(site.url).hostname.toLowerCase();
     stations.push({
-      slug, name,
-      url: group.find(item => item.site)!.site!.url,
-      description: cleanText(group.find(item => !REVIEW_TYPES.has(item.type) && item.text)?.text ?? DEFAULT_DESCRIPTION, LIMITS.description),
-      rechargeThreshold: group.find(item => item.threshold !== null)?.threshold ?? null,
-      paymentMethods: group.find(item => item.payments.length)?.payments ?? [],
-      offers: group.find(item => item.offers.length)?.offers ?? [],
+      kind: 'station', originKey: host.toLowerCase(), action: 'upsert',
+      payload: {
+        name, url: site.url,
+        description: cleanText(group.find(item => !REVIEW_TYPES.has(item.type) && item.text)?.text ?? DEFAULT_DESCRIPTION, LIMITS.description),
+        rechargeThreshold: group.find(item => item.threshold !== null)?.threshold ?? null,
+        paymentMethods: group.find(item => item.payments.length)?.payments ?? [],
+        offers: group.find(item => item.offers.length)?.offers ?? [],
+      },
     });
     for (const item of group.filter(entry => REVIEW_TYPES.has(entry.type))) {
       if (!item.text) {
@@ -258,21 +323,44 @@ export function buildImport(records: RawRecord[], models: SiteModel[]) {
       }
       const excerpt = cleanLine(item.text, LIMITS.excerpt);
       posts.push({
-        recordId: item.recordId, stationSlug: slug, title: `${name} · ${item.type}`,
-        summary: item.score === null ? excerpt : `推荐指数 ${item.score}/5 · ${excerpt}`,
-        body: item.text, authorName: item.nickname || ANONYMOUS, publishedAt: new Date(item.time).toISOString(),
+        kind: 'post', originKey: item.recordId,
+        payload: {
+          hostname, title: `${name} · ${item.type}`,
+          summary: item.score === null ? excerpt : `推荐指数 ${item.score}/5 · ${excerpt}`,
+          body: item.text, authorName: item.nickname || ANONYMOUS, publishedAt: new Date(item.time).toISOString(),
+        },
       });
     }
   }
-  stations.sort((a, b) => a.slug.localeCompare(b.slug));
-  posts.sort((a, b) => a.recordId.localeCompare(b.recordId));
+  stations.sort((a, b) => a.originKey.localeCompare(b.originKey));
+  posts.sort((a, b) => a.originKey.localeCompare(b.originKey));
   skipped.sort();
   notes.sort();
-  const payload: CatalogImportRequest = { stations, posts };
-  return { payload, skipped, notes };
+  const payload = { channel: 'feishu' as const, items: [...stations, ...posts] };
+  return { payload, skipped, notes, validStations: stations.length };
+}
+
+/** 按飞书分组的 hostname 比较，slug 只取服务端返回的值，不在脚本里派生。 */
+export function planBatch(batch: AdminBatchSubmitRequest, state: AdminSubmissionStateResponse | null, allowSkipped = false, allowRemoval = true) {
+  const upserts = batch.items.filter(item => item.kind === 'station' && (item.action ?? 'upsert') === 'upsert');
+  const incoming = new Set(upserts.map(item => feishuHostnameKey(item.originKey)));
+  const current = new Set(state?.stations.map(station => feishuHostnameKey(station.originKey)));
+  // 默认自动下架：表格里删掉的站点就该下线，这是自动运行的前提。
+  // 防误删靠的是读取阶段的闸门（逐页字段校验、行长度校验、解析失败即中止、
+  // 有效站点数为 0 即中止）和下架本身的软删除——站点只是标记下线，随时能恢复。
+  // --no-removal 留作手动关闭的口子。
+  const removals: RemovalItem[] = allowSkipped || !allowRemoval ? [] : state?.stations.filter(station => !incoming.has(feishuHostnameKey(station.originKey))).map(station => ({
+    kind: 'station', originKey: feishuHostnameKey(station.originKey), action: 'remove', payload: { slug: station.slug, submissionId: station.submissionId },
+  })) ?? [];
+  return {
+    payload: { ...batch, items: [...batch.items, ...removals] }, removals,
+    added: state === null ? null : [...incoming].filter(hostname => !current.has(hostname)).length,
+    updated: state === null ? null : [...incoming].filter(hostname => current.has(hostname)).length,
+  };
 }
 
 class UsageError extends Error {}
+class UnsafeBatchError extends Error {}
 
 function requireEnv(name: string) {
   const value = process.env[name];
@@ -289,78 +377,231 @@ function readConfig(dryRun: boolean) {
     configDir, site,
     baseToken: requireEnv('FEISHU_BASE_TOKEN'),
     tableId: requireEnv('FEISHU_TABLE_ID'),
-    syncToken: dryRun ? '' : requireEnv('SYNC_TOKEN'),
+    syncToken: dryRun ? process.env.SYNC_TOKEN ?? '' : requireEnv('SYNC_TOKEN'),
   };
 }
 
 type Config = ReturnType<typeof readConfig>;
 
-function runLark(args: string[], configDir: string) {
+/** lark-cli 只需要这几个环境变量。整份 process.env 传下去会让子进程能读到 SYNC_TOKEN。 */
+const LARK_ENV_ALLOWLIST = ['PATH', 'HOME', 'LANG', 'LC_ALL', 'TZ', 'TMPDIR'] as const;
+
+/** 白名单之外还要原样透传的变量前缀，给测试替身用（真实 lark-cli 不读它们）。 */
+const LARK_ENV_PASSTHROUGH_PREFIX = 'FAKE_LARK_';
+
+function isAllowedLarkEnv(key: string) {
+  return (LARK_ENV_ALLOWLIST as readonly string[]).includes(key) || key.startsWith(LARK_ENV_PASSTHROUGH_PREFIX);
+}
+
+/** 无超时的话，lark-cli 网络挂起会让整条同步永久阻塞，cron 只能靠外部 kill，且没有退出码。 */
+const LARK_TIMEOUT_MS = 60_000;
+
+function larkEnv(configDir: string) {
+  const env: Record<string, string> = { LARKSUITE_CLI_CONFIG_DIR: configDir };
+  for (const [key, value] of Object.entries(process.env)) {
+    if (value !== undefined && isAllowedLarkEnv(key)) env[key] = value;
+  }
+  return env;
+}
+
+function runLark(args: string[], configDir: string, extraEnv: Record<string, string> = {}) {
   return new Promise<string>((done, fail) => {
-    execFile('lark-cli', args, { env: { ...process.env, LARKSUITE_CLI_CONFIG_DIR: configDir }, maxBuffer: 256 * 1024 * 1024 }, (error, stdout, stderr) => {
-      if (error) fail(new Error(`lark-cli 退出码 ${String(error.code)}：${stderr.trim()}`));
-      else done(stdout);
+    execFile('lark-cli', args, { env: { ...larkEnv(configDir), ...extraEnv }, timeout: LARK_TIMEOUT_MS, maxBuffer: 256 * 1024 * 1024 }, (error, stdout, stderr) => {
+      if (error) {
+        // 区分三种失败：根本找不到命令、超时、CLI 自己报错。
+        // 原先把 ENOENT 也写成「退出码 ENOENT」，排障时会误以为是 CLI 内部错误。
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') fail(new Error('找不到 lark-cli，请检查 PATH'));
+        else if (error.killed) fail(new Error(`lark-cli 超过 ${LARK_TIMEOUT_MS / 1000} 秒没有返回，已中止`));
+        else fail(new Error(`lark-cli 退出码 ${String(error.code)}：${stderr.trim()}`));
+      } else done(stdout);
     });
   });
 }
 
 /** 分页串行读取全部记录（record-list 禁止并发）。 */
 async function readAllRecords(config: Config) {
+  // base token 曾经作为命令行参数传给 lark-cli，同步期间同机任何用户 `ps` 都能看到，
+  // 拿到就能读整张收集表（含未审核内容）。改成经环境变量传递。
+  return collectPages(async offset => parseRecordPage(await runLark(['base', '+record-list', '--as', 'bot', '--table-id', config.tableId, '--offset', String(offset), '--limit', String(PAGE_SIZE)], config.configDir, { LARK_BASE_TOKEN: config.baseToken })));
+}
+
+/** 分页逻辑本身。抽出来是为了能直接测「has_more 恒为真」这类边界。 */
+export async function collectPages(fetchPage: (offset: number) => Promise<{ records: RawRecord[]; columns: string[]; hasMore: boolean | null }>) {
   const records: RawRecord[] = [];
   const columns = new Set<string>();
-  for (;;) {
-    const page = parseRecordPage(await runLark(['base', '+record-list', '--as', 'bot', '--base-token', config.baseToken, '--table-id', config.tableId, '--offset', String(records.length), '--limit', String(PAGE_SIZE)], config.configDir));
+  for (let pageCount = 1; ; pageCount += 1) {
+    if (pageCount > MAX_PAGES) throw new Error(`分页超过 ${MAX_PAGES} 页仍未结束，疑似 has_more 恒为真或 offset 不推进，中止同步`);
+    const page = await fetchPage(records.length);
+
+    // 每页单独校验必填字段。只在读完后查一次是不够的：
+    // 分页里混入列式与对象式结构时，某一页的字段会解析成空，
+    // 那些记录读不到「审核状态」就被当成未通过——结果静默生成下架请求，
+    // 日志里看不出任何异常。
+    const pageColumns = new Set(page.columns);
+    const missingOnPage = REQUIRED_COLUMNS.filter(column => !pageColumns.has(column));
+    if (page.records.length > 0 && missingOnPage.length > 0) {
+      // 用循环计数而不是 records.length/PAGE_SIZE：后者在不满一页时会算出 1.5 这种页号。
+      throw new Error(`第 ${pageCount} 页缺少字段：${missingOnPage.join('、')}，中止同步`);
+    }
     records.push(...page.records);
     page.columns.forEach(column => columns.add(column));
-    if (page.records.length === 0 || !(page.hasMore ?? page.records.length === PAGE_SIZE)) break;
+    // 没有 has_more 时，不能只用「本页行数是否等于 PAGE_SIZE」判断结束。
+    // 服务端若把 limit 截断成更小的值（或返回比请求少的行），第一页就 break，
+    // 解析失败数为 0、有效站点数 > 0，两道闸门都不触发，
+    // 而 planBatch 会把第一页之外的全部站点计划下架。
+    // 空页但服务端说还有下一页，是自相矛盾的响应。信「没有更多」结束掉，
+    // 剩下没读到的站点就会被当成已删除——宁可中止。
+    if (page.records.length === 0) {
+      if (page.hasMore === true) throw new Error('返回空页但 has_more 为 true，分页结果自相矛盾，中止同步');
+      break;
+    }
+    if (page.hasMore !== null) {
+      if (!page.hasMore) break;
+      continue;
+    }
+    // 拿不到 has_more 又遇到短页：无法区分「表格本来就不足一页」和「服务端把 limit 截断了」。
+    // 前者只可能出现在第一页，但第一页也可能正是被截断的那页（20 个站点、首页只回 12 行），
+    // 信任它会让剩下 8 个站点被判成已删除，而两道闸门都拦不住（有效站点数非 0、也没掉一半）。
+    // 所以一律中止：少同步一次可以补，误下架是事故。
+    if (page.records.length < PAGE_SIZE) {
+      throw new Error(`分页结果不完整：本页 ${page.records.length} 行，请求上限 ${PAGE_SIZE} 行，且返回里没有 has_more。中止同步`);
+    }
   }
-  // 字段被改名时所有记录都会变成「未通过」，全量同步就会清空站点，所以这里中止。
+  // 字段被改名时所有记录都会变成「未通过」，会生成错误的下架请求，所以这里中止。
   const missing = REQUIRED_COLUMNS.filter(column => !columns.has(column));
   if (records.length > 0 && missing.length > 0) throw new Error(`表格缺少字段：${missing.join('、')}，中止同步`);
   return records;
 }
 
+/** 与读投稿状态保持一致的超时。没有它时，站点无响应会让整条同步永久挂住。 */
+const MODELS_TIMEOUT_MS = 30_000;
+/** 翻页兜底：total 缺失或恒大于实际条目时，不能无限翻下去。 */
+const MODELS_MAX_PAGES = 200;
+
 async function readModels(site: URL) {
   const models: SiteModel[] = [];
   for (let page = 1; ; page++) {
-    const response = await fetch(new URL(`/api/models?page=${page}&pageSize=50`, site));
+    if (page > MODELS_MAX_PAGES) throw new Error(`读取模型列表超过 ${MODELS_MAX_PAGES} 页仍未结束，中止同步`);
+    const response = await fetch(new URL(`/api/models?page=${page}&pageSize=50`, site), { signal: AbortSignal.timeout(MODELS_TIMEOUT_MS) });
     if (!response.ok) throw new Error(`读取模型列表失败：HTTP ${response.status}`);
     const body = await response.json() as { items: SiteModel[]; total: number };
     models.push(...body.items);
-    if (body.items.length === 0 || models.length >= body.total) return models;
+    // total 缺失或不是数字时，仅靠 items 为空判断结束。
+    const total = typeof body.total === 'number' && Number.isFinite(body.total) ? body.total : Number.POSITIVE_INFINITY;
+    if (body.items.length === 0 || models.length >= total) return models;
   }
 }
 
-async function main(dryRun: boolean, config: Config) {
+async function readSubmissionState(config: Config): Promise<AdminSubmissionStateResponse> {
+  const response = await fetch(new URL('/api/admin/submissions/state', config.site), {
+    headers: { authorization: `Bearer ${config.syncToken}` }, signal: AbortSignal.timeout(30_000),
+  });
+  if (!response.ok) throw new Error(`读取投稿状态失败：HTTP ${response.status} ${await response.text()}`);
+  const body: unknown = await response.json();
+  if (!isObject(body) || !Array.isArray(body.stations) || !body.stations.every((station: unknown) => isObject(station)
+    && typeof station.slug === 'string' && station.slug.length > 0 && station.slug.length <= 200
+    && typeof station.originKey === 'string' && station.originKey.length > 0 && station.originKey.length <= 253
+    && typeof station.submissionId === 'string' && station.submissionId.trim().length > 0 && station.submissionId.length <= 200
+    && typeof station.name === 'string' && (station.url === null || typeof station.url === 'string'))) {
+    throw new Error('线上投稿状态结构无法识别，中止同步');
+  }
+  return body as unknown as AdminSubmissionStateResponse;
+}
+
+function batchResult(body: unknown, items: AdminBatchSubmitRequest['items']): AdminBatchSubmitResponse {
+  if (!isObject(body) || typeof body.batchId !== 'string' || !body.batchId || !Array.isArray(body.results) || body.results.length !== items.length
+    || !body.results.every((result: unknown, index) => {
+      if (!isObject(result) || result.kind !== items[index].kind || result.originKey !== items[index].originKey) return false;
+      if (result.error !== undefined) return isObject(result.error) && typeof result.error.code === 'string' && typeof result.error.message === 'string';
+      return typeof result.id === 'string' && result.id.length > 0 && typeof result.status === 'string'
+        && ['pending', 'approved', 'rejected', 'superseded'].includes(result.status);
+    })) throw new Error('批次入队响应结构无法识别，请核对服务端批次结果');
+  return body as unknown as AdminBatchSubmitResponse;
+}
+
+async function main(dryRun: boolean, allowSkipped: boolean, allowRemoval: boolean, config: Config) {
   const records = await readAllRecords(config);
   const models = await readModels(config.site);
-  const { payload, skipped, notes } = buildImport(records, models);
-  console.log(`读取 ${records.length} 条记录，将发布 ${payload.stations.length} 个站点、${payload.posts.length} 篇评价，跳过 ${skipped.length} 条坏记录`);
+  const { payload: batch, skipped, notes, validStations } = buildBatch(records, models);
+  const stationCount = validStations;
+  const postCount = batch.items.filter(item => item.kind === 'post').length;
+  console.log(`读取 ${records.length} 条记录，成功解析 ${stationCount} 个站点、${postCount} 篇评价，无法解析 ${skipped.length} 条记录`);
   for (const line of skipped) console.log(`[跳过] ${line}`);
   for (const line of notes) console.log(`[提示] ${line}`);
+  if (skipped.length > 0 && !allowSkipped) {
+    throw new UnsafeBatchError(`有 ${skipped.length} 条记录无法解析，为避免误下架已中止。修正数据后重试，或用 --allow-skipped 跳过这些记录但不同步下架`);
+  }
+  if (allowSkipped) console.error('[警告] 本次不同步下架：已启用 --allow-skipped，仅提交有效的新增、更新和评价');
+  let state: AdminSubmissionStateResponse | null = null;
+  if (config.syncToken) state = await readSubmissionState(config);
+  else console.log('跳过下架检测：未配置 SYNC_TOKEN');
+  if (validStations === 0 && state !== null && state.stations.length > 0) {
+    throw new UnsafeBatchError(`成功解析的站点数为 0，线上仍有 ${state.stations.length} 个站点，为避免误下架已中止。请确认表格内容和读取结果后重试`);
+  }
+  // 只拦「0 个」不够：读表只读到一小部分时，剩余站点会被当成已删除。
+  // 线上规模足够大时，解析出的站点数不足一半就停下来让人确认。
+  if (state !== null && state.stations.length >= 10 && validStations * 2 < state.stations.length) {
+    throw new UnsafeBatchError(
+      `本次只解析出 ${validStations} 个站点，线上有 ${state.stations.length} 个，差距过大，为避免批量误下架已中止。`
+      + '请核对表格内容与分页读取结果；确认无误后可用 --no-removal 只同步新增和更新',
+    );
+  }
+  const { payload, removals, added, updated } = planBatch(batch, state, allowSkipped, allowRemoval);
+  console.log(state === null
+    ? `同步计划：上架/更新 ${stationCount}，评价 ${postCount}，下架未检测`
+    : `同步计划：新增 ${added}，更新 ${updated}，下架 ${removals.length}，评价 ${postCount}`);
+  for (const item of removals) console.log(`[下架] ${item.originKey}：${item.payload.slug}`);
   if (dryRun) {
     console.log(JSON.stringify(payload, null, 2));
     return;
   }
-  const response = await fetch(new URL('/api/admin/import', config.site), {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', authorization: `Bearer ${config.syncToken}` },
-    body: JSON.stringify(payload),
-  });
-  if (!response.ok) throw new Error(`导入失败：HTTP ${response.status} ${await response.text()}`);
-  const result = await response.json() as CatalogImportResponse;
-  console.log(`导入完成：${result.changed ? '内容有变化' : '内容无变化'}，站点 ${result.stations}，报价 ${result.offers}，文章 ${result.posts}`);
+  const batchId = randomUUID();
+  const result: AdminBatchSubmitResponse = { batchId, results: [] };
+  // 串行分块，共用同一 batchId；空批次保留一次请求，返回明确的入队结果。
+  for (let offset = 0; offset < Math.max(payload.items.length, 1); offset += BATCH_SIZE) {
+    const items = payload.items.slice(offset, offset + BATCH_SIZE);
+    const response = await fetch(new URL('/api/admin/submissions/batch', config.site), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${config.syncToken}` },
+      body: JSON.stringify({ ...payload, batchId, items }),
+      signal: AbortSignal.timeout(30_000),
+    });
+    if (!response.ok) throw new Error(`批次 ${batchId} 第 ${offset / BATCH_SIZE + 1} 块入队失败：HTTP ${response.status} ${await response.text()}`);
+    const chunk = batchResult(await response.json(), items);
+    if (chunk.batchId !== batchId) throw new Error(`批次 ${batchId} 入队响应的 batchId 不一致，请核对服务端批次结果`);
+    // 立即报告本块错误，后续 HTTP 失败不能遮住已经返回的逐条失败详情。
+    for (const item of chunk.results.filter(item => item.error)) console.log(`[失败] ${item.kind} ${item.originKey}：${item.error!.code} ${item.error!.message}`);
+    result.results.push(...chunk.results);
+  }
+  const failed = result.results.filter(item => item.error);
+  // 结果已按请求顺序校验；同 hostname 的遗留实体各有下架条目，按位置逐条对账。
+  const accepted = payload.items.filter((_item, index) => !result.results[index].error);
+  const current = new Set(state?.stations.map(station => feishuHostnameKey(station.originKey)));
+  const stations = new Set(accepted.filter(item => item.kind === 'station' && (item.action ?? 'upsert') === 'upsert')
+    .map(item => feishuHostnameKey(item.originKey)));
+  const newCount = [...stations].filter(hostname => !current.has(hostname)).length;
+  const updateCount = stations.size - newCount;
+  const removeCount = accepted.filter(item => item.kind === 'station' && item.action === 'remove').length;
+  const reviewCount = accepted.filter(item => item.kind === 'post').length;
+  console.log(`批次 ${result.batchId} 入队完成：新增 ${newCount}，更新 ${updateCount}，下架 ${removeCount}，评价 ${reviewCount}，失败 ${failed.length}`);
+  if (failed.length > 0) throw new Error(`批次 ${result.batchId} 有 ${failed.length} 条入队失败`);
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+// 两边都 realpath 再比：import.meta.url 会 realpath 并做 percent-encoding，
+// 而 resolve() 只做词法归一。macOS 的 /tmp、包装脚本用的软链、含空格或中文的
+// 目录都会让两者失配，脚本随即静默空转并退出 0——cron 那边看到的是「成功」。
+if (process.argv[1] && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url))) {
   const dryRun = process.argv.includes('--dry-run');
+  const allowSkipped = process.argv.includes('--allow-skipped');
+  // 默认自动下架；--no-removal 只同步新增和更新。
+  const allowRemoval = !process.argv.includes('--no-removal');
   const secrets = () => ['FEISHU_BASE_TOKEN', 'SYNC_TOKEN'].map(name => process.env[name]).filter((value): value is string => Boolean(value));
   try {
-    await main(dryRun, readConfig(dryRun));
+    await main(dryRun, allowSkipped, allowRemoval, readConfig(dryRun));
   } catch (error) {
     // lark-cli 的错误输出可能回显命令行参数，打印前抹掉 token。
     const message = secrets().reduce((text, secret) => text.replaceAll(secret, '***'), error instanceof Error ? error.message : String(error));
     console.error(`同步失败：${message}`);
-    process.exitCode = 1;
+    process.exitCode = error instanceof UnsafeBatchError ? 2 : 1;
   }
 }

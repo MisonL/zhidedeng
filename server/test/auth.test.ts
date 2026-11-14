@@ -269,3 +269,44 @@ describe('互动按账号存、对所有人累计', () => {
     expect((await a.call('POST', '/api/me/checkin')).status).toBe(409);
   });
 });
+
+describe('用户名探测的限流', () => {
+  it('同一用户名被反复探测时返回 429，不能无限枚举', async () => {
+    // 用户名是否被占用只能从响应推断，所以按用户名维度限流，
+    // 让人没法用字典把注册名一个个试出来。
+    const a = browser();
+    await a.register('taken_name');
+    // 每次都换一个来源 IP：否则先撞上的是按 IP 的 10 次上限，
+    // 验不到「按用户名」这一维。
+    const codes: number[] = [];
+    for (let index = 0; index < 22; index += 1) {
+      codes.push((await browser(`198.51.100.${index + 1}`).register('taken_name')).status);
+    }
+    // 首次注册也算一次该用户名的计数，所以前 19 次探测是 409，第 20 次起 429。
+    expect(codes.slice(0, 19).every(code => code === 409)).toBe(true);
+    expect(codes.slice(19).every(code => code === 429)).toBe(true);
+  });
+});
+
+describe('注册时的昵称校验', () => {
+  it('注册不能直接占用保留身份', async () => {
+    // 只挡「改资料」的话，注册时直接填「管理员」就是一条现成的绕过路径。
+    const response = await browser().register('nasty_user', { nickname: '管理员' });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ error: { code: 'INVALID_INPUT' } });
+  });
+
+  it('注册不能与他人重名', async () => {
+    await browser().register('first_user', { nickname: '独一无二' });
+    const response = await browser('198.51.100.77').register('second_user', { nickname: '独一无二' });
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ error: { code: 'NICKNAME_TAKEN' } });
+  });
+
+  it('正常昵称不受影响，包括含保留词的普通昵称', async () => {
+    for (const [index, nickname] of ['系统工程师', '中国女排官方', '官方粉丝'].entries()) {
+      const response = await browser(`198.51.100.${100 + index}`).register(`nick_user_${index}`, { nickname });
+      expect(response.status).toBe(200);
+    }
+  });
+});

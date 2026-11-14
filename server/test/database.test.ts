@@ -11,10 +11,26 @@ describe('database initialization and persistence', () => {
     expect(result.stderr).not.toContain('ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX');
     expect(result.status).toBe(0);
     expect(result.stdout.trim()).toBe('11');
-  });
+    // 这条要起一个真实 node 子进程；机器负载高时默认 5 秒不够，会变成偶发失败。
+  }, 30_000);
 
   it('defaults to server/data/app.db', () => {
     expect(defaultDbPath).toBe(resolve('data/app.db'));
+  });
+
+  it('creates the submission dedupe index and uses it for the dedupe query', () => {
+    const server = createApp({ dbPath: ':memory:' });
+    try {
+      const columns = server.db.prepare('PRAGMA index_info(submissions_dedupe)').all().map(column => column.name);
+      expect(columns).toEqual(['kind', 'originKey', 'action', 'batchId', 'payloadHash', 'status', 'createdAt']);
+      const plan = server.db.prepare(`EXPLAIN QUERY PLAN
+        SELECT * FROM submissions WHERE kind = ? AND originKey = ? AND action = ? AND payloadHash = ?
+          AND batchId IS ? AND status = 'pending' ORDER BY createdAt DESC, rowid DESC LIMIT 1`)
+        .all('post', 'origin', 'upsert', 'payload', 'batch');
+      expect(plan.some(row => String(row.detail).includes('submissions_dedupe'))).toBe(true);
+    } finally {
+      server.db.close();
+    }
   });
 
   it('creates parent directories, reopens idempotently and preserves writes', async () => {

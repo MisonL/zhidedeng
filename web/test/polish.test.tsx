@@ -5,6 +5,7 @@ import RankingBoard from '../src/components/RankingBoard';
 import StationCard from '../src/components/StationCard';
 import { makePost, station } from './fixtures';
 import { renderApp, renderWithProviders, stubApi } from './helpers';
+import { normalizeDisplay } from '../src/format';
 
 describe('差异化封面', () => {
   it('按文章类型出不同封面，数字取自关联站点', async () => {
@@ -62,5 +63,20 @@ describe('404 页', () => {
     expect(container.querySelector('.notfound-art')).toHaveAttribute('aria-hidden', 'true');
     expect(container.querySelector('.notfound-art img')).toHaveAttribute('src', '/favicon.svg');
     expect(screen.getByRole('link', { name: '回到首页' })).toHaveAttribute('href', '/');
+  });
+});
+
+describe('展示文本清洗', () => {
+  it('清掉破坏排版但看不见的字符', () => {
+    // 这些字符在 HTML 里不换行，却会进入 attr()、复制粘贴与无障碍播报。
+    expect(normalizeDisplay('正常\u2028文本\u0085和\u0007控制符')).toBe('正常文本和控制符');
+  });
+
+  it('保留正常的换行与制表符', () => {
+    expect(normalizeDisplay('第一行\n第二行\t缩进')).toBe('第一行\n第二行\t缩进');
+  });
+
+  it('普通文本不受影响', () => {
+    expect(normalizeDisplay('GPT-4.1 中转站 0.5 倍率')).toBe('GPT-4.1 中转站 0.5 倍率');
   });
 });

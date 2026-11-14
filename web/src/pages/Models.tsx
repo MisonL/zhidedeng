@@ -5,7 +5,7 @@ import { api } from '../api';
 import AsyncView, { Empty, LoadMore } from '../components/AsyncView';
 import PostCard from '../components/PostCard';
 import { VendorIcon } from '../components/visuals';
-import { formatLatency, formatRate, formatStatus, formatUptime, SUBMISSION_LABEL } from '../format';
+import { formatLatency, formatRate, formatStatus, formatUptime, sourceLabel } from '../format';
 import { useAsync, usePaged } from '../hooks';
 import { useCatalog } from '../state';
 
@@ -113,7 +113,7 @@ export function ModelDetailPage() {
                             <tr key={offer.stationSlug} className={offer.rate === model.offers[0].rate ? 'is-best' : undefined}>
                               <td>
                                 <Link to={`/stations/${offer.stationSlug}`}>{offer.station.name}</Link>{' '}
-                                {offer.station.source === 'submission' && <span className="tag tag-warn">{SUBMISSION_LABEL}</span>}
+                                {sourceLabel(offer.station.source) && <span className="tag tag-warn">{sourceLabel(offer.station.source)}</span>}
                               </td>
                               <td className="num rate-cell">{formatRate(offer.rate)}</td>
                               <td className="num">{formatUptime(offer.station.uptime)}</td>

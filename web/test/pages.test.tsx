@@ -165,3 +165,58 @@ describe('商务合作', () => {
     expect(screen.getByText(/联系方式待配置/)).toBeInTheDocument();
   });
 });
+
+describe('补录模型', () => {
+  // 用 fixtures 里已有的厂商，避免自己编一个对不上真实接口的形状。
+  const catalogVendor = vendors[0]!;
+  const VENDOR = catalogVendor.slug;
+
+  it('选「补充模型」后显示模型字段，提交走 /api/models/suggest', async () => {
+    const fetchMock = stubApi({
+      'GET /api/vendors': page(vendors),
+      'POST /api/models/suggest': { id: 'm1', slug: 'claude-sonnet-4-5', status: 'pending', deduplicated: false },
+    });
+    renderApp('/submit?kind=model');
+
+    expect(screen.getByRole('radio', { name: '补充模型' })).toBeChecked();
+    // 模型不该显示文章的标题/摘要/正文。
+    expect(screen.queryByLabelText('标题')).not.toBeInTheDocument();
+    // catalog 未就绪时厂商下拉是空的，此时设 value 会被丢掉——先等选项出现。
+    await screen.findByRole('option', { name: catalogVendor.name });
+
+    fireEvent.change(screen.getByLabelText('模型 slug'), { target: { value: 'Claude-Sonnet-4-5' } });
+    fireEvent.change(screen.getByLabelText('厂商'), { target: { value: VENDOR } });
+    fireEvent.change(screen.getByLabelText('模型名称'), { target: { value: 'Claude Sonnet 4.5' } });
+    fireEvent.change(screen.getByLabelText('一句话说明'), { target: { value: '一句话' } });
+    fireEvent.click(screen.getByRole('button', { name: '提交审核' }));
+
+    await waitFor(() => expect(callsTo(fetchMock, 'POST', '/api/models/suggest')).toHaveLength(1));
+    // slug 统一转小写，和服务端的 slug 规则一致。
+    expect(callsTo(fetchMock, 'POST', '/api/models/suggest')[0].body).toEqual({
+      slug: 'claude-sonnet-4-5', vendor: VENDOR, name: 'Claude Sonnet 4.5', description: '一句话',
+    });
+  });
+
+  it('模型字段不全时不发请求，给出提示', async () => {
+    const fetchMock = stubApi({ 'GET /api/vendors': page(vendors) });
+    renderApp('/submit?kind=model');
+    fireEvent.click(screen.getByRole('button', { name: '提交审核' }));
+    expect(await screen.findByText('模型需要填写 slug、厂商、名称和说明')).toBeInTheDocument();
+    expect(callsTo(fetchMock, 'POST', '/api/models/suggest')).toHaveLength(0);
+  });
+
+  it('服务端拒绝时显示原因', async () => {
+    stubApi({
+      'GET /api/vendors': page(vendors),
+      'POST /api/models/suggest': () => apiError(409, 'MODEL_EXISTS', '模型已存在'),
+    });
+    renderApp('/submit?kind=model');
+    await screen.findByRole('option', { name: catalogVendor.name });
+    fireEvent.change(screen.getByLabelText('模型 slug'), { target: { value: 'dup' } });
+    fireEvent.change(screen.getByLabelText('厂商'), { target: { value: VENDOR } });
+    fireEvent.change(screen.getByLabelText('模型名称'), { target: { value: '名称' } });
+    fireEvent.change(screen.getByLabelText('一句话说明'), { target: { value: '说明' } });
+    fireEvent.click(screen.getByRole('button', { name: '提交审核' }));
+    expect(await screen.findByText('模型已存在')).toBeInTheDocument();
+  });
+});
