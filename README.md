@@ -119,7 +119,23 @@ DEPLOY_HOST=user@your-server deploy/deploy.sh
 
 不对公网开放：nginx 对 `/api/admin/` 返回 404，要在服务器本机直连。都要 `Authorization: Bearer $SYNC_TOKEN`，未配置密钥时一律拒绝。写接口要求 `Content-Type: application/json`。
 
-用网页管理台（`/admin` 页面）时，它调的是同一组 `/api/admin/*`，走 nginx 会被 404。在本机建一条 SSH 隧道即可：
+### 让管理台用起来不那么麻烦
+
+`deploy/nginx-site.conf.template` 里的 `/api/admin/` 用的是 **IP 白名单**（`allow` + `deny all`），默认只放行 `127.0.0.1`。想直接在浏览器打开管理台，就在那个 location 的 `deny all` **之前**加一行自己的出口 IP：
+
+```nginx
+location /api/admin/ {
+    allow 127.0.0.1;
+    allow 203.0.113.7;      # 你的固定 IP
+    # allow 10.8.0.0/16;    # 或者一个网段
+    deny all;
+    ...
+}
+```
+
+改完 `nginx -s reload`。用 IP 白名单而不是再加一层密码：管理接口本身已有 `SYNC_TOKEN` 校验，白名单是第二道；万一密钥泄漏，攻击者还得在这个网段里。
+
+如果 IP 不固定，退回 SSH 隧道：
 
 ```sh
 ssh -L 8787:127.0.0.1:8787 <服务器>
@@ -135,6 +151,11 @@ ADMIN=http://127.0.0.1:8787   # PORT 与环境文件一致
 curl -H "Authorization: Bearer $SYNC_TOKEN" "$ADMIN/api/admin/posts?status=pending"
 # 待审投稿队列，可按一次飞书同步返回的 batchId 筛选
 curl -H "Authorization: Bearer $SYNC_TOKEN" "$ADMIN/api/admin/submissions?batchId=<batchId>"
+
+# 用户忘了密码，管理员代为重置（会同时清掉该账号全部会话与 Agent 凭证）
+curl -H "Authorization: Bearer $SYNC_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"username":"alice","newPassword":"一个新的长口令"}' \
+  "$ADMIN/api/admin/accounts/reset-password"
 # 人工确认后审核整批 pending；已审核条目会跳过，下架请求也在此人工审核
 curl -X POST -H "Authorization: Bearer $SYNC_TOKEN" -H 'Content-Type: application/json' \
   -d '{"batchId":"<batchId>","status":"approved"}' "$ADMIN/api/admin/submissions/batch-review"
@@ -201,7 +222,7 @@ pnpm sync:feishu --allow-skipped     # 显式跳过坏记录，本次只提交 u
 
 ## 已知未修
 
-- 没有找回密码，也不能注销账号。
+- 没有自助找回密码（收不到邮件），也不能注销账号。忘记密码只能由管理员重置：`POST /api/admin/accounts/reset-password`，会同时清掉该账号的全部会话与 Agent 凭证。
 - 登录和 Agent 提交的速率计数写在库里的 `rate_limits` 表，多进程共用同一个库文件时配额才是全局限额；跨主机部署仍需换成共享存储（比如 Redis）。计数带窗口，过期记录在写入时顺带清理，不随重启清零。
 - 按用户名计数的登录退避可以被别人用来把某个账号挡在登录外最多 15 分钟。
 - 登录的三个计数维度与退还规则：`IP+账号`（5 次/15 分钟，成功即清空）、`按账号`（20 次/15 分钟，**成功也计**）、`按 IP`（30 次/15 分钟，成功后退还）。按账号不退是为了拦住「单人拿自己的正确密码循环打登录、占满密码校验闸门」；按 IP 退是为了不让同一出口 IP 后面的其他人被拖累（办公室、学校、运营商 CGNAT 常常几十人共用一个 IP）。代价是：同一个 IP 下面的人如果都在**失败**地试密码，仍然会共享那 30 次。

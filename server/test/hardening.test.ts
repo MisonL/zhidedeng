@@ -362,3 +362,56 @@ describe('数据目录权限', () => {
     }
   });
 });
+describe('管理员重置密码', () => {
+  const resetAdmin = (body: unknown, auth = TOKEN) =>
+    server.app.request('/api/admin/accounts/reset-password', {
+      method: 'POST', headers: { ...json, authorization: `Bearer ${auth}` }, body: JSON.stringify(body),
+    }, proxied);
+
+  it('重置后旧密码失效、新密码可用，会话与 Agent 凭证全部吊销', async () => {
+    const cookie = await register('forgetful');
+    // 签发 Agent 凭证要求注册满 7 天（或已有通过投稿/邀请码），把时钟推过去。
+    clock = new Date(clock.getTime() + 8 * 24 * 60 * 60_000);
+    const created = await server.app.request('/api/account/agent-tokens', {
+      method: 'POST', headers: { ...json, cookie }, body: JSON.stringify({ label: 'cli' }),
+    }, proxied);
+    expect(created.status).toBe(200);
+    const { token } = await created.json() as { token: string };
+
+    const reset = await resetAdmin({ username: 'forgetful', newPassword: NEXT_PASSWORD });
+    expect(reset.status).toBe(200);
+    expect(await reset.json()).toMatchObject({ ok: true, handle: 'forgetful' });
+
+    // 旧会话失效
+    const me = await server.app.request('/api/me', { headers: { cookie } }, proxied);
+    expect(me.status).toBe(401);
+    // Agent 凭证失效
+    const submit = await server.app.request('/api/agent/stations', {
+      method: 'POST', headers: { ...json, authorization: `Bearer ${token}` },
+      body: JSON.stringify({ kind: 'station', action: 'upsert', payload: {} }),
+    }, proxied);
+    expect(submit.status).toBe(401);
+    // 旧密码登录失败，新密码成功
+    expect((await login('forgetful', PASSWORD)).status).toBe(401);
+    expect((await login('forgetful', NEXT_PASSWORD, '198.51.100.9')).status).toBe(200);
+  }, 60_000);
+
+  it('管理员设的弱密码同样被拒', async () => {
+    await register('weakadmin');
+    const reset = await resetAdmin({ username: 'weakadmin', newPassword: 'welcome123' });
+    expect(reset.status).toBe(400);
+    expect(await reset.json()).toMatchObject({ error: { code: 'WEAK_PASSWORD' } });
+  });
+
+  it('用户名不存在时 404', async () => {
+    const reset = await resetAdmin({ username: 'nobody_here', newPassword: NEXT_PASSWORD });
+    expect(reset.status).toBe(404);
+  });
+
+  it('没有管理密钥时拒绝', async () => {
+    await register('target_user');
+    // 与其它管理接口一致：密钥不对是 403，不是 404——404 留给「用户名不存在」。
+    const reset = await resetAdmin({ username: 'target_user', newPassword: NEXT_PASSWORD }, 'wrong-token');
+    expect(reset.status).toBe(403);
+  });
+});

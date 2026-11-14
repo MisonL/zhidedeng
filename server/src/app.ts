@@ -329,6 +329,35 @@ export function buildApp(store: Store, now: () => Date, options: AppOptions = {}
     const { id } = z.strictObject({ id: z.string().trim().min(1).max(200) }).parse(c.req.param());
     return c.json({ inviteCode: revokeInviteCode(store, id, now()) });
   });
+  // 管理员重置密码：用户忘了密码又收不到邮件时唯一的补救手段。
+  // 这是最高权限的操作，比改资料敏感得多，所以放在 /api/admin/ 下（nginx 默认只允许本机）。
+  app.post('/api/admin/accounts/reset-password', async c => {
+    const input = z.strictObject({
+      username: z.string().trim().min(1).max(64),
+      newPassword: z.string().min(1).max(128),
+    }).parse(await c.req.json());
+    const handle = store.db.prepare('SELECT handle FROM accounts WHERE usernameKey = ?')
+      .get(input.username.toLowerCase())?.handle as string | undefined;
+    if (!handle) throw new ApiError(404, 'NOT_FOUND', '这个用户名不存在');
+    // 管理员显式设的密码同样要过强度判定：设成 welcome123 等于没重置。
+    if (isWeakPassword(input.newPassword, handle)) throw new ApiError(400, 'WEAK_PASSWORD', '这个密码太容易被猜到，请换一个（避免常见词、连续字符或包含用户名）');
+    // 哈希失败（比如 scrypt 因为负载被拒）时不改库，让调用方重试即可。
+    const passwordHash = await hashPassword(input.newPassword);
+    const revoked = store.transaction(() => {
+      store.db.prepare('UPDATE accounts SET passwordHash = ? WHERE handle = ?').run(passwordHash, handle);
+      // 全部会话都清掉，包括管理员自己的（如果他重置的是自己的账号）。
+      // 会话是「已证明持有密码」的凭据，密码变了就必须失效。
+      const sessions = store.db.prepare('DELETE FROM sessions WHERE handle = ?').run(handle) as { changes?: number };
+      // Agent 凭证一起吊销。它是长期有效的 bearer token 且不过期，
+      // 忘了密码的人多半也认为账号可能被盗——留着凭证等于留一把钥匙。
+      const tokens = store.db.prepare('UPDATE agent_tokens SET revokedAt = ? WHERE handle = ? AND revokedAt IS NULL')
+        .run(now().toISOString(), handle) as { changes?: number };
+      return { sessions: Number(sessions.changes ?? 0), agentTokens: Number(tokens.changes ?? 0) };
+    });
+    // 只记账号与吊销数量，不记密码。
+    console.info(JSON.stringify({ event: 'admin.reset-password', handle, ...revoked }));
+    return c.json({ ok: true, handle, revokedSessions: revoked.sessions, revokedAgentTokens: revoked.agentTokens });
+  });
   app.get('/api/admin/settings', c => c.json({ autoApprove: autoApproveEnabled(store) }));
   app.post('/api/admin/settings', async c => {
     const { autoApprove } = z.strictObject({ autoApprove: z.boolean() }).parse(await c.req.json());

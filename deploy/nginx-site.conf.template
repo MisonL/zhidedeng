@@ -5,6 +5,9 @@
 #   __TLS_KEY__      私钥路径
 #   __APP_PORT__     服务端口，与环境文件里的 PORT 一致
 #
+# 管理接口默认只允许本机访问。要从外部用网页管理台，在 location /api/admin/ 里
+# 的 deny all 之前追加 allow <你的出口 IP 或网段>，然后 nginx -s reload。
+#
 # Node 只监听 127.0.0.1。这里用 $remote_addr 覆盖 X-Forwarded-For，客户端伪造的值不会传进去，
 # 服务端限流按它识别 IP。只监听 IPv4：服务器不用 IPv6，也避开 limit_req 按单个地址计数被 /64 绕过。
 
@@ -68,9 +71,25 @@ server {
   proxy_set_header X-Forwarded-For $remote_addr;
   proxy_set_header X-Forwarded-Proto $scheme;
 
-  # 管理接口不对公网开放（含导入），一律从服务器本机直连 127.0.0.1。前缀比 /api/ 长，优先匹配。
+  # 管理接口（含导入）。默认一律从服务器本机直连 127.0.0.1，对公网返回 404。
+  #
+  # 要走网页管理台又在服务器上开 SSH 隧道嫌麻烦时，在下面 allow 里加自己的出口 IP
+  # 或办公网段（例如 allow 203.0.113.7; 或 allow 10.8.0.0/16;），再跑 nginx -s reload。
+  # 用 IP 白名单而不是密码：管理接口本身已有 SYNC_TOKEN 校验，白名单是第二道；
+  # 万一密钥泄漏，攻击者还得在这个网段里。
+  #
+  # 注意是 allow 在前 deny 在后：nginx 从上到下匹配，命中即停。
+  # 加了 allow 之后，管理台页面本身（前端路由）也只在白名单网段能拿到数据。
   location /api/admin/ {
-    return 404;
+    # 只允许本机时保留这一行即可。
+    allow 127.0.0.1;
+    # 需要从外部访问时在下面这行之前追加 allow 条目。
+    deny all;
+    proxy_pass http://127.0.0.1:__APP_PORT__;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $remote_addr;
+    proxy_set_header X-Forwarded-Proto $scheme;
   }
 
   # 首页一次会并发十几个 API 请求，读请求的 burst 给足，防的是持续抓取。
