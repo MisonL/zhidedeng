@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import {
   assertSafeBase, EXIT, batchExitCode, catalog, configPath, inferKind, login, matchModel, normalizeModelName, parseArgs,
   readConfig, resolveToken, run, status, submitBatch, submitFile, submitOne, validate,
-  scrubSecret, validatePayload, whoami, writeConfig, ZdError,
+  scrubSecret, stationDetail, validatePayload, whoami, writeConfig, ZdError,
 } from '../zdd.ts';
 
 let home: string;
@@ -721,5 +721,31 @@ describe('服务地址安全', () => {
 
   it('非法 URL 明确报错', () => {
     expect(() => assertSafeBase('not-a-url')).toThrow(/不是合法 URL/);
+  });
+});
+
+describe('zdd station', () => {
+  it('返回站点现有报价，供增量提交前核对（整包替换会删掉没写的报价）', async () => {
+    let requested = '';
+    const detail = await stationDetail('lantern-demo', {
+      fetchImpl: (async (input: string | URL | Request) => {
+        requested = String(input);
+        return new Response(JSON.stringify({
+          slug: 'lantern-demo', name: '灯笼猫', url: 'https://lantern.example.com/',
+          offers: [{ modelSlug: 'claude-sonnet', rate: 0.8 }, { modelSlug: 'gpt-4-1', rate: 1.2 }],
+        }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }) as unknown as typeof fetch,
+    });
+    expect(requested).toContain('/api/stations/lantern-demo');
+    expect(detail.offers).toEqual([{ modelSlug: 'claude-sonnet', rate: 0.8 }, { modelSlug: 'gpt-4-1', rate: 1.2 }]);
+  });
+
+  it('报价字段异常时不崩，只保留结构正确的项', async () => {
+    const detail = await stationDetail('x', {
+      fetchImpl: (async () => new Response(JSON.stringify({
+        slug: 'x', name: 'X', url: null, offers: [{ modelSlug: 'a', rate: 1 }, { modelSlug: 'b' }, null],
+      }), { status: 200, headers: { 'content-type': 'application/json' } })) as unknown as typeof fetch,
+    });
+    expect(detail.offers).toEqual([{ modelSlug: 'a', rate: 1 }]);
   });
 });

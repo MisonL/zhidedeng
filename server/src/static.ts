@@ -1,4 +1,5 @@
 import { serveStatic } from '@hono/node-server/serve-static';
+import { compress } from 'hono/compress';
 import type { Hono } from 'hono';
 import type { Env } from 'hono/types';
 
@@ -21,6 +22,10 @@ const SHORT = 'public, max-age=3600';
 
 /** 托管 web/dist：assets 带内容哈希可以长缓存，index.html 不缓存，其他路径回退到 SPA。API 的 404 不受影响。 */
 export function mountWeb<E extends Env>(app: Hono<E>, webRoot: string) {
+  // 压缩。nginx 模板里配了 gzip，但当前部署是容器端口直映射、前面没有 nginx，
+  // 于是 520KB 的 JS 和 261KB 的 CSS 原样传给每个首次访问的用户。
+  // compress() 按 Accept-Encoding 协商，对已压缩的 woff2/图片会自动跳过。
+  app.use('*', compress());
   const file = serveStatic({ root: webRoot });
   const page = serveStatic({ root: webRoot, path: 'index.html' });
   const notFound = async () => {};

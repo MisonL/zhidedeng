@@ -383,13 +383,16 @@ export class Service {
   getModel(slug: string): ModelDetail {
     const model = this.store.get('model', slug);
     if (!model) throw new ApiError(404, 'NOT_FOUND', '模型不存在');
-    // 一个模型可能有几十上百条报价行，每行各查三张互动表就是上百条 SQL。
-    // 站点集合比票行总数小得多，预取划算。
-    const interactions = this.interactionMap('station');
+    // 一个模型可能有几十上百条报价行，每行各查三张互动表就是上百条 SQL，
+    // 所以预取。但预取是扫**全站**的票/收藏/评论，成本跟要展示的报价条数无关——
+    // 16 个站点挂这个模型时全量预取 6ms、400 个站点时 59ms，而点查只有十几条 SQL。
+    // 实测报价条数达到阈值以上，预取才开始划算。
+    const ratedStations = this.offers().reduce((count, offer) => count + Number(offer.modelSlug === slug), 0);
+    const interactions = ratedStations > PREFETCH_MIN_ROWS ? this.interactionMap('station') : null;
     const offers = this.offers().filter(o => o.modelSlug === slug).sort((a, b) => a.rate - b.rate)
       // 站点已被下架时报价不该出现；用 filter 兜底而不是非空断言，
       // 一条孤儿报价不能把整个模型页变成 500。
-      .flatMap(o => { const station = this.store.get('station', o.stationSlug); return station ? [{ ...o, station: this.station(station, interactions) }] : []; });
+      .flatMap(o => { const station = this.store.get('station', o.stationSlug); return station ? [{ ...o, station: this.station(station, interactions ?? undefined) }] : []; });
     return { ...model, offers };
   }
 

@@ -10,7 +10,7 @@ AI 模型中转站的导购与点评社区：比较相对倍率，看社区评�
 - 账户设置中签发、查看和吊销 AI Agent 凭证；明文仅签发时显示一次
 - AI Agent 使用 Bearer 凭证提交站点和评价，查询本人的审核状态与配额
 - 评论登录后发布即公开，有频率限制；投稿先审后发
-- 管理接口：投稿队列、整批审核、隐藏评论、禁用账号（没有后台页面，在服务器本机用 curl 调用）
+- 管理接口：投稿队列、整批审核、隐藏评论、禁用账号。网页端有审核台 `/admin`（填 `SYNC_TOKEN` 进入）：待审投稿/文章、批量通过、驳回理由、已下架站点恢复。默认只在服务器本机或内网访问，见下文「审核台怎么进」。
 - 飞书多维表格收集表同步（确定性脚本，不调用 LLM）
 
 ## 技术栈
@@ -41,7 +41,7 @@ pnpm dev
 
 数据库默认在 `server/data/app.db`，空库自动写入演示数据。启动时会幂等补齐投稿表的 `batchId` 和 `action` 列，并建立批次索引，保留已有投稿和业务数据。
 
-Agent 凭证表由启动建表流程自动创建，已有库不需要另行迁移。凭证以 `zd_` 加 32 字节随机数的 base64url 编码组成，数据库只保留 SHA-256 和前八字符展示前缀，完整明文无法取回。注册满 7 天、有至少一篇审核通过的非演示投稿，或填写有效邀请码即可签发。邀请码在库里管理：`POST /api/admin/invite-codes` 创建（可设次数上限、有效期、备注），明文只在创建响应里返回一次，库里只存 SHA-256 与前缀；`GET /api/admin/invite-codes` 列出用量，`POST /api/admin/invite-codes/:id/revoke` 吊销。同一账号对同一个码只核销一次，已核销过的账号即使码后来用完或吊销也仍可续签。环境变量 `INVITE_CODES`（逗号分隔）作为兼容保留，用于还没建码的老部署。每账号最多 5 个活跃凭证，吊销后可补发；`lastUsedAt` 在尚未使用时为 null，`useCount` 从 0 开始。签发和吊销通过现有服务日志记录不含秘密的结构化事件。`/api/account/agent-tokens` 管理接口使用登录会话，下面的 Agent 提交接口使用签发的凭证。命令行工具 `zdd` 把整套接口包装成给 Agent 用的七个命令，见「Agent 提交接口」一节。
+Agent 凭证表由启动建表流程自动创建，已有库不需要另行迁移。凭证以 `zd_` 加 32 字节随机数的 base64url 编码组成，数据库只保留 SHA-256 和前八字符展示前缀，完整明文无法取回。注册满 7 天、有至少一篇审核通过的非演示投稿，或填写有效邀请码即可签发。邀请码在库里管理：`POST /api/admin/invite-codes` 创建（可设次数上限、有效期、备注），明文只在创建响应里返回一次，库里只存 SHA-256 与前缀；`GET /api/admin/invite-codes` 列出用量，`POST /api/admin/invite-codes/:id/revoke` 吊销。同一账号对同一个码只核销一次，已核销过的账号即使码后来用完或吊销也仍可续签。环境变量 `INVITE_CODES`（逗号分隔）作为兼容保留，用于还没建码的老部署。每账号最多 5 个活跃凭证，吊销后可补发；`lastUsedAt` 在尚未使用时为 null，`useCount` 从 0 开始。签发和吊销通过现有服务日志记录不含秘密的结构化事件。`/api/account/agent-tokens` 管理接口使用登录会话，下面的 Agent 提交接口使用签发的凭证。命令行工具 `zdd` 把整套接口包装成给 Agent 用的八个命令（`login` / `whoami` / `catalog` / `station` / `match` / `validate` / `submit` / `status`），见「Agent 提交接口」一节。
 
 ## 测试
 
@@ -58,7 +58,7 @@ pnpm -r test
 |---|---|
 | `POST /api/agent/stations` | 直接传站点 payload：name、description、url、rechargeThreshold、paymentMethods、offers；无充值门槛信息用 null，无支付方式或报价用空数组 |
 | `POST /api/agent/posts` | 直接传评价 payload：title、summary、body、authorName；hostname、publishedAt（ISO 时间）可选，作者账号由凭证确定 |
-| `GET /api/agent/status?limit=20` | 最近条数默认 20、最大 50；返回 handle、pendingCount、quotas 和 submissions；每条状态含 id、kind、status、createdAt、reason |
+| `GET /api/agent/status?limit=20` | 最近条数默认 20、最大 50；返回 handle、pendingCount、quotas 和 submissions；每条状态含 id、kind、status、createdAt、reason、originKey（批量提交后靠它认领是哪一条被拒） |
 
 ```sh
 curl --connect-timeout 5 --max-time 30 -X POST \
@@ -67,7 +67,7 @@ curl --connect-timeout 5 --max-time 30 -X POST \
   "$SITE_URL/api/agent/stations"
 ```
 
-成功返回 `{ submission, deduplicated, autoApproved: false }`，channel 固定为 agent，进入 pending 队列；即使管理员开启自动通过，Agent 接口也等待人工审核。同账号的相同规范化内容在 pending 期间跨凭证重试返回原记录，不重复扣提交额度；JSON 字段顺序及 URL 的 query/fragment 不影响幂等。已审核的内容再提交会产生新的 pending。
+成功返回 `{ submission, deduplicated, autoApproved: false }`，channel 固定为 agent，进入 pending 队列；即使管理员开启自动通过，Agent 接口也等待人工审核。**Agent 通道的投稿被驳回时管理员必须填写理由**（`reason`），否则提交方拿不到任何可据以修正的信息。同账号的相同规范化内容在 pending 期间跨凭证重试返回原记录，不重复扣提交额度；JSON 字段顺序及 URL 的 query/fragment 不影响幂等。已审核的内容再提交会产生新的 pending。
 
 | 配额维度 | 上限 |
 |---|---|
@@ -241,6 +241,11 @@ pnpm sync:feishu --allow-skipped     # 显式跳过坏记录，本次只提交 u
 
 **什么时候需要重新评估**：任一类内容的单页返回量长期接近页大小、且期间有持续写入时（例如投稿队列常态几百条、管理员边审边有人提交）。那时的最省事做法是只给管理端列表加游标参数，公开列表保持不动。
 - 中文口令的强度判定按长度与「明显规律」判，不按字符种类——中文口令的字符种类天然很少。
+- **列表接口按 `Store.all(kind)` 全量反序列化后再在 JS 里筛选排序。** 实测 2 万篇文章时 `getPosts` 约 310ms（其中 `all('post')` 的 JSON 解析占 262ms）。当前线上 48 篇文章，单次约 2ms，不是问题。真正要改的话需要给 `entities` 加生成列（`postStatus`/`publishedAt`）或表达式索引把排序下推给 SQLite——那会引入「老库没有这一列」的迁移问题（本项目没有迁移工具），所以在数据量到几千篇之前不动。
+- **首屏字体体积偏大**：字体按 `unicode-range` 切成 200 多个 woff2，中文页面首屏实际会拉 30 多个文件、约 2.5MB。要变小得先做字体子集化（只保留站内实际用到的字符），那需要一个构建期的字体处理步骤。压缩（gzip）已在 Node 侧开启，能省掉约 70% 的文本传输。
+- **站点报价是整包替换**：提交一个已存在站点的 `offers` 会替换它现有的全部报价，没写的等于删掉。这是刻意设计（飞书全量同步要能反映「下架了哪些模型」），所以 `zdd` 提供了 `zdd station <slug>` 让提交前先看现有报价；审核台也会显示「报价将被整包替换为 N 条」和最低倍率变化。但**没有逐条增量的 API**。
+- **报价没有计价口径字段**：`rate` 只是「相对官方价格的倍率」，但不同站点可能按输入/输出分别计价、或按打包价计。两个不同口径的数字在同一张榜上不可比，而 schema 里没有字段能表达这个差异，只能靠审核时人判断。
+- **全站待审熔断（200 条）对飞书批量同步不生效**：飞书是受信通道，一次全量同步可以把队列推过 200，此后 Agent 和站内投稿会拿到 `QUEUE_FULL` 直到审核消化完。同步侧应自行分批。
 - 中转站 URL 只去掉 query 和 fragment，路径原样保留并公开展示——路径里若带邀请码或令牌，会进入页面。靠人工审核把关。
 - `TRUSTED_PROXIES` 的含义是「这个网段里有一个反代在**覆写** `X-Forwarded-For`」，不是「请求来自这个网段」。两者搞混的后果方向相反：
   - 该配没配：所有请求的来源都记成网关地址，按 IP 的限流退化成全站共用一个桶（一个人就能把全站注册/登录打到 429）。

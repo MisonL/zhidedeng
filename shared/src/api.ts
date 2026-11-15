@@ -205,7 +205,9 @@ export interface GetAgentStatusResponse {
     // 本人待审内容涉及的 hostname；remaining 计入所有渠道关联该 hostname 的待审记录。
     hostnames: (AgentPendingQuota & { hostname: string; pendingCount: number })[];
   };
-  submissions: Pick<SubmissionRecord, 'id' | 'kind' | 'status' | 'createdAt' | 'reason'>[];
+  // originKey 必须带上：批量提交后收到一条 rejected + 理由「报价不准确」，
+  // 只有 id 的话提交方（尤其 Agent）不知道被拒的是哪个站。
+  submissions: Pick<SubmissionRecord, 'id' | 'kind' | 'status' | 'createdAt' | 'reason' | 'originKey'>[];
 }
 // 未登录时 HTTP 401，错误码 UNAUTHENTICATED；我的收藏、我的分享和所有写接口同样如此。
 export type GetMeRequest = EmptyRequest;

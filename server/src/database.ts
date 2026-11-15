@@ -102,6 +102,12 @@ export const SCHEMA = `
   CREATE INDEX IF NOT EXISTS rate_limits_lookup ON rate_limits(bucket, key, at);
   -- 过期清理是按 (bucket, at) 删的，没有 key 前缀就用不上 rate_limits_lookup。
   CREATE INDEX IF NOT EXISTS rate_limits_expiry ON rate_limits(bucket, at);
+  -- 会话清理（登出/改密/禁用/过期回收）都是按 handle 或 expiresAt 扫，
+  -- 没有索引时每次都要全表读一遍 sessions。表小的时候看不出来，登录态一多就是线性成本。
+  CREATE INDEX IF NOT EXISTS sessions_handle ON sessions(handle);
+  CREATE INDEX IF NOT EXISTS sessions_expiry ON sessions(expiresAt);
+  -- 「我的收藏」按人取再按时间排，原来只有 (targetType,targetId) 用不上。
+  CREATE INDEX IF NOT EXISTS favorites_user ON favorites(userHandle, createdAt);
   CREATE INDEX IF NOT EXISTS votes_target ON votes(targetType, targetId);
   CREATE INDEX IF NOT EXISTS favorites_target ON favorites(targetType, targetId);
   CREATE INDEX IF NOT EXISTS comments_target ON comments(targetType, targetId, createdAt);

@@ -456,6 +456,33 @@ export async function submitBatch(
   return result;
 }
 
+/* ---------------------------------------------------------------- station */
+
+/**
+ * 单个站点的详情，含它当前的全部报价。
+ *
+ * `catalog` 为了省流量只给 slug/name/url，拿不到报价；而站点投稿是**整包替换**：
+ * 提交里没写的报价会被删掉。所以「在已有站点上补几条报价」之前必须先看一眼
+ * 它现在有哪些，否则一次增量提交会把别人的报价全删了。
+ */
+export async function stationDetail(
+  slug: string,
+  options: { fetchImpl?: typeof fetch } = {},
+): Promise<{ slug: string; name: string; url: string | null; offers: { modelSlug: string; rate: number }[] }> {
+  const payload = await request(`${API_ROUTES.getStation.path.replace(':slug', encodeURIComponent(slug))}`, { fetchImpl: options.fetchImpl });
+  const station = payload as { slug?: unknown; name?: unknown; url?: unknown; offers?: unknown };
+  const offers = Array.isArray(station.offers) ? station.offers : [];
+  return {
+    slug: typeof station.slug === 'string' ? station.slug : slug,
+    name: typeof station.name === 'string' ? station.name : '',
+    url: typeof station.url === 'string' ? station.url : null,
+    offers: offers
+      .filter((offer): offer is { modelSlug: string; rate: number } =>
+        typeof (offer as { modelSlug?: unknown })?.modelSlug === 'string' && typeof (offer as { rate?: unknown })?.rate === 'number')
+      .map(offer => ({ modelSlug: offer.modelSlug, rate: offer.rate })),
+  };
+}
+
 /* ----------------------------------------------------------------- status */
 
 export async function status(
@@ -638,6 +665,12 @@ export async function run(argv: string[]): Promise<number> {
         emit(await catalog());
         return EXIT.ok;
       }
+      case 'station': {
+        const slug = positional[0]?.trim();
+        if (!slug) throw new ZdError(EXIT.usage, '用法：zdd station <站点 slug>');
+        emit(await stationDetail(slug));
+        return EXIT.ok;
+      }
       case 'match': {
         const query = positional.join(' ').trim();
         if (!query) throw new ZdError(EXIT.usage, '用法：zdd match "模型名"');
@@ -692,6 +725,7 @@ export async function run(argv: string[]): Promise<number> {
             '  zdd login --key zd_xxx        保存凭证',
             '  zdd whoami                    身份与配额余量',
             '  zdd catalog                   厂商、模型、已有站点',
+            '  zdd station <slug>            单个站点详情（含现有报价）',
             '  zdd match "模型名"            模型名模糊匹配',
             '  zdd validate ./x.json         本地校验，不联网',
             '  zdd submit ./x.json           提交单个',

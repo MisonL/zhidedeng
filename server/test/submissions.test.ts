@@ -71,7 +71,7 @@ describe('投稿入队与列表', () => {
 
   it('已审核的相同 payload 可重新入队，不复用旧审核结果', () => {
     const first = queue().submission;
-    reviewSubmission(store, clock(), first.id, { status: 'rejected' });
+    reviewSubmission(store, clock(), first.id, { status: 'rejected', reason: '材料不足' });
     const again = queue();
     expect(again.deduplicated).toBe(false);
     expect(again.submission.id).not.toBe(first.id);
@@ -83,7 +83,7 @@ describe('投稿入队与列表', () => {
     const oldest = queue({ originKey: 'oldest.example.com', payload: { ...stationPayload, url: 'https://oldest.example.com/' }, now: new Date('2026-11-07T01:00:00Z') }).submission;
     const middle = queue({ originKey: 'middle.example.com', payload: { ...stationPayload, url: 'https://middle.example.com/' }, now: new Date('2026-11-07T02:00:00Z') }).submission;
     const model = queue({ kind: 'model', originKey: modelPayload.slug, payload: modelPayload }).submission;
-    reviewSubmission(store, clock(), model.id, { status: 'rejected' });
+    reviewSubmission(store, clock(), model.id, { status: 'rejected', reason: '模型信息有误' });
     expect(listSubmissions(store, { kind: 'station', status: 'pending', page: 2, pageSize: 1 }))
       .toEqual({ items: [middle], total: 3, page: 2, pageSize: 1 });
     expect(listSubmissions(store, { kind: 'station' }).items.map(item => item.id)).toEqual([oldest.id, middle.id, latest.id]);
@@ -265,7 +265,8 @@ describe('审核物化', () => {
 
   it.each(['approved', 'rejected'] as const)('%s 后重复审核返回 409 ALREADY_REVIEWED', status => {
     const submission = queue().submission;
-    reviewSubmission(store, clock(), submission.id, { status });
+    // agent 通道驳回必须带理由，这里统一带上，两种状态都能走到重复审核那一层。
+    reviewSubmission(store, clock(), submission.id, { status, reason: '材料不足' });
     expect(() => approve(submission.id)).toThrow(expect.objectContaining({ status: 409, code: 'ALREADY_REVIEWED' }));
   });
 
@@ -311,7 +312,7 @@ describe('投稿管理接口', () => {
   it('默认只列 pending，显式 status、kind 和分页参数生效', async () => {
     const first = queue().submission;
     const second = queue({ payload: { ...stationPayload, name: '第二版' } }).submission;
-    reviewSubmission(store, clock(), first.id, { status: 'rejected' });
+    reviewSubmission(store, clock(), first.id, { status: 'rejected', reason: '材料不足' });
     const response = await server.app.request('/api/admin/submissions', { headers: admin });
     expect(await response.json()).toMatchObject({ total: 1, items: [{ id: second.id, status: 'pending' }] });
     const filtered = await server.app.request('/api/admin/submissions?status=rejected&kind=station&page=1&pageSize=1', { headers: admin });

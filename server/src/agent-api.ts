@@ -225,7 +225,7 @@ export class AgentApi {
           const count = this.hostnameCount(hostname);
           return { hostname, pendingCount: count, limit: HOSTNAME_PENDING, remaining: Math.max(0, HOSTNAME_PENDING - count) };
         });
-      const rows = this.store.db.prepare('SELECT id, kind, status, createdAt, reason FROM submissions WHERE actorHandle = ? ORDER BY createdAt DESC, rowid DESC LIMIT ?')
+      const rows = this.store.db.prepare('SELECT id, kind, status, createdAt, reason, originKey FROM submissions WHERE actorHandle = ? ORDER BY createdAt DESC, rowid DESC LIMIT ?')
         .all(request.handle, limit);
       return {
         handle: request.handle, pendingCount,

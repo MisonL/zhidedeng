@@ -625,6 +625,12 @@ export function reviewSubmission(store: Store, now: Date, id: string, decision: 
       const submission = submissionRecord(row);
       if (submission.status !== 'pending') throw new ApiError(409, 'ALREADY_REVIEWED', '投稿已审核或被新版本替代');
 
+      // Agent 通道的驳回必须给理由。这条通道没人盯着屏幕，被拒后唯一的
+      // 反馈就是 reason；为空时提交方只能去问用户，用户也答不出来，
+      // 「驳回 → 修正 → 重投」这个闭环就断在最后一步。
+      if (status === 'rejected' && submission.channel === 'agent' && !reason) {
+        throw new ApiError(400, 'REASON_REQUIRED', 'Agent 提交的投稿驳回时必须填写理由，否则提交方无法修正');
+      }
       let resolvedReason = reason ?? null;
       let materializationReason: string | undefined;
       if (status === 'approved') {

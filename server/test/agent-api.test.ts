@@ -324,7 +324,7 @@ describe('六个配额维度', () => {
     for (let index = 0; index < 4; index++) await submitted(await submitPost(key, post({ title: '评价 ' + index })));
     await error(await submitStation(key, station(6)), 409, 'TOO_MANY_PENDING', '单账号');
     expect((await status(key)).quotas.pending).toEqual({ limit: 5, remaining: 0 });
-    reject(first.submission.id);
+    reject(first.submission.id, '报价与页面不一致');
     await submitted(await submitStation(key, station(6)));
     expect(pendingCount()).toBe(5);
   });
@@ -336,7 +336,7 @@ describe('六个配额维度', () => {
     await submitted(await submitPost(secondKey, post({ hostname: 'STATION-0.EXAMPLE.COM.' })));
     await error(await submitStation(secondKey, station(0, { name: '另一个版本' })), 409, 'TOO_MANY_PENDING', 'hostname');
     expect((await status(firstKey)).quotas.hostnames).toEqual([{ hostname: 'station-0.example.com', pendingCount: 2, limit: 2, remaining: 0 }]);
-    reject(first.submission.id);
+    reject(first.submission.id, '报价与页面不一致');
     await submitted(await submitStation(secondKey, station(0, { name: '另一个版本' })));
     expect(pendingCount()).toBe(2);
   });
@@ -397,7 +397,7 @@ describe('六个配额维度', () => {
     await error(await submitStation(key), 409, 'QUEUE_FULL', '全站待审队列已满');
     expect((await status(key)).quotas.globalPending).toEqual({ limit: 200, remaining: 0 });
     const id = server.db.prepare('SELECT id FROM submissions ORDER BY rowid LIMIT 1').get()!.id as string;
-    reject(id);
+    reject(id, '信息不完整');
     await submitted(await submitStation(key));
     expect(pendingCount()).toBe(200);
   });
@@ -664,8 +664,8 @@ describe('幂等和状态', () => {
     const next = await submitted(await submitStation(key));
     expect(next.submission.id).not.toBe(first.submission.id);
     expect((await status(key)).submissions).toEqual([
-      { id: next.submission.id, kind: 'station', status: 'pending', createdAt: START, reason: null },
-      { id: first.submission.id, kind: 'station', status: 'rejected', createdAt: START, reason: '请补充报价来源' },
+      { id: next.submission.id, kind: 'station', status: 'pending', createdAt: START, reason: null, originKey: 'station-0.example.com' },
+      { id: first.submission.id, kind: 'station', status: 'rejected', createdAt: START, reason: '请补充报价来源', originKey: 'station-0.example.com' },
     ]);
   });
 
@@ -689,9 +689,10 @@ describe('幂等和状态', () => {
         ip: { limit: 20, remaining: 16, retryAfter: 0 }, pending: { limit: 5, remaining: 5 },
         globalPending: { limit: 200, remaining: 199 }, hostnames: [],
       },
+      // originKey 是给批量提交用的：只有 id 时，收到「报价不准确」不知道该改哪个站。
       submissions: [
-        { id: review.submission.id, kind: 'post', status: 'rejected', createdAt: clock.toISOString(), reason: '需要更多使用细节' },
-        { id: next.submission.id, kind: 'station', status: 'approved', createdAt: next.submission.createdAt, reason: null },
+        { id: review.submission.id, kind: 'post', status: 'rejected', createdAt: clock.toISOString(), reason: '需要更多使用细节', originKey: review.submission.originKey },
+        { id: next.submission.id, kind: 'station', status: 'approved', createdAt: next.submission.createdAt, reason: null, originKey: 'station-0.example.com' },
       ],
     });
     const all = await status(key);

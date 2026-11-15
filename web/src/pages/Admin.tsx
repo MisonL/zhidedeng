@@ -18,6 +18,8 @@ const displayTime = (iso: string) => {
 
 const KIND_LABEL: Record<string, string> = { station: '站点', model: '模型', post: '文章' };
 const CHANNEL_LABEL: Record<string, string> = { feishu: '飞书', agent: 'Agent', web: '站内' };
+/** 常见驳回原因。Agent 通道必须给理由，点一下就填上，省得每次手打。 */
+const REJECT_PRESETS = ['报价与页面不一致', '站点无法访问', '与已有投稿重复', '内容含广告或推荐语', '字段填写有误'];
 
 /** 投稿内容摘要：待审列表要能一眼看出这条改的是什么。 */
 function summarize(submission: SubmissionRecord): string {
@@ -288,17 +290,39 @@ export default function Admin() {
                     ))}
                     {rejecting === item.id && (
                       <div className="field">
-                        <label className="field-label" htmlFor={`reason-${item.id}`}>驳回理由（可选）</label>
+                        <label className="field-label" htmlFor={`reason-${item.id}`}>
+                          {item.channel === 'agent' ? '驳回理由（Agent 投稿必填）' : '驳回理由（可选）'}
+                        </label>
                         <input
                           id={`reason-${item.id}`} value={reasons[item.id] ?? ''} maxLength={200}
                           onChange={event => setReasons({ ...reasons, [item.id]: event.target.value })}
                         />
+                        {item.channel === 'agent' && (
+                          <div className="tags">
+                            {REJECT_PRESETS.map(preset => (
+                              <button
+                                key={preset} type="button" className="tag"
+                                onClick={() => setReasons({ ...reasons, [item.id]: preset })}
+                              >
+                                {preset}
+                              </button>
+                            ))}
+                          </div>
+                        )}
                         <button
                           className="btn btn-small btn-ghost" disabled={busy}
-                          onClick={() => void act(
-                            () => admin.reviewSubmission(item.id, 'rejected', reasons[item.id]?.trim() || undefined),
-                            '已拒绝',
-                          ).then(() => setRejecting(undefined))}
+                          onClick={() => {
+                            const reason = reasons[item.id]?.trim();
+                            // 服务端对 Agent 通道强制要求理由；这里先拦一下，省一次往返。
+                            if (item.channel === 'agent' && !reason) {
+                              setError('Agent 投稿驳回时必须填理由，点上面的常用原因即可');
+                              return;
+                            }
+                            void act(
+                              () => admin.reviewSubmission(item.id, 'rejected', reason || undefined),
+                              '已拒绝',
+                            ).then(() => setRejecting(undefined));
+                          }}
                         >
                           确认拒绝
                         </button>
