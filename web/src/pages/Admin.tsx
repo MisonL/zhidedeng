@@ -1,9 +1,10 @@
 import { useEffect, useState } from 'react';
 import type { FormEvent } from 'react';
-import type { SubmissionRecord } from '@zhidedeng/shared';
+import type { Station, SubmissionRecord } from '@zhidedeng/shared';
 import { admin, adminToken, AdminError } from '../admin';
 import type { AdminPostRow, RemovedStation } from '../admin';
 import { Skeleton } from '../components/AsyncView';
+import { useCatalog } from '../state';
 
 /** 服务端 ids 模式的单批上限，与 submissions.ts 的 schema 保持一致。 */
 const BATCH_REVIEW_LIMIT = 100;
@@ -28,6 +29,34 @@ function summarize(submission: SubmissionRecord): string {
   if (typeof name === 'string' && typeof url === 'string') return `${name} · ${url}`;
   if (typeof name === 'string') return name;
   return typeof payload.slug === 'string' ? payload.slug : '';
+}
+
+/**
+ * 这条投稿对上线的实际影响。
+ *
+ * 审核一个站点投稿时，物化是**整包替换**：报价先全删再按投稿重插，
+ * 描述、支付方式也是覆盖写。原来这里只显示「名称 · URL」，审核员看不到
+ * 「这一通过会删掉多少条报价、把描述换成另一段」，只能靠域名眼熟做判断。
+ *
+ * 列表接口不返回 offers（只有 lowestRate 汇总），所以这里按条数 + 最低倍率
+ * 的变化给出提示，不做逐条 diff——那需要新接口，等真有审核量再说。
+ */
+function impact(submission: SubmissionRecord, current: Station | undefined): string[] {
+  const payload = submission.payload as Record<string, unknown> | null;
+  if (!payload || typeof payload !== 'object') return [];
+  const offers = Array.isArray(payload.offers) ? payload.offers as Array<{ modelSlug?: unknown; rate?: unknown }> : null;
+  if (!offers) return [];
+  const rates = offers.map(offer => Number(offer.rate)).filter(rate => Number.isFinite(rate));
+  const lowest = rates.length ? Math.min(...rates) : null;
+  if (!current) return [`新建站点，提交 ${offers.length} 条报价`];
+  const lines = [`更新已有站点：报价将被整包替换为 ${offers.length} 条`];
+  if (lowest !== null && current.lowestRate !== null && lowest !== current.lowestRate) {
+    lines.push(`最低倍率 ${current.lowestRate}x → ${lowest}x`);
+  }
+  if (typeof payload.description === 'string' && payload.description !== current.description) {
+    lines.push(`描述将被覆盖：${payload.description.slice(0, 60)}${payload.description.length > 60 ? '…' : ''}`);
+  }
+  return lines;
 }
 
 type Tab = 'submissions' | 'posts' | 'removed';
@@ -192,6 +221,14 @@ export default function Admin() {
   }
 
   const pendingSubmissions = submissions ?? [];
+  const { stationBySlug } = useCatalog();
+  // 站点类投稿要拿线上当前状态做对比；已下架的站点不在 catalog 里，按「新建」提示。
+  const impactLines = (item: SubmissionRecord): string[] => {
+    if (item.kind !== 'station' || item.action === 'remove') return [];
+    const payload = item.payload as Record<string, unknown> | null;
+    const slug = payload && typeof payload.slug === 'string' ? payload.slug : undefined;
+    return impact(item, slug ? stationBySlug.get(slug) : undefined);
+  };
   const pendingPosts = posts ?? [];
   const removedStations = removed ?? [];
 
@@ -246,6 +283,9 @@ export default function Admin() {
                     </div>
                     <p>{summarize(item)}</p>
                     <p className="hint">{item.originKey}</p>
+                    {impactLines(item).map(line => (
+                      <p className="hint" key={line}>{line}</p>
+                    ))}
                     {rejecting === item.id && (
                       <div className="field">
                         <label className="field-label" htmlFor={`reason-${item.id}`}>驳回理由（可选）</label>

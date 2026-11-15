@@ -250,3 +250,29 @@ describe('管理密钥被拒时的反馈', () => {
     expect(sessionStorage.getItem('zdd.adminToken')).toBeNull();
   });
 });
+
+describe('待审卡片的变更提示', () => {
+  it('站点更新时提示报价将被整包替换，并给出最低倍率变化', async () => {
+    // 线上已有该站点（catalog 带 lowestRate），投稿会把报价整包替换掉
+    stubApi({
+      'GET /api/admin/submissions': {
+        items: [{
+          ...submission, channel: 'agent', actorHandle: 'someone',
+          payload: {
+            slug: 'sub-a-example-com', name: '示例站', url: 'https://a.example.com/', description: '被换掉的描述',
+            rechargeThreshold: null, paymentMethods: [], offers: [{ modelSlug: 'claude-sonnet', rate: 0.3 }],
+          },
+        }],
+        total: 1,
+      },
+      'GET /api/stations': {
+        items: [{ slug: 'sub-a-example-com', name: '示例站', description: '现在的描述', lowestRate: 0.9 }],
+        total: 1,
+      },
+    });
+    await unlock();
+    // 审核员必须看到「这一通过会替换报价」以及倍率会变成多少
+    expect(await screen.findByText(/报价将被整包替换为 1 条/)).toBeInTheDocument();
+    expect(await screen.findByText(/最低倍率 0\.9x → 0\.3x/)).toBeInTheDocument();
+  });
+});
