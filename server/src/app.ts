@@ -208,6 +208,13 @@ export function buildApp(store: Store, now: () => Date, options: AppOptions = {}
   const checkInByUser = new AttemptLimiter(CHECKIN_PER_USER, CHECKIN_WINDOW_MS, store, 'checkin-user');
 
   const app = new Hono<{ Bindings: Bindings }>();
+  // Hono 默认给每个响应加 `x-powered-by: Hono`。这只是把框架指纹送给扫描器，
+  // 对本服务没有任何用途；顺手再给 API 响应补上不许嗅探内容的头。
+  app.use('*', async (c, next) => {
+    await next();
+    c.res.headers.delete('x-powered-by');
+    c.res.headers.set('x-content-type-options', 'nosniff');
+  });
   app.notFound(c => c.json({ error: { code: 'NOT_FOUND', message: '资源不存在' } }, 404));
   app.onError((error, c) => {
     if (isDatabaseBusyError(error)) return c.json({ error: { code: 'BUSY', message: '数据库繁忙，请重试' } }, 503);
@@ -574,7 +581,13 @@ export function buildApp(store: Store, now: () => Date, options: AppOptions = {}
     }
     passwordChangeByUser.clear(handle);
     store.transaction(() => {
-      store.db.prepare('UPDATE accounts SET passwordHash = ? WHERE handle = ?').run(passwordHash, handle);
+      // 条件写：只在这期间密码没被别人改过时才落库。
+      // 校验当前密码要等 scrypt（几十毫秒的 await），这中间管理员可能刚重置过密码
+      // 或用户自己在另一台设备上改过。无条件的 UPDATE 会把那次结果直接盖掉，
+      // 而且两边都返回 200——管理员以为重置生效了，实际登录用的是旧请求写的密码。
+      const written = store.db.prepare('UPDATE accounts SET passwordHash = ? WHERE handle = ? AND passwordHash = ?')
+        .run(passwordHash, handle, account.passwordHash as string) as { changes?: number };
+      if (!written.changes) throw new ApiError(409, 'PASSWORD_CHANGED', '密码刚刚被修改过，请用新密码重新登录后再试');
       deleteOtherSessions(store, handle, cookie);
       // Agent 凭证也要一起吊销。它是长期有效的 bearer token，且没有过期时间；
       // 攻击者盗到会话 cookie 后签发一把，受害者改密码只会清掉会话，

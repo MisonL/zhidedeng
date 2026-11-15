@@ -170,7 +170,7 @@ export class Service {
     const interaction = prefetched
       ? (prefetched.get(record.slug) ?? emptyInteraction())
       : this.interaction({ targetType: 'station', targetId: record.slug });
-    const offers = this.offers().filter(offer => offer.stationSlug === record.slug);
+    const offers = this.offersByStation().get(record.slug) ?? [];
     const lowestRate = offers.length ? Math.min(...offers.map(offer => offer.rate)) : null;
     const score = record.uptime === null ? null : Number((record.uptime * 0.6 + (interaction.votes.total ? interaction.votes.upRatio : 0.5) * 30 + (1 / (lowestRate ?? 1)) * 3).toFixed(2));
     return { ...record, ...interaction, lowestRate, score };
@@ -196,12 +196,29 @@ export class Service {
 
   // 每个站都要用，同一请求内只读一次。
   private cachedOffers?: StationOffer[];
+  private cachedOffersByStation?: Map<string, StationOffer[]>;
   private offers(): StationOffer[] {
     // 只算在线站点的报价。下架是软删除，报价行仍在库里（恢复时要原样拿回来），
     // 但不能让它们继续参与最低倍率、榜单和模型页的统计。
     return this.cachedOffers ??= this.store.db.prepare(
       "SELECT offer.stationSlug, offer.modelSlug, offer.rate FROM offers AS offer JOIN entities AS station ON station.kind = 'station' AND station.id = offer.stationSlug WHERE station.removedAt IS NULL",
     ).all() as unknown as StationOffer[];
+  }
+
+  /**
+   * 按站点分组的报价。station() 每个站点都要用它算最低倍率——
+   * 直接在 offers() 数组上 filter 是 O(站点数 × 报价数)，900 站 7200 行时
+   * 一个列表请求要 2.6 秒，而且和返回多少条无关。分组一次是 O(报价数)。
+   */
+  private offersByStation(): Map<string, StationOffer[]> {
+    return this.cachedOffersByStation ??= (() => {
+      const grouped = new Map<string, StationOffer[]>();
+      for (const offer of this.offers()) {
+        const bucket = grouped.get(offer.stationSlug);
+        if (bucket) bucket.push(offer); else grouped.set(offer.stationSlug, [offer]);
+      }
+      return grouped;
+    })();
   }
 
   private hasEnoughOffersForRate(offers: StationOffer[]): boolean {

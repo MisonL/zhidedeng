@@ -341,6 +341,17 @@ describe('六个配额维度', () => {
     expect(pendingCount()).toBe(2);
   });
 
+  it('www. 前缀不能把单 hostname 限额从 2 撑成 4', async () => {
+    // www.x.com 和 x.com 是同一个站点在配额上的身份。不折叠的话
+    // x.com / x.com. / www.x.com / www.x.com. 四种写法各占一个桶，上限形同虚设。
+    const key = credential();
+    const withWww = (name: string) => station(0, { name, url: 'https://www.station-0.example.com/' });
+    await submitted(await submitStation(key, station(0)));
+    await submitted(await submitStation(key, withWww('带 www 的另一版')));
+    await error(await submitStation(key, station(0, { name: '第三个版本' })), 409, 'TOO_MANY_PENDING', 'hostname');
+    expect(pendingCount()).toBe(2);
+  });
+
   it('hostname 限额计入其他渠道 pending，端口和尾点不能绕过', async () => {
     const key = credential();
     for (let index = 0; index < 2; index++) enqueueSubmission(store, {

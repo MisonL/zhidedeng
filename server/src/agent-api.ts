@@ -69,7 +69,26 @@ function postHostname(hostname: string): string {
   return normalized.hostname;
 }
 
-const HOSTNAME_SQL = "CASE WHEN kind = 'station' THEN rtrim(lower(originKey), '.') WHEN kind = 'post' THEN rtrim(lower(json_extract(payload, '$.hostname')), '.') END";
+/**
+ * 配额用的 hostname 归一：小写、去尾点、折叠开头的 `www.`。
+ *
+ * 尾点（`example.com.` 是 FQDN 绝对形式，curl 和浏览器都能发）和 `www.` 前缀
+ * 都指向同一个站点，但作为字符串是两个不同的键。不归一的话单域名「2 条待审」
+ * 可以用 `x.com` / `x.com.` / `www.x.com` / `www.x.com.` 四种写法撑成 4 条。
+ * 站点身份（originKey）不折叠 www——那是真的两台主机；这里只管配额计数。
+ */
+const hostKeySql = (value: string) =>
+  `CASE WHEN rtrim(lower(${value}), '.') LIKE 'www.%' THEN substr(rtrim(lower(${value}), '.'), 5) ELSE rtrim(lower(${value}), '.') END`;
+const HOSTNAME_SQL = `CASE WHEN kind = 'station' THEN ${hostKeySql('originKey')} WHEN kind = 'post' THEN ${hostKeySql("json_extract(payload, '$.hostname')")} END`;
+
+/**
+ * 归一参数侧。SQL 那侧折叠了尾点和 `www.`，传进来的值必须按同一规则折叠，
+ * 否则 `= ?` 永远比不中（`www.x.com` 归一成 `x.com` 却拿 `www.x.com` 去比）。
+ */
+function hostKey(value: string): string {
+  const bare = value.trim().toLowerCase().replace(/\.+$/, '');
+  return bare.startsWith('www.') ? bare.slice(4) : bare;
+}
 
 export class AgentApi {
   private readonly store: Store;
@@ -124,7 +143,7 @@ export class AgentApi {
 
   private hostnameCount(hostname: string): number {
     return Number(this.store.db.prepare(`SELECT count(*) AS count FROM submissions WHERE status = 'pending' AND (${HOSTNAME_SQL}) = ?`)
-      .get(hostname)!.count);
+      .get(hostKey(hostname))!.count);
   }
 
   private reserve(request: AgentRequest): () => void {

@@ -82,6 +82,18 @@ function submissionRecord(row: SqlRow): SubmissionRecord {
 }
 
 /** 站点身份由实际网址决定；下架按 slug 查目标，不信任客户端给的 key。 */
+/**
+ * 站点身份：URL 的 hostname 归一后的小写形式，去掉末尾的点。
+ *
+ * 不做这一步的话 `api.example.com` 与 `api.example.com.`（FQDN 绝对形式，浏览器和
+ * curl 都能发）是两个不同的 originKey：去重认不出是同一站、单域名待审配额各算一份，
+ * 一个域名就能把 2 条待审撑成 4 条。IPv6 字面量在 URL 里带方括号，一并去掉。
+ */
+function normalizeStationOriginKey(value: string): string {
+  const bare = value.trim().toLowerCase().replace(/^\[|\]$/g, '').replace(/\.+$/, '');
+  return bare;
+}
+
 function submissionOriginKey(store: Store, input: {
   kind: SubmissionKind; action: SubmissionRecord['action']; payload: unknown; originKey: string;
 }): string {
@@ -91,9 +103,9 @@ function submissionOriginKey(store: Store, input: {
     const station = store.get('station', slug);
     // 不存在的目标只用规范化的客户端 hostname 检查冲突，审核时按幂等下架处理。
     const url = station ? parse(httpUrl, station.url) : parse(httpUrl, `https://${input.originKey}`);
-    return new URL(url).hostname;
+    return normalizeStationOriginKey(new URL(url).hostname);
   }
-  return new URL(parse(stationUrlSchema, input.payload).url).hostname;
+  return normalizeStationOriginKey(new URL(parse(stationUrlSchema, input.payload).url).hostname);
 }
 
 function assertBatchChannel(store: Store, batchId: string | null | undefined, channel: SubmissionChannel): void {
@@ -446,7 +458,11 @@ export function removeStation(store: Store, slug: string, expectedSubmissionId: 
   const key = feishuHostnameKey(originKey);
   const current = store.db.prepare("SELECT id, originKey FROM submissions WHERE kind = 'station' AND action = 'upsert' AND status = 'approved' ORDER BY reviewedAt DESC, rowid DESC")
     .all().find(row => feishuHostnameKey(row.originKey as string) === key);
-  if (current?.id !== expectedSubmissionId) throw new ApiError(409, 'STALE_REMOVAL', '该站点在读取后已被更新，请重新同步');
+  // 版本保护只对「有审批记录」的站点生效。旧导入或 restore 写回的站点没有
+  // approved upsert 行，current 为 undefined，用 `current?.id !== expected` 判断会恒真、
+  // 永远返回 STALE_REMOVAL——这种站点就此再也下不掉，管理员只能直接改库。
+  // 没有版本可比就没有可比的冲突，放行，由调用方的审核事务负责落库。
+  if (current && current.id !== expectedSubmissionId) throw new ApiError(409, 'STALE_REMOVAL', '该站点在读取后已被更新，请重新同步');
   // 软删除而不是真删：站点以自动运行为主，一次误读不该丢整批数据。
   // 报价保留（它们记的是这个站曾提供过什么），恢复时原样拿回来。
   // 同一个 slug 再上架时 put 会清掉标记，也就是自动恢复。
