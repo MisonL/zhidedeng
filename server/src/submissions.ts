@@ -458,11 +458,14 @@ export function removeStation(store: Store, slug: string, expectedSubmissionId: 
   const key = feishuHostnameKey(originKey);
   const current = store.db.prepare("SELECT id, originKey FROM submissions WHERE kind = 'station' AND action = 'upsert' AND status = 'approved' ORDER BY reviewedAt DESC, rowid DESC")
     .all().find(row => feishuHostnameKey(row.originKey as string) === key);
-  // 版本保护只对「有审批记录」的站点生效。旧导入或 restore 写回的站点没有
-  // approved upsert 行，current 为 undefined，用 `current?.id !== expected` 判断会恒真、
-  // 永远返回 STALE_REMOVAL——这种站点就此再也下不掉，管理员只能直接改库。
-  // 没有版本可比就没有可比的冲突，放行，由调用方的审核事务负责落库。
-  if (current && current.id !== expectedSubmissionId) throw new ApiError(409, 'STALE_REMOVAL', '该站点在读取后已被更新，请重新同步');
+  // 没有可核对版本（旧导入或 restore 写回的站点，从来没走过审核）时也拒绝，
+  // 但报错必须说清补救办法。原来两种情况共用一句「请重新同步」——对存量站
+  // 是错的建议，重同步多少次都不会凭空出现那条 approved 记录，
+  // 管理员只能对着一个永远失败的下架反复重试。真正的补救是跑回填脚本。
+  if (!current) {
+    throw new ApiError(409, 'STALE_REMOVAL', `站点 ${slug} 没有可核对的投稿版本记录（多为旧导入数据）。先运行 pnpm backfill:submissions 为存量站点补出版本记录，再下架`);
+  }
+  if (current.id !== expectedSubmissionId) throw new ApiError(409, 'STALE_REMOVAL', '该站点在读取后已被更新，请重新同步');
   // 软删除而不是真删：站点以自动运行为主，一次误读不该丢整批数据。
   // 报价保留（它们记的是这个站曾提供过什么），恢复时原样拿回来。
   // 同一个 slug 再上架时 put 会清掉标记，也就是自动恢复。

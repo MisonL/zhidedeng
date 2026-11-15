@@ -706,16 +706,16 @@ describe('当前队列站点状态', () => {
     expect((await state()).stations).toEqual([]);
   });
 
-  it('没有 approved 投稿记录的旧导入站点仍然可以下架', async () => {
-    // 版本保护比的是「读到的版本」和「现在的版本」；旧导入站点压根没有版本记录，
-    // 拿 undefined 去比会恒判 STALE_REMOVAL，等于把这类站点永久锁死。
+  it('没有 approved 投稿记录的旧导入站点，下架报错要指向回填脚本而不是「重新同步」', async () => {
+    // 这类站点从来没走过审核，重同步不会凭空造出那条 approved 记录。
+    // 版本保护照旧拒绝，但报错必须给出真正能解决问题的办法。
     const { uptime: _u, firstTokenLatencyMs: _l, foundedAt: _d, status: _s, ...payload } = stationItem('legacyremove.example.com').payload as Record<string, unknown>;
     expect((await send('/api/admin/import', { stations: [{ ...payload, slug: 'sub-legacyremove-example-com' }], posts: [] })).status).toBe(200);
     const removal = await submit([{ kind: 'station', originKey: 'legacyremove.example.com', action: 'remove',
       payload: { slug: 'sub-legacyremove-example-com', submissionId: 'no-version-record' } }]);
-    expect((await batchReview(removal.batchId)).results[0].submission?.status).toBe('approved');
-    expect(store.get('station', 'sub-legacyremove-example-com')).toBeUndefined();
-    expect(store.getWithRemoved('station', 'sub-legacyremove-example-com')).toBeDefined();
+    const reviewed = (await batchReview(removal.batchId)).results[0];
+    expect(reviewed.error).toMatchObject({ code: 'STALE_REMOVAL', message: expect.stringContaining('pnpm backfill:submissions') });
+    expect(store.get('station', 'sub-legacyremove-example-com')).toBeDefined();
   });
 
   it('其他来源的队列站点不进入飞书下架计划', async () => {
