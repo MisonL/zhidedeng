@@ -70,7 +70,10 @@ export const stationSchema = z.object({
 
 export const postSchema = z.object({
   title: text(100), summary: text(200), body: text(5000), authorName: text(30),
-  authorHandle: text(200).nullish(), hostname: text(253).nullish(), publishedAt: z.iso.datetime().nullish(),
+  // publishedAt 必须接受带时区偏移的时间：Agent 从中文站点抓到的发布时间通常是
+  // `2026-11-15T10:00:00+08:00`，默认的 iso.datetime() 只认 UTC 的 `Z`，
+  // 于是「原文发布时间」这个字段在最常见的取值上直接被判非法，Agent 只能放弃填它。
+  authorHandle: text(200).nullish(), hostname: text(253).nullish(), publishedAt: z.iso.datetime({ offset: true }).nullish(),
 });
 
 /**

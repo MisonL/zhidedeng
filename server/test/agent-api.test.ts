@@ -83,9 +83,9 @@ async function error(response: Response, httpStatus: number, code: string, field
 const pendingCount = () => Number(server.db.prepare("SELECT count(*) AS count FROM submissions WHERE status = 'pending'").get()!.count);
 const approve = (id: string) => reviewSubmission(store, clock, id, { status: 'approved' });
 const reject = (id: string, reason?: string) => reviewSubmission(store, clock, id, { status: 'rejected', reason });
-function seedPending(count: number, offset = 0, actorHandle = 'Other') {
+function seedPending(count: number, offset = 0, actorHandle = 'Other', channel: 'feishu' | 'agent' = 'feishu') {
   for (let index = offset; index < offset + count; index++) {
-    enqueueSubmission(store, { kind: 'station', channel: 'feishu', originKey: `seed-${index}.example.com`,
+    enqueueSubmission(store, { kind: 'station', channel, originKey: `seed-${index}.example.com`,
       payload: station(index, { url: `https://seed-${index}.example.com/` }), actorHandle, ip: IP, now: clock });
   }
 }
@@ -232,17 +232,28 @@ describe('提交和审核', () => {
     });
   });
 
-  it('管理员开启自动通过后，Agent 两种提交也直接上架', async () => {
+  it('管理员开启自动通过后，Agent 两种提交仍然等待人工审核', async () => {
+    // 这条以前断言的是「开了自动通过就一起上架」，注释理由是「站点以自动运行为主」。
+    // 但 README 和 SKILL 两处都向用户承诺「即使管理员开启自动通过，Agent 接口也
+    // 等待人工审核」，代码和文档必须取一个。
+    // 取「必须审核」：Agent 内容是机器生成的，是全场最不可信的来源，而自动通过是
+    // 管理员为飞书全量同步开的。若两者共用，管理员为省同步的审核量，会顺带把
+    // 每个 Agent 的写入权限直接放进线上——正是这个产品要防的事。
+    // 反向选择的代价只是多几条待审，没有不可逆损失。
     const key = credential();
     setAutoApprove(store, true, clock);
     const results = [await submitted(await submitStation(key)), await submitted(await submitPost(key))];
     for (const result of results) {
-      // 站点以自动运行为主：开了自动通过就不该再卡在人工审核。
-      expect(result.autoApproved).toBe(true);
-      expect(result.submission.status).toBe('approved');
-      expect(server.db.prepare('SELECT autoApproved FROM submissions WHERE id = ?').get(result.submission.id)!.autoApproved).toBe(1);
+      expect(result.autoApproved).toBe(false);
+      expect(result.submission.status).toBe('pending');
+      expect(server.db.prepare('SELECT autoApproved FROM submissions WHERE id = ?').get(result.submission.id)!.autoApproved).toBe(0);
     }
-    expect(pendingCount()).toBe(0);
+    expect(pendingCount()).toBe(2);
+    // 飞书同步这类受信通道仍然照旧自动通过，不受影响。
+    expect(enqueueSubmission(store, {
+      kind: 'station', channel: 'feishu', originKey: 'trusted.example.com', ip: IP, now: clock,
+      payload: station(98),
+    }, { globalPendingBreaker: false }).autoApproved).toBe(true);
   });
 
   it('关闭自动通过时，Agent 提交仍进待审队列', async () => {
@@ -704,7 +715,9 @@ describe('幂等和状态', () => {
 
   it('status 的默认条数是 20，最大 50，历史超额数据的余量不为负数', async () => {
     const key = credential();
-    seedPending(55, 0, 'Alice');
+    // 用 agent 渠道造历史数据：status 的 submissions 列表只回 agent 渠道的记录，
+    // 同一个人通过飞书身份提交的不属于这条凭证，不该出现在这里。
+    seedPending(55, 0, 'Alice', 'agent');
     const defaultResult = await status(key);
     expect(defaultResult.submissions).toHaveLength(20);
     expect(defaultResult.pendingCount).toBe(55);

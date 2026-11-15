@@ -97,6 +97,19 @@ describe('投稿入队与列表', () => {
 });
 
 describe('审核物化', () => {
+  it('Agent 通道漏填驳回理由时保持 pending，补理由后可以正常拒绝', () => {
+    // 兜底写 rejected 只针对「永久失败」。漏填理由是操作失误，若也当永久失败，
+    // 一次手快点「拒绝」就会把正常投稿钉成 rejected，理由还写着「必须填写理由」，
+    // 之后补理由也救不回来。
+    const submission = queue().submission;
+    expect(() => reviewSubmission(store, clock(), submission.id, { status: 'rejected' }))
+      .toThrow(expect.objectContaining({ status: 400, code: 'REASON_REQUIRED' }));
+    expect(record(submission.id).status).toBe('pending');
+    expect(record(submission.id).reason).toBeNull();
+    expect(reviewSubmission(store, clock(), submission.id, { status: 'rejected', reason: '报价与页面不一致' }))
+      .toMatchObject({ status: 'rejected', reason: '报价与页面不一致' });
+  });
+
   it.each([
     ['agent', 'agent'], ['feishu', 'submission'], ['web', 'user'],
   ] as const)('%s 站点通过后映射为 %s，报价入库，测量字段强制为空', (channel, source) => {

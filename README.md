@@ -57,7 +57,7 @@ pnpm -r test
 | 接口 | 正文或参数 |
 |---|---|
 | `POST /api/agent/stations` | 直接传站点 payload：name、description、url、rechargeThreshold、paymentMethods、offers；无充值门槛信息用 null，无支付方式或报价用空数组 |
-| `POST /api/agent/posts` | 直接传评价 payload：title、summary、body、authorName；hostname、publishedAt（ISO 时间）可选，作者账号由凭证确定 |
+| `POST /api/agent/posts` | 直接传评价 payload：title、summary、body、authorName；hostname、publishedAt 可选（ISO 时间，可带时区偏移，如 `2026-11-15T10:00:00+08:00`），作者账号由凭证确定；publishedAt 不填则用提交时间 |
 | `GET /api/agent/status?limit=20` | 最近条数默认 20、最大 50；返回 handle、pendingCount、quotas 和 submissions；每条状态含 id、kind、status、createdAt、reason、originKey（批量提交后靠它认领是哪一条被拒） |
 
 ```sh
@@ -67,7 +67,7 @@ curl --connect-timeout 5 --max-time 30 -X POST \
   "$SITE_URL/api/agent/stations"
 ```
 
-成功返回 `{ submission, deduplicated, autoApproved: false }`，channel 固定为 agent，进入 pending 队列；即使管理员开启自动通过，Agent 接口也等待人工审核。**Agent 通道的投稿被驳回时管理员必须填写理由**（`reason`），否则提交方拿不到任何可据以修正的信息。同账号的相同规范化内容在 pending 期间跨凭证重试返回原记录，不重复扣提交额度；JSON 字段顺序及 URL 的 query/fragment 不影响幂等。已审核的内容再提交会产生新的 pending。
+成功返回 `{ submission, deduplicated, autoApproved: false }`，channel 固定为 agent，进入 pending 队列；即使管理员开启自动通过，Agent 接口也等待人工审核（`pendingOnly`；自动通过只对飞书同步这类受信通道生效，因为 Agent 内容由机器生成，是全场最不可信的来源）。**Agent 通道的投稿被驳回时管理员必须填写理由**（`reason`），否则提交方拿不到任何可据以修正的信息。同账号的相同规范化内容在 pending 期间跨凭证重试返回原记录，不重复扣提交额度；JSON 字段顺序及 URL 的 query/fragment 不影响幂等。已审核的内容再提交会产生新的 pending。
 
 | 配额维度 | 上限 |
 |---|---|

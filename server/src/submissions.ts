@@ -579,7 +579,9 @@ function materialize(store: Store, submission: SubmissionRecord, reviewedAt: str
     store.put('post', postId, {
       id: postId, kind: 'review', title: payload.title, summary: payload.summary, body: payload.body,
       authorHandle: payload.authorHandle ?? 'anonymous-submission', authorNickname: payload.authorName,
-      stationSlug, modelSlug: null, cover: null, publishedAt: payload.publishedAt ?? reviewedAt,
+      // 没填发布时间就用**提交时间**，不是审核时间。审核可能排队几天，
+      // 用审核时间会让一条旧文章在「最新」榜上冒到前面，与事实不符。
+      stationSlug, modelSlug: null, cover: null, publishedAt: payload.publishedAt ?? submission.createdAt,
       status: 'approved', source: sourceByChannel[submission.channel],
     });
   }
@@ -661,7 +663,11 @@ export function reviewSubmission(store: Store, now: Date, id: string, decision: 
       // 演示数据被要求下架是操作对象选错了，不是这条内容本身有问题。
       || error.code === 'STATION_SOURCE_CONFLICT'
       // 厂商在提交后被删：补回来就能审，不该让投稿方白丢一次提交。
-      || error.code === 'VENDOR_MISSING');
+      || error.code === 'VENDOR_MISSING'
+      // 驳回漏填理由：这是操作失误，补上理由重试即可。不当作永久失败——
+      // 否则一次手快点「拒绝」就把一条正常投稿钉成 rejected，
+      // 理由还是「审核时无法物化：…必须填写理由」，管理员补理由也救不回来。
+      || error.code === 'REASON_REQUIRED');
     if (error instanceof ApiError && !retriable) {
       try {
         store.db.prepare("UPDATE submissions SET status = 'rejected', reason = ?, reviewedAt = ? WHERE id = ? AND status = 'pending'")

@@ -189,6 +189,11 @@ export class AgentApi {
         kind, channel: 'agent', originKey, batchId: null, payload, actorHandle: request.handle, ip: request.ip, now: request.now,
       }, {
         deduplicateByActor: true,
+        // Agent 的内容是机器生成的，是全场最不可信的一类来源。README 和 SKILL 都
+        // 承诺「即使管理员开启自动通过，Agent 接口也等待人工审核」——但这里原先
+        // 没传 pendingOnly，开启自动通过后 Agent 的站点/评价会直接上站并置
+        // autoApproved:true，承诺和实际行为相反。以代码对齐文档：Agent 通道永不自动通过。
+        pendingOnly: true,
         // 去重早退发生在 beforeInsert 之后，预占要在这里退掉。
         onDeduplicated: () => { this.refundAsDedupe(request, release); },
         beforeInsert: () => {
@@ -225,7 +230,11 @@ export class AgentApi {
           const count = this.hostnameCount(hostname);
           return { hostname, pendingCount: count, limit: HOSTNAME_PENDING, remaining: Math.max(0, HOSTNAME_PENDING - count) };
         });
-      const rows = this.store.db.prepare('SELECT id, kind, status, createdAt, reason, originKey FROM submissions WHERE actorHandle = ? ORDER BY createdAt DESC, rowid DESC LIMIT ?')
+      // 限定 channel = 'agent'：这个列表是给提交方看自己 Agent 投稿的状态，
+      // 只按 actorHandle 取会把同一个人通过站内表单或飞书身份提交的记录也带出来，
+      // 连带它们的 originKey（站内是内部 key、飞书是记录 ID）。那些不是这条凭证提交的，
+      // 提交方没有任何理由看到。
+      const rows = this.store.db.prepare("SELECT id, kind, status, createdAt, reason, originKey FROM submissions WHERE actorHandle = ? AND channel = 'agent' ORDER BY createdAt DESC, rowid DESC LIMIT ?")
         .all(request.handle, limit);
       return {
         handle: request.handle, pendingCount,

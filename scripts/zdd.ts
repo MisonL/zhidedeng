@@ -470,6 +470,10 @@ export async function stationDetail(
   options: { fetchImpl?: typeof fetch } = {},
 ): Promise<{ slug: string; name: string; url: string | null; offers: { modelSlug: string; rate: number }[] }> {
   const payload = await request(`${API_ROUTES.getStation.path.replace(':slug', encodeURIComponent(slug))}`, { fetchImpl: options.fetchImpl });
+  // 服务端理论上不会回 null，但这里直接解引用会变成 TypeError 而不是可读的报错。
+  if (payload === null || typeof payload !== 'object') {
+    throw new ZdError(EXIT.network, `站点 ${slug} 的响应格式异常`);
+  }
   const station = payload as { slug?: unknown; name?: unknown; url?: unknown; offers?: unknown };
   const offers = Array.isArray(station.offers) ? station.offers : [];
   return {
@@ -525,6 +529,7 @@ const COMMAND_USAGE: Record<string, string> = {
   login: 'zdd login --key <凭证>',
   whoami: 'zdd whoami',
   catalog: 'zdd catalog',
+  station: 'zdd station <站点 slug>',
   match: 'zdd match "<模型名>"',
   validate: 'zdd validate ./投稿.json',
   submit: 'zdd submit ./投稿.json   或   zdd submit --batch ./目录/',
