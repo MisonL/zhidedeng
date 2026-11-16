@@ -179,19 +179,28 @@ export class Service {
   /** 刚入队的站内投稿：先拼出与 Post 一致的结构，审核通过后才从 entities 读。 */
   /** 刚入队的站内投稿，返回与 Post 一致的结构；自动通过时状态就是 approved。 */
   pendingPost(submission: { id: string; payload: unknown; actorHandle: string | null; createdAt: string; status?: string }): Post {
+    // 这是「刚提交完，回显给你看的那一条」，要带正文；列表接口才不带。
     return this.post(this.queuedPost({
       id: submission.id, payload: submission.payload, status: submission.status ?? 'pending',
       actorHandle: submission.actorHandle ?? this.user, createdAt: submission.createdAt,
-    }));
+    }), undefined, true);
   }
 
-  private post(record: PostRecord, prefetched?: Map<string, InteractionState>): Post {
-    const { authorHandle, authorNickname, source, ...fields } = record;
+  /**
+   * 组装文章 DTO。`withBody` 只有详情页需要。
+   *
+   * 正文上限 10 万字，列表每页 20 条——带上它最坏是一次 2MB 的响应，而卡片
+   * 只需要标题和摘要。列表一律不带 body，省的是传输量和 JSON.parse。
+   */
+  private post(record: PostRecord, prefetched?: Map<string, InteractionState>, withBody = false): Post {
+    const { authorHandle, authorNickname, source, ...all } = record;
+    const fields = withBody ? all : (({ body: _body, ...rest }) => rest)(all);
     const author = authorNickname ? { handle: authorHandle, nickname: authorNickname, avatar: '' } : this.author(authorHandle);
     const interaction = prefetched
       ? (prefetched.get(record.id) ?? emptyInteraction())
       : this.interaction({ targetType: 'post', targetId: record.id });
-    return { ...fields, author, source: source ?? 'user', ...interaction };
+    // 列表调用返回的是 PostSummary（无 body），与 shared 的类型声明一致。
+    return { ...fields, author, source: source ?? 'user', ...interaction } as Post;
   }
 
   // 每个站都要用，同一请求内只读一次。
@@ -388,7 +397,7 @@ export class Service {
     // 16 个站点挂这个模型时全量预取 6ms、400 个站点时 59ms，而点查只有十几条 SQL。
     // 实测报价条数达到阈值以上，预取才开始划算。
     const ratedStations = this.offers().reduce((count, offer) => count + Number(offer.modelSlug === slug), 0);
-    const interactions = ratedStations > PREFETCH_MIN_ROWS ? this.interactionMap('station') : null;
+    const interactions = ratedStations >= PREFETCH_MIN_ROWS ? this.interactionMap('station') : null;
     const offers = this.offers().filter(o => o.modelSlug === slug).sort((a, b) => a.rate - b.rate)
       // 站点已被下架时报价不该出现；用 filter 兜底而不是非空断言，
       // 一条孤儿报价不能把整个模型页变成 500。
@@ -403,7 +412,7 @@ export class Service {
     // 这里先留在记录层：score 依赖互动数，排序要用它，所以不能先转 DTO 再排序。
     const records = this.store.all('station').filter(s => (!query.vendor || vendorStations.has(s.slug)) && matches(query.q, s.name, s.slug, s.description));
     // 同理：站点数量少时逐条点查更便宜，几十个以上才值得全量聚合。
-    const interactions = records.length > PREFETCH_MIN_ROWS ? this.interactionMap('station') : null;
+    const interactions = records.length >= PREFETCH_MIN_ROWS ? this.interactionMap('station') : null;
     const items = records.map(s => this.station(s, interactions ?? undefined));
     if (query.sort === 'rate') {
       const offersByStation = new Map<string, StationOffer[]>();
@@ -490,7 +499,7 @@ export class Service {
   getPost(id: string): Post {
     const post = this.readablePost(id);
     if (!post) throw new ApiError(404, 'NOT_FOUND', '文章不存在');
-    return this.post(post);
+    return this.post(post, undefined, true);
   }
 
   createPost(input: CreatePostRequest): Post {
@@ -502,7 +511,8 @@ export class Service {
       modelSlug: input.modelSlug ?? null, cover: null, publishedAt: this.now().toISOString(), status: 'pending',
     };
     this.store.put('post', post.id, post);
-    return this.post(post);
+    // 提交成功后前端直接展示这篇内容，需要正文。
+    return this.post(post, undefined, true);
   }
 
   putVote(input: PutVoteRequest): PutVoteResponse {

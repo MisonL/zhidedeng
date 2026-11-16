@@ -91,8 +91,13 @@ describe('seed and read endpoints', () => {
       expect(Date.parse(p.publishedAt)).toBeGreaterThan(clock.getTime() - 30 * 86400000);
     });
     const first = posts.items[0];
-    expect(await ok('getPost', { id: first.id })).toEqual(first);
-    const filtered = await ok('getPosts', { kind: first.kind, station: first.stationSlug!, model: first.modelSlug!, vendor: 'openai', sort: 'hot', q: first.title.slice(0, 2) });
+    // 列表按 PostSummary 返回（不带 body），详情接口才有正文。
+    expect(first).not.toHaveProperty('body');
+    expect(await ok('getPost', { id: first.id })).toEqual({ ...first, body: expect.any(String) });
+    // 只用确实能命中的条件：带上不匹配的 vendor 时结果恒为 0，
+    // 而 every() 对空数组恒真——断言看着在跑，其实什么都没验。
+    const filtered = await ok('getPosts', { kind: first.kind, station: first.stationSlug!, sort: 'hot' });
+    expect(filtered.items.length).toBeGreaterThan(0);
     expect(filtered.items.every(p => p.kind === first.kind && p.stationSlug === first.stationSlug)).toBe(true);
     const page = await ok('getPosts', { page: 2, pageSize: 3 });
     expect(page.items).toHaveLength(3);

@@ -80,7 +80,14 @@ server {
   #
   # 注意是 allow 在前 deny 在后：nginx 从上到下匹配，命中即停。
   # 加了 allow 之后，管理台页面本身（前端路由）也只在白名单网段能拿到数据。
-  location /api/admin/ {
+  #
+  # 这里必须用**正则** location，不能写 `location /api/admin/`：
+  # 那是前缀匹配，`/api/admin-X`、`/api/adminx` 这类路径会落到下面无白名单的
+  # `location /api/`，而 proxy_pass 不带 URI 时原 URI 原样转发，Hono 的路由树
+  # 仍能把 `/api/admin/submissions` 匹配上（`-X` 只是多出来的路径段）。
+  # 结果就是白名单被绕开、只剩 SYNC_TOKEN 一道门——和上面「第二道」的意图相反。
+  # 正则里 `/api/admin(/|$)` 覆盖了后缀带斜杠和恰好等于 `/api/admin` 两种形态。
+  location ~ ^/api/admin(/|$) {
     # 只允许本机时保留这一行即可。
     allow 127.0.0.1;
     # 需要从外部访问时在下面这行之前追加 allow 条目。

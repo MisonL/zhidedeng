@@ -3,7 +3,43 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { describe, expect, it } from 'vitest';
-import { createApp, defaultDbPath } from '../src/node-app.ts';
+import { createApp, defaultDbPath, openDatabase, openStore } from '../src/node-app.ts';
+
+describe('实体版本号与派生缓存', () => {
+  const station = (slug: string, overrides: Record<string, unknown> = {}) => ({
+    slug, name: slug, url: `https://${slug}.example.com/`, description: 'd', source: 'agent' as const,
+    offers: [], paymentMethods: [], rechargeThreshold: null, status: null,
+    uptime: null, firstTokenLatencyMs: null, foundedAt: null, createdAt: '2026-01-01T00:00:00.000Z',
+    ...overrides,
+  });
+
+  it('put/restore/markRemoved 都会推进版本号，缓存才敢复用', () => {
+    // findStation 用 entityVersion 判断站点索引是否过期。漏掉任何一种写操作，
+    // 审核就会拿着旧站点去物化——写进错误的记录、或把已下架的站点当成在线。
+    const store = openStore(openDatabase(':memory:'));
+    const start = store.entityVersion;
+    store.put('station', 'v.example.com', station('v.example.com'));
+    expect(store.entityVersion).toBeGreaterThan(start);
+    const afterPut = store.entityVersion;
+    expect(store.markRemoved('station', 'v.example.com', '2026-11-06T00:00:00.000Z')).toBe(true);
+    expect(store.entityVersion).toBeGreaterThan(afterPut);
+    const afterRemove = store.entityVersion;
+    expect(store.restore('station', 'v.example.com')).toBe(true);
+    expect(store.entityVersion).toBeGreaterThan(afterRemove);
+    store.db.close();
+  });
+
+  it('没有实际改动时不推进版本号，但也不影响正确性', () => {
+    const store = openStore(openDatabase(':memory:'));
+    store.put('station', 'n.example.com', station('n.example.com'));
+    const before = store.entityVersion;
+    expect(store.markRemoved('station', 'n.example.com', '2026-11-06T00:00:00.000Z')).toBe(true);
+    // 已下架再下架一次：无变化
+    expect(store.markRemoved('station', 'n.example.com', '2026-11-07T00:00:00.000Z')).toBe(false);
+    expect(store.entityVersion).toBe(before + 1);
+    store.db.close();
+  });
+});
 
 describe('database initialization and persistence', () => {
   it('loads the API in native Node 22 strip-types mode', () => {

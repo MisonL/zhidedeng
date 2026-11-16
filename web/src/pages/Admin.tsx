@@ -225,11 +225,60 @@ export default function Admin() {
   const pendingSubmissions = submissions ?? [];
   const { stationBySlug } = useCatalog();
   // 站点类投稿要拿线上当前状态做对比；已下架的站点不在 catalog 里，按「新建」提示。
+  /**
+   * 站点投稿 payload 里**没有 slug**（只有 name/description/url/报价等），
+   * 所以不能按 slug 找当前站点——那样永远找不到，所有卡片都会显示「新建站点」，
+   * 而审核员最需要被告警的恰恰是「这条在覆盖已有站点」。按 URL 的 hostname 反查。
+   */
+  const stationByHost = (() => {
+    const map = new Map<string, (typeof stationBySlug extends Map<string, infer V> ? V : never)>();
+    for (const station of stationBySlug.values()) {
+      if (station.url === null) continue;
+      try { map.set(new URL(station.url).hostname.toLowerCase(), station); } catch { /* 非法 URL 忽略 */ }
+    }
+    return map;
+  })();
+  /**
+   * 投稿正文摘要。审核台原来只显示「名称 · URL」，管理员看不到描述、支付方式、
+   * 报价明细——而站点审核是整包替换，看不到明细就没法判断这次通过会丢掉什么。
+   */
+  const payloadDetail = (item: SubmissionRecord) => {
+    const payload = item.payload as Record<string, unknown> | null;
+    if (!payload || typeof payload !== 'object') return null;
+    const lines: string[] = [];
+    const description = payload.description;
+    if (typeof description === 'string' && description.trim() !== '') {
+      lines.push(`描述：${description}`);
+    }
+    const threshold = payload.rechargeThreshold;
+    if (threshold === null) lines.push('充值门槛：无');
+    else if (typeof threshold === 'number') lines.push(`充值门槛：¥${threshold}`);
+    const methods = Array.isArray(payload.paymentMethods) ? payload.paymentMethods.filter((m): m is string => typeof m === 'string') : null;
+    if (methods) lines.push(`支付方式：${methods.length ? methods.join('、') : '未填'}`);
+    const offers = Array.isArray(payload.offers)
+      ? payload.offers as Array<{ modelSlug?: unknown; rate?: unknown }>
+      : null;
+    if (offers && offers.length) {
+      const rated = offers
+        .filter(offer => typeof offer.modelSlug === 'string' && Number.isFinite(Number(offer.rate)))
+        .map(offer => `${String(offer.modelSlug)} ${Number(offer.rate)}x`);
+      lines.push(`报价（${offers.length} 条）：${rated.join('、')}`);
+    }
+    const body = payload.body;
+    if (typeof body === 'string') lines.push(`正文：${body}`);
+    const summary = payload.summary;
+    if (typeof summary === 'string') lines.push(`摘要：${summary}`);
+    return lines.length ? lines : null;
+  };
+
   const impactLines = (item: SubmissionRecord): string[] => {
     if (item.kind !== 'station' || item.action === 'remove') return [];
     const payload = item.payload as Record<string, unknown> | null;
-    const slug = payload && typeof payload.slug === 'string' ? payload.slug : undefined;
-    return impact(item, slug ? stationBySlug.get(slug) : undefined);
+    const url = payload && typeof payload.url === 'string' ? payload.url : null;
+    if (url === null) return impact(item, undefined);
+    let hostname: string;
+    try { hostname = new URL(url).hostname.toLowerCase(); } catch { return impact(item, undefined); }
+    return impact(item, stationByHost.get(hostname));
   };
   const pendingPosts = posts ?? [];
   const removedStations = removed ?? [];
@@ -285,6 +334,16 @@ export default function Admin() {
                     </div>
                     <p>{summarize(item)}</p>
                     <p className="hint">{item.originKey}</p>
+                    {(() => {
+                      const detail = payloadDetail(item);
+                      if (!detail) return null;
+                      return (
+                        <details className="payload-detail">
+                          <summary>展开投稿内容</summary>
+                          {detail.map(line => <p className="hint" key={line}>{line}</p>)}
+                        </details>
+                      );
+                    })()}
                     {impactLines(item).map(line => (
                       <p className="hint" key={line}>{line}</p>
                     ))}
@@ -357,7 +416,7 @@ export default function Admin() {
               {pendingPosts.map(post => (
                 <li key={post.id}>
                   <div className="tags">
-                    <span className="tag">{KIND_LABEL[post.kind] ? post.kind : post.kind}</span>
+                    <span className="tag">{KIND_LABEL[post.kind] ?? post.kind}</span>
                     <span className="tag">{post.authorHandle ?? '匿名'}</span>
                     <span className="hint">{displayTime(post.publishedAt)}</span>
                   </div>

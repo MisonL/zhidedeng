@@ -1,5 +1,5 @@
 import { Link } from 'react-router';
-import type { Post } from '@zhidedeng/shared';
+import type { PostSummary } from '@zhidedeng/shared';
 import { formatDate, formatRate, formatUptime, KIND_LABEL, sourceLabel } from '../format';
 import { useCatalog } from '../state';
 import FavoriteButton from './FavoriteButton';
@@ -7,7 +7,7 @@ import Icon from './Icon';
 import { PostCover } from './visuals';
 import VoteButtons from './VoteButtons';
 
-export default function PostCard({ post }: { post: Post }) {
+export default function PostCard({ post }: { post: PostSummary }) {
   const { stationBySlug, modelBySlug } = useCatalog();
   const station = post.stationSlug ? stationBySlug.get(post.stationSlug) : undefined;
   const model = post.modelSlug ? modelBySlug.get(post.modelSlug) : undefined;

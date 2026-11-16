@@ -731,13 +731,18 @@ describe('zdd station', () => {
       fetchImpl: (async (input: string | URL | Request) => {
         requested = String(input);
         return new Response(JSON.stringify({
-          slug: 'lantern-demo', name: '灯笼猫', url: 'https://lantern.example.com/',
+          slug: 'lantern-demo', name: '灯笼猫', description: '中转站描述',
+          url: 'https://lantern.example.com/', rechargeThreshold: 50, paymentMethods: ['支付宝'],
           offers: [{ modelSlug: 'claude-sonnet', rate: 0.8 }, { modelSlug: 'gpt-4-1', rate: 1.2 }],
         }), { status: 200, headers: { 'content-type': 'application/json' } });
       }) as unknown as typeof fetch,
     });
     expect(requested).toContain('/api/stations/lantern-demo');
     expect(detail.offers).toEqual([{ modelSlug: 'claude-sonnet', rate: 0.8 }, { modelSlug: 'gpt-4-1', rate: 1.2 }]);
+    // 这三项是站点投稿的必填字段：不返回的话，Agent 改一条报价就会把它们静默清空。
+    expect(detail.description).toBe('中转站描述');
+    expect(detail.rechargeThreshold).toBe(50);
+    expect(detail.paymentMethods).toEqual(['支付宝']);
   });
 
   it('报价字段异常时不崩，只保留结构正确的项', async () => {

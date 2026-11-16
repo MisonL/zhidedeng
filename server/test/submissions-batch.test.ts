@@ -1076,19 +1076,48 @@ describe('全站待审熔断', () => {
 });
 
 describe('列表接口在写锁被占用时仍可读', () => {
-  it('列表用的是只读事务，不会因为外层已有事务而抛错', async () => {
-    // 第一版这条测试假得很：它在一个**独立的内存库**上开写事务，跟被测的
-    // store 毫无关系，就算实现改回 BEGIN IMMEDIATE 也照样通过。
-    // 真正的检查是：在 store 自己的事务里调用列表函数。
-    // 用 BEGIN IMMEDIATE 的话这里必然抛 cannot start a transaction；
-    // BEGIN DEFERRED 在已有事务内不会再开一个，能正常返回。
+  it('外层已有事务时直接复用，不再开第二个事务', async () => {
+    // 第二版仍然是假测试：listSubmissions 开头有 `if (store.inTransaction()) return read()`，
+    // 在事务里调用会直接早退，BEGIN DEFERRED 那条分支一次都没执行过。
+    // 现在拆成两条，各自盯住一个真实分支。
     await submit([stationItem('readtx.example.com')]);
+    const statements: string[] = [];
+    const realPrepare = server.db.prepare.bind(server.db);
+    server.db.prepare = function (sql: string) {
+      statements.push(sql);
+      return realPrepare(sql);
+    } as typeof server.db.prepare;
     let inside: ReturnType<typeof listSubmissions> | undefined;
-    store.transaction(() => {
-      inside = listSubmissions(store, { status: 'pending', pageSize: 50 });
-    });
+    try {
+      store.transaction(() => {
+        inside = listSubmissions(store, { status: 'pending', pageSize: 50 });
+      });
+    } finally {
+      server.db.prepare = realPrepare as typeof server.db.prepare;
+    }
     expect(inside?.total).toBe(inside?.items.length);
     expect(inside!.items.length).toBeGreaterThanOrEqual(1);
+    // 嵌套在事务里时绝不能再发一条事务控制语句：那会直接报
+    // 「cannot start a transaction within a transaction」。
+    expect(statements.filter(sql => /^\s*(BEGIN|SAVEPOINT)\b/i.test(sql))).toEqual([]);
+  });
+
+  it('事务外调用时确实用只读事务，而不是把写锁也抢过来', async () => {
+    await submit([stationItem('readtx2.example.com')]);
+    const statements: string[] = [];
+    const realPrepare = server.db.prepare.bind(server.db);
+    server.db.prepare = function (sql: string) {
+      statements.push(sql);
+      return realPrepare(sql);
+    } as typeof server.db.prepare;
+    try {
+      listSubmissions(store, { status: 'pending', pageSize: 50 });
+    } finally {
+      server.db.prepare = realPrepare as typeof server.db.prepare;
+    }
+    // 必须是 DEFERRED：换成 IMMEDIATE 会在「有人正在写」时让列表接口一起 503。
+    expect(statements.some(sql => /^\s*BEGIN\s+DEFERRED/i.test(sql))).toBe(true);
+    expect(statements.some(sql => /^\s*BEGIN\s+IMMEDIATE/i.test(sql))).toBe(false);
   });
 
   it('count 与 items 一致，翻页不重不漏', async () => {

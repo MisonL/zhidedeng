@@ -266,7 +266,8 @@ describe('待审卡片的变更提示', () => {
         total: 1,
       },
       'GET /api/stations': {
-        items: [{ slug: 'sub-a-example-com', name: '示例站', description: '现在的描述', lowestRate: 0.9 }],
+        // url 必须给：审核台按 hostname 反查当前站点（payload 里没有 slug）。
+        items: [{ slug: 'sub-a-example-com', name: '示例站', url: 'https://a.example.com/', description: '现在的描述', lowestRate: 0.9 }],
         total: 1,
       },
     });

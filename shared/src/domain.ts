@@ -146,6 +146,14 @@ export interface Post extends InteractionState {
   status: PostStatus;
 }
 
+/**
+ * 列表里的文章：不带正文。
+ *
+ * 正文上限 10 万字，而列表每页 20 条——带上它最坏是一次 2MB 的响应，
+ * 而卡片只需要标题和摘要。详情页有独立接口 `GET /api/posts/:id`。
+ */
+export type PostSummary = Omit<Post, 'body'>;
+
 export interface Favorite extends Target {
   userHandle: string;
   createdAt: ISODateTime;

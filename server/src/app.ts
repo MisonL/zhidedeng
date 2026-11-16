@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { Hono } from 'hono';
+import { compress } from 'hono/compress';
 import type { Context } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
 import { z, ZodError } from 'zod';
@@ -98,11 +99,31 @@ interface Bindings {
 type AppContext = Context<{ Bindings: Bindings }>;
 
 /** 限流键。IPv6 用户通常握有整个 /64，按单个地址计数等于没限。 */
+/**
+ * IPv4 逐段转数值再拼回去。非法输入原样返回（它不可能是合法 IP，
+ * 归一化没有意义，也不该在这里抛错——上游已经做过 isIpLiteral 校验）。
+ */
+function canonicalIpv4(value: string): string {
+  const parts = value.split('.');
+  if (parts.length !== 4) return value;
+  const bytes = parts.map(part => (/^\d+$/.test(part) ? Number(part) : NaN));
+  if (bytes.some(byte => !Number.isInteger(byte) || byte < 0 || byte > 255)) return value;
+  return bytes.join('.');
+}
+
 export function normalizeIp(ip: string) {
-  const mapped = ip.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/i);
-  if (mapped) return mapped[1];
-  if (!ip.includes(':')) return ip;
-  const address = ip.toLowerCase().split('%')[0];
+  // 去端口（`1.2.3.4:5678`）与 IPv6 尾点。X-Forwarded-For 里出现端口是常见的，
+  // 而 `1.2.3.4:5678` 与 `1.2.3.4:5679` 会被当成两个桶——每换一个源端口就重置配额。
+  let value = ip.trim();
+  const v4Port = value.match(/^(\d{1,3}(?:\.\d{1,3}){3}):\d{1,5}$/);
+  if (v4Port) value = v4Port[1];
+  value = value.replace(/\.+$/, '');
+  const mapped = value.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/i);
+  if (mapped) return canonicalIpv4(mapped[1]);
+  // 纯 IPv4 必须做数值归一：`198.51.100.7`、`0198.51.100.7`、`198.051.100.007`
+  // 是同一个地址，但作为字符串是三个键，轮着写就能把按 IP 的限流整个绕开。
+  if (!value.includes(':')) return canonicalIpv4(value);
+  const address = value.toLowerCase().split('%')[0];
   const [head, tail] = address.split('::');
   const leading = head ? head.split(':') : [];
   const trailing = tail ? tail.split(':') : [];
@@ -208,6 +229,11 @@ export function buildApp(store: Store, now: () => Date, options: AppOptions = {}
   const checkInByUser = new AttemptLimiter(CHECKIN_PER_USER, CHECKIN_WINDOW_MS, store, 'checkin-user');
 
   const app = new Hono<{ Bindings: Bindings }>();
+  // 压缩必须在这里注册——Hono 按注册顺序匹配，注册晚了就只覆盖之后的路由。
+  // 上一版放在 mountWeb 里（该函数在 buildApp 之后才调用），结果只压了静态资源，
+  // /api/* 的 JSON 全是原样传输：首屏 8 个接口合计 37KB，压完约 9KB。
+  // nginx 模板里配了 gzip，但当前部署是容器端口直映射、前面没有 nginx。
+  app.use('*', compress());
   // Hono 默认给每个响应加 `x-powered-by: Hono`。这只是把框架指纹送给扫描器，
   // 对本服务没有任何用途；顺手再给 API 响应补上不许嗅探内容的头。
   app.use('*', async (c, next) => {

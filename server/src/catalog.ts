@@ -59,6 +59,14 @@ function importCatalog(store: Store, input: CatalogImportRequest): CatalogImport
         console.warn(`跳过导入站点 ${station.slug}：已有来源 ${existing.source}`);
         return false;
       }
+      // store.get 只看得见在线实体。已下架站点在这里查不到，会被当成新站点
+      // 走下面的 INSERT，removedAt 随之清成 null——一次全量同步就把下架撤销了，
+      // 而下面的清理逻辑明确写着「已下架的行留着，恢复接口还要用」，
+      // 说明下架本来就该由人工恢复，不该被同步顺带复活。
+      if (store.removedAt('station', station.slug) !== null) {
+        console.warn(`跳过导入站点 ${station.slug}：已下架，需要人工恢复`);
+        return false;
+      }
       return true;
     });
     // 模型 slug 统一按 adminSlug 解析后再入队：自动收录时用的是解析后的值，
@@ -104,6 +112,7 @@ function importCatalog(store: Store, input: CatalogImportRequest): CatalogImport
       });
     }
     store.db.prepare(`DELETE FROM entities WHERE ${IS_SUBMISSION} AND removedAt IS NULL`).run();
+    store.invalidate();
     for (const { offers: _offers, ...station } of stations) {
       // 允许导入的 slug 要先替换原报价，避免残留或撞唯一约束。
       store.db.prepare('DELETE FROM offers WHERE stationSlug = ?').run(station.slug);
@@ -204,6 +213,7 @@ export function deleteModel(store: Store, slug: string): AdminDeleteModelRespons
       throw new ApiError(409, 'MODEL_IN_USE', `模型仍被${used}引用`, { stationCount, postCount, pendingCount });
     }
     store.db.prepare('DELETE FROM entities WHERE kind = ? AND id = ?').run('model', slug);
+    store.invalidate();
     return { slug, deleted: true };
   });
 }

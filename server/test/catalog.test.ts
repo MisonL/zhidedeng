@@ -129,6 +129,20 @@ describe('全量导入与软删除', () => {
     expect(await runImport(store, { stations: [], posts: [] })).toMatchObject({ status: 200 });
     expect(submittedOffers(store)).toHaveLength(2);
   });
+
+  it('全量导入不能把已下架的站点顺带复活', async () => {
+    // 下架是软删除，store.get 看不见它，于是会被当成新站点重新 INSERT，
+    // removedAt 一并清成 null——一次同步就把人工下架撤销了。
+    const store = newStore();
+    expect(await runImport(store, submission)).toMatchObject({ status: 200 });
+    store.db.prepare("UPDATE entities SET removedAt = ? WHERE id = 'sub-api-example-com'").run('2026-11-06T02:00:00.000Z');
+    expect(store.removedAt('station', 'sub-api-example-com')).not.toBeNull();
+
+    // 同一个站点再次出现在导入表里
+    expect(await runImport(store, submission)).toMatchObject({ status: 200 });
+    expect(store.removedAt('station', 'sub-api-example-com')).not.toBeNull();
+    expect(store.get('station', 'sub-api-example-com')).toBeUndefined();
+  });
 });
 
 describe('allowNewModels 自动收录', () => {

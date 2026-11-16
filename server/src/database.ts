@@ -200,20 +200,45 @@ export class Store {
   /** 恢复：把 removedAt 清空。返回是否真的恢复了一个已下架条目。 */
   restore(kind: keyof Entities, id: string): boolean {
     const result = this.db.prepare('UPDATE entities SET removedAt = NULL WHERE kind = ? AND id = ? AND removedAt IS NOT NULL').run(kind, id) as { changes?: number };
-    return Number(result?.changes ?? 0) > 0;
+    const changed = Number(result?.changes ?? 0) > 0;
+    // 恢复会改变「哪些条目在线」，缓存必须作废，否则下架的站点会一直被当成不在线。
+    if (changed) this.entityVersion += 1;
+    return changed;
   }
 
   /** 软删除：标记下架时间，数据保留。 */
   markRemoved(kind: keyof Entities, id: string, at: string): boolean {
     const result = this.db.prepare('UPDATE entities SET removedAt = ? WHERE kind = ? AND id = ? AND removedAt IS NULL').run(at, kind, id) as { changes?: number };
-    return Number(result?.changes ?? 0) > 0;
+    const changed = Number(result?.changes ?? 0) > 0;
+    if (changed) this.entityVersion += 1;
+    return changed;
   }
 
   put<K extends keyof Entities>(kind: K, id: string, value: Entities[K]) {
     // 重新写入等于恢复：同一个 slug 再次上架时，软删除标记要一并清掉。
     this.db.prepare('INSERT INTO entities (kind, id, data, removedAt) VALUES (?, ?, ?, NULL) ON CONFLICT(kind,id) DO UPDATE SET data=excluded.data, removedAt=NULL')
       .run(kind, id, JSON.stringify(value));
+    // 写进去的东西可能正在被某次批量审核当作查找依据，让缓存作废。
+    this.entityVersion += 1;
   }
+
+  /**
+   * 让缓存作废。任何直接写 entities 的地方（不只是 put/markRemoved/restore）
+   * 都要在写后调用一次——比如导入流程的 `DELETE FROM entities`。
+   * 忘记调用的后果不是崩溃，而是读到写之前的快照，那更难查。
+   */
+  invalidate(): void {
+    this.entityVersion += 1;
+  }
+
+  /**
+   * 版本号：任何 put 都会 +1，供调用方判断自己那份派生索引是否过期。
+   *
+   * 用来消掉「批量审核时每条都全表扫描 JSON 找站点」的 O(n·m)：调用方发现
+   * 版本没变就复用自己上次建好的 Map。这里不放缓存本体，是因为派生结果的
+   * 形状（按 hostname？按 slug？）属于调用方的知识，塞进 Store 会越界。
+   */
+  entityVersion = 0;
 }
 
 // 表名只来自本文件内的常量，不接受外部输入，拼进 SQL 是安全的。

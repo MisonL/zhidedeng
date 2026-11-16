@@ -1,6 +1,6 @@
 import type {
   AgentToken, Banner, CheckIn, Comment, CommentReply, CommunityRanking, CurrentUser,
-  ExpertRanking, FavoriteItem, Model, ModelDetail, ModelRanking, Post, PostKind,
+  ExpertRanking, FavoriteItem, Model, ModelDetail, ModelRanking, Post, PostKind, PostSummary,
   RankingTab, Station, StationDetail, Target, Vendor, VendorWithModels, VoteSummary, VoteValue,
 } from './domain.js';
 
@@ -259,7 +259,7 @@ export interface GetPostsRequest extends PaginationQuery {
   sort?: PostSort;
   q?: string;
 }
-export type GetPostsResponse = PaginatedResponse<Post>;
+export type GetPostsResponse = PaginatedResponse<PostSummary>;
 export interface GetPostRequest { id: string }
 export type GetPostResponse = Post;
 export interface CreatePostRequest {

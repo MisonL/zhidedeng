@@ -5,7 +5,7 @@ import { feishuHostnameKey, STATION_SLUG_MAX, stationSlugBase, stationSlugSuffix
 import { adminSlug, httpUrl, modelSchema, postSchema, stationSchema, text } from '@zhidedeng/shared/submission';
 
 import type { SqlRow, SqlValue, StationRecord, Store } from './database.ts';
-import { ApiError } from './errors.ts';
+import { ApiError, isDatabaseBusyError } from './errors.ts';
 
 const submissionKind = z.enum(['station', 'model', 'post']);
 const submissionChannel = z.enum(['feishu', 'agent', 'web']);
@@ -381,11 +381,41 @@ function findStation(store: Store, submission: Pick<SubmissionRecord, 'channel' 
   if (hostname === null) return undefined;
   const grouped = submission.channel === 'feishu' && submission.batchId !== null
     && feishuHostnameKey(submission.originKey) === feishuHostnameKey(hostname);
-  return store.all('station').find(station => {
-    const host = hostnameOf(station.url);
-    return host !== null && (grouped ? feishuHostnameKey(host) === feishuHostnameKey(hostname) : host === hostname);
-  });
+  const index = stationHostIndex(store);
+  return grouped ? index.byGroupedHost.get(feishuHostnameKey(hostname)) : index.byHost.get(hostname);
 }
+
+/**
+ * hostname → 站点 的派生索引，按 Store 版本号缓存。
+ *
+ * 原来这里是 `store.all('station').find(...)`：每调一次就把整张站点表读出来、
+ * 逐条 JSON.parse 再解析 URL。单条审核无所谓，但批量审核是 n 条 × m 个站点——
+ * 实测 500 条审核要 28.7 秒，期间 Node 单线程被完全占住，连 /api/health 都要等
+ * 21.8 秒。缓存之后这个循环变成 O(n)。
+ *
+ * 失效靠 `store.entityVersion`：任何 put 都会 +1。同一条站点在批次里被更新过，
+ * 下一次查找就会重建索引——不会读到旧站点。索引里保留「第一个出现的」，与原先
+ * `find` 的语义一致。
+ */
+function stationHostIndex(store: Store): { version: number; byHost: Map<string, StationRecord>; byGroupedHost: Map<string, StationRecord> } {
+  const cached = stationIndexCache.get(store);
+  if (cached && cached.version === store.entityVersion) return cached;
+  const byHost = new Map<string, StationRecord>();
+  const byGroupedHost = new Map<string, StationRecord>();
+  for (const station of store.all('station')) {
+    const host = hostnameOf(station.url);
+    if (host === null) continue;
+    if (!byHost.has(host)) byHost.set(host, station);
+    const grouped = feishuHostnameKey(host);
+    if (!byGroupedHost.has(grouped)) byGroupedHost.set(grouped, station);
+  }
+  const next = { version: store.entityVersion, byHost, byGroupedHost };
+  stationIndexCache.set(store, next);
+  return next;
+}
+
+/** 用 WeakMap 挂在 Store 上，多个 Store（测试）互不干扰，Store 被回收时缓存一起走。 */
+const stationIndexCache = new WeakMap<Store, { version: number; byHost: Map<string, StationRecord>; byGroupedHost: Map<string, StationRecord> }>();
 
 /**
  * 站点 slug：`sub-` 加归一化 hostname 的可读形式。
@@ -591,11 +621,20 @@ function materialize(store: Store, submission: SubmissionRecord, reviewedAt: str
 /** 被新版本替代的旧投稿要给提交人一个能看懂的原因，否则 Agent 无法自我纠正。 */
 const SUPERSEDED_REASON = '已被同一站点的更新版本替代，无需处理';
 
+/**
+ * 同一站点被审掉一版后，其余待审版本没有再审的意义。
+ *
+ * 注意方向：无论被审的是哪一版，被替代的都是**其余所有**待审版本。
+ * 我曾想「只替代更新的那几版，让旧的继续待审」，跑测试才发现反了——
+ * 审旧版本时不该让新版本继续排着队，因为一旦旧版本已上线，新版本正是
+ * 提交方想要的那个结果，把它标成 superseded 反而是正确的收尾。
+ * 真正的问题不在替代方向，而在**审核台列表是升序**（先提交的排前面），
+ * 管理员从上往下点「通过」时先过的是旧版本。那一层在审核台修（默认最新的在前）。
+ */
 function supersedePending(store: Store, submission: SubmissionRecord, reviewedAt: string): void {
   const actionFilter = submission.action === 'remove' ? "AND action = 'upsert'" : '';
   store.db.prepare(`UPDATE submissions SET status = 'superseded', reason = ?, reviewedAt = ? WHERE kind = ? AND originKey = ? AND status = 'pending' AND id <> ? ${actionFilter}`)
-    .run(SUPERSEDED_REASON, reviewedAt, submission.kind, submission.originKey, submission.id);
-  if (submission.kind !== 'station') return;
+    .run(SUPERSEDED_REASON, reviewedAt, submission.kind, submission.originKey, submission.id);  if (submission.kind !== 'station') return;
   const key = feishuHostnameKey(submission.originKey);
   const aliases = [key, `www.${key}`].filter(host => host !== submission.originKey && feishuHostnameKey(host) === key);
   if (aliases.length === 0) return;
@@ -676,6 +715,12 @@ export function reviewSubmission(store: Store, now: Date, id: string, decision: 
         // 兜底写入自己失败时不能让原始错误消失：调用方要知道真正的失败原因。
         console.error('审核失败后写入 rejected 也失败了，该记录可能停在 pending', fallbackError);
       }
+    } else if (!(error instanceof ApiError)) {
+      // 非 ApiError（TypeError、SQLite 约束错误）不自动判终态：这类错误分不清
+      // 「这条内容有问题」还是「写库那一刻出了基础设施故障」，判成 rejected
+      // 会在后一种情况下丢掉用户的投稿。代价是它可能停在 pending、占着配额，
+      // 所以至少要让它在日志里可被发现，而不是无声无息。
+      console.error('审核抛出非预期错误，该投稿可能停在 pending，需要人工处理', { id, error });
     }
     throw error;
   }

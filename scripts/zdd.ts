@@ -465,21 +465,48 @@ export async function submitBatch(
  * 提交里没写的报价会被删掉。所以「在已有站点上补几条报价」之前必须先看一眼
  * 它现在有哪些，否则一次增量提交会把别人的报价全删了。
  */
+export interface StationDetailView {
+  slug: string;
+  name: string;
+  description: string;
+  url: string | null;
+  rechargeThreshold: number | null;
+  paymentMethods: string[];
+  offers: { modelSlug: string; rate: number }[];
+}
+
+/**
+ * 单个站点的详情，含它当前的全部字段与报价。
+ *
+ * `catalog` 为了省流量只给 slug/name/url；而站点投稿是**整包替换**：
+ * description / rechargeThreshold / paymentMethods / offers 里没写的都会被覆盖掉
+ * （报价是删掉重插，其余直接覆盖）。所以「在已有站点上改一条报价」之前，
+ * 必须把现有的这几项原样带上——只返回 offers 不够，那样 Agent 只能凭记忆
+ * 重写描述，写不出来就被静默清空，而审核界面还看不出被清空了。
+ *
+ * 除 slug 外（服务端不接受它，站点身份由 url 决定），返回字段与
+ * `stationSchema` 的必填项一一对应：读出来 → 改 offers → 提交回去即可。
+ */
 export async function stationDetail(
   slug: string,
   options: { fetchImpl?: typeof fetch } = {},
-): Promise<{ slug: string; name: string; url: string | null; offers: { modelSlug: string; rate: number }[] }> {
+): Promise<StationDetailView> {
   const payload = await request(`${API_ROUTES.getStation.path.replace(':slug', encodeURIComponent(slug))}`, { fetchImpl: options.fetchImpl });
   // 服务端理论上不会回 null，但这里直接解引用会变成 TypeError 而不是可读的报错。
   if (payload === null || typeof payload !== 'object') {
     throw new ZdError(EXIT.network, `站点 ${slug} 的响应格式异常`);
   }
-  const station = payload as { slug?: unknown; name?: unknown; url?: unknown; offers?: unknown };
+  const station = payload as Record<string, unknown>;
   const offers = Array.isArray(station.offers) ? station.offers : [];
   return {
     slug: typeof station.slug === 'string' ? station.slug : slug,
     name: typeof station.name === 'string' ? station.name : '',
+    description: typeof station.description === 'string' ? station.description : '',
     url: typeof station.url === 'string' ? station.url : null,
+    rechargeThreshold: typeof station.rechargeThreshold === 'number' ? station.rechargeThreshold : null,
+    paymentMethods: Array.isArray(station.paymentMethods)
+      ? station.paymentMethods.filter((method): method is string => typeof method === 'string')
+      : [],
     offers: offers
       .filter((offer): offer is { modelSlug: string; rate: number } =>
         typeof (offer as { modelSlug?: unknown })?.modelSlug === 'string' && typeof (offer as { rate?: unknown })?.rate === 'number')

@@ -1,5 +1,5 @@
 import type { CSSProperties } from 'react';
-import type { Model, Post, Station } from '@zhidedeng/shared';
+import type { Model, PostSummary, Station } from '@zhidedeng/shared';
 import anthropic from '@lobehub/icons-static-svg/icons/anthropic.svg';
 import deepseek from '@lobehub/icons-static-svg/icons/deepseek-color.svg';
 import doubao from '@lobehub/icons-static-svg/icons/doubao-color.svg';
@@ -78,7 +78,7 @@ export function ModelTile({ model }: { model: Pick<Model, 'vendor' | 'name'> }) 
 }
 
 /** 文章封面按类型区分：爆料是倍率票券，评测是可用率仪表，指南是书封，社区是气泡引语。 */
-export function PostCover({ post }: { post: Post }) {
+export function PostCover({ post }: { post: PostSummary }) {
   const { modelBySlug, stationBySlug, vendorBySlug } = useCatalog();
   const model = post.modelSlug ? modelBySlug.get(post.modelSlug) : undefined;
   const station = post.stationSlug ? stationBySlug.get(post.stationSlug) : undefined;
