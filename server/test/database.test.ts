@@ -26,7 +26,6 @@ describe('实体版本号与派生缓存', () => {
     const afterRemove = store.entityVersion;
     expect(store.restore('station', 'v.example.com')).toBe(true);
     expect(store.entityVersion).toBeGreaterThan(afterRemove);
-    store.db.close();
   });
 
   it('没有实际改动时不推进版本号，但也不影响正确性', () => {
@@ -37,7 +36,6 @@ describe('实体版本号与派生缓存', () => {
     // 已下架再下架一次：无变化
     expect(store.markRemoved('station', 'n.example.com', '2026-11-07T00:00:00.000Z')).toBe(false);
     expect(store.entityVersion).toBe(before + 1);
-    store.db.close();
   });
 });
 
