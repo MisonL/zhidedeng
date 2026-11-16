@@ -105,6 +105,27 @@ pnpm build   # 产出 release/：server.mjs（单文件）、web/、backup-sqlit
    deploy ALL=(root) NOPASSWD: /usr/bin/systemctl restart zhidedeng, /usr/bin/journalctl -u zhidedeng -n 50 --no-pager
    ```
 
+### 容器部署的备份（与上面 systemd 直跑不同）
+
+容器部署时数据库在 docker 卷里、宿主机没有对容器的写锁协调，所以用
+`deploy/zhidedeng-docker-backup.sh`：在**容器内**以只读连接执行 `VACUUM INTO`
+（SQLite 保证 WAL 下的一致性快照），`docker cp` 取出来后再校验
+`integrity_check` 与实体数，最后留最近 14 份。备份含密码哈希与会话摘要，权限 0600。
+
+```sh
+sudo install -m 0755 deploy/zhidedeng-docker-backup.sh /usr/local/bin/zhidedeng-backup
+# /etc/systemd/system/zhidedeng-backup.{service,timer} 里设
+#   Environment=BACKUP_DIR=/var/backups/zhidedeng
+#   Environment=BACKUP_KEEP=14
+#   ExecStart=/usr/local/bin/zhidedeng-backup
+sudo systemctl enable --now zhidedeng-backup.timer
+sudo systemctl start zhidedeng-backup.service   # 立刻验证一次
+```
+
+**这一条必须做**：没有备份时，一次误操作、磁盘故障或 `VACUUM` 中断就是全站数据丢失，
+而库里是用户投稿、审核记录和账号。定时器默认 04:00 触发、带 10 分钟随机延迟、
+`Persistent=true`（关机错过的会在开机后补跑）。
+
 之后每次发布，在本地：
 
 ```sh
