@@ -235,6 +235,24 @@ describe('writes and boundary validation', () => {
     expect((await ok('putVote', { targetType, targetId, value: null })).votes).toEqual(base.votes);
   });
 
+  it('收藏列表先分页再组装，翻页不重不漏且总数一致', async () => {
+    // 这条盯住「先在 SQL 里分页、只组装本页」的改造：如果退回「全量组装后
+    // slice」，页数与条数仍然对得上，但每条都要多跑几条 SQL；如果分页算错，
+    // 这里会看到重复或漏项。
+    const all = await ok('getMyFavorites', { pageSize: 100 });
+    const pageSize = 3;
+    const collected: string[] = [];
+    for (let page = 1; page <= Math.ceil(all.total / pageSize); page++) {
+      const chunk = await ok('getMyFavorites', { page, pageSize });
+      expect(chunk.page).toBe(page);
+      expect(chunk.pageSize).toBe(pageSize);
+      collected.push(...chunk.items.map(item => `${item.targetType}:${item.targetId}`));
+    }
+    const straight = all.items.map(item => `${item.targetType}:${item.targetId}`);
+    expect(collected).toEqual(straight.slice(0, collected.length));
+    expect(new Set(collected).size).toBe(collected.length);
+  });
+
   it.each(['post', 'station'] as const)('sets and unsets %s favorites idempotently', async targetType => {
     const targetId = targetType === 'post' ? 'post-1' : 'dengdeng-demo';
     const base = await ok('putFavorite', { targetType, targetId, favorited: false });

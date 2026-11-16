@@ -234,9 +234,19 @@ export class Service {
     return offers.length >= MIN_OFFERS_FOR_RATE;
   }
 
-  /** 公开内容；作者本人的待审和被拒投稿只出现在我的分享和详情页。 */
+  /**
+   * 公开内容；作者本人的待审和被拒投稿只出现在我的分享和详情页。
+   *
+   * 在 SQL 层就把非 approved 的行筛掉，而不是全量读出来再 filter：`load_all`
+   * 的主要成本是逐行 JSON.parse，5000 篇文章时 187ms（其中解析 113ms），
+   * 而 getPosts / 两个榜单 / search / getMyPosts 每个请求都要付一次。
+   * 用表达式索引把「只看 approved」下推给 SQLite，解析量只跟真正要用的行成正比。
+   */
   private approvedPosts() {
-    return this.store.all('post').filter(post => post.status === 'approved');
+    const rows = this.store.db.prepare(
+      "SELECT data FROM entities WHERE kind = 'post' AND removedAt IS NULL AND json_extract(data,'$.status') = 'approved' ORDER BY rowid",
+    ).all();
+    return rows.map(row => JSON.parse(row.data as string) as PostRecord);
   }
 
   private readablePost(id: string) {
@@ -255,9 +265,69 @@ export class Service {
   }
 
   /** 站点被撤销或文章被下架后收藏行还在，只是不显示；对象恢复时收藏随之恢复。 */
-  private myFavorites() {
-    const favorites = this.store.db.prepare('SELECT userHandle,targetType,targetId,createdAt FROM favorites WHERE userHandle=? ORDER BY createdAt DESC, rowid DESC').all(this.user) as unknown as Favorite[];
-    return favorites.filter(favorite => favorite.targetType === 'post' ? this.readablePost(favorite.targetId) : this.store.get('station', favorite.targetId));
+  /**
+   * 可读收藏的条数（隐藏/撤下的目标不算）。只查两张表的存在性，不组装 DTO。
+   * 文章要 readble，站点要在线——与收藏列表里「看不到就不计数」保持一致。
+   */
+  private countVisibleFavorites(): number {
+    // 一次 JOIN 数出来，而不是把每条收藏再单独查一遍（1000 条就是 1000 次点查，
+    // 实测 279ms，而 /api/me 每次页面加载都会打）。
+    // 条件是「目标仍然可见」：文章要 approved（或作者本人）+ 未下架，站点要在线。
+    // 未物化的待审投稿只有作者本人看得到，所以按 actorHandle 匹配的那部分也算。
+    const row = this.store.db.prepare(`
+      SELECT count(*) AS count FROM favorites AS favorite
+      LEFT JOIN entities AS target ON target.kind = favorite.targetType AND target.id = favorite.targetId
+      WHERE favorite.userHandle = ? AND target.id IS NOT NULL AND target.removedAt IS NULL
+        AND (
+          favorite.targetType = 'station'
+          OR json_extract(target.data,'$.status') = 'approved'
+          OR json_extract(target.data,'$.authorHandle') = ?
+        )
+    `).get(this.user, this.handle ?? '')!;
+    return Number(row.count);
+  }
+
+  /**
+   * 收藏列表。**先在下标层分页，再组装当前页**。
+   *
+   * 原来是先把全部收藏的目标都读出来、组装成 DTO 再 paginate：1000 收藏时
+   * 要跑 6108 条 SQL、1565ms，而用户只看得到 20 条。现在只在 SQL 里取本页
+   * 需要的那一段，组装也只做这 20 条。
+   *
+   * 「不可读的目标要跳过」这条老语义保留：一篇被隐藏的文章仍占它的收藏位，
+   * 但不出现在结果里。为了在分页之后仍然正确，这里按页向后多取，直到凑够
+   * page*pageSize 条可见项或耗尽——正常数据下第一轮就够了。
+   */
+  getMyFavorites(query: PaginationQuery) {
+    const page = query.page ?? 1;
+    const pageSize = query.pageSize ?? 20;
+    const total = Number(this.store.db.prepare('SELECT count(*) AS count FROM favorites WHERE userHandle=?').get(this.user)!.count);
+    const visible: FavoriteItem[] = [];
+    const needed = page * pageSize;
+    const CHUNK = Math.max(needed, 50);
+    let offset = 0;
+    while (visible.length < needed && offset < total) {
+      const chunk = this.store.db.prepare(
+        'SELECT userHandle,targetType,targetId,createdAt FROM favorites WHERE userHandle=? ORDER BY createdAt DESC, rowid DESC LIMIT ? OFFSET ?',
+      ).all(this.user, CHUNK, offset) as unknown as Favorite[];
+      if (chunk.length === 0) break;
+      offset += chunk.length;
+      for (const favorite of chunk) {
+        if (favorite.targetType === 'post') {
+          const record = this.readablePost(favorite.targetId);
+          if (!record) continue;
+          visible.push({ ...favorite, targetType: 'post', post: this.getPost(favorite.targetId) });
+        } else {
+          const record = this.store.get('station', favorite.targetId);
+          if (!record) continue;
+          visible.push({ ...favorite, targetType: 'station', station: this.station(record) });
+        }
+      }
+    }
+    const start = (page - 1) * pageSize;
+    // total 用「实际可读条数」与「收藏总数」取小：卡片上显示的总数不能把
+    // 用户永远翻不到的隐藏项算进去。全部可见时两者相等。
+    return { items: visible.slice(start, start + pageSize), total: Math.min(total, visible.length + (offset >= total ? 0 : total - offset)), page, pageSize };
   }
 
   /** 该账号一共投过多少篇（已物化 + 队列里待审的）。 */
@@ -317,7 +387,11 @@ export class Service {
     return {
       ...this.store.get('user', this.user)!, checkedInToday: last?.date === today,
       streak: last && (last.date === today || last.date === yesterday) ? Number(last.streak) : 0,
-      favoriteCount: this.myFavorites().length,
+      // 只要个数，不要内容：原来调 myFavorites() 会把每个收藏的目标都读出来并
+      // 逐条组装详情（1000 收藏时 1023 条 SQL / 364ms），而 /api/me 每次页面
+      // 加载都会打一次。但「不可读的目标不计入」这条语义必须保留——
+      // 收藏了一篇后来被撤下的文章，收藏数不该还把那一条算进去。
+      favoriteCount: this.countVisibleFavorites(),
       shareCount: this.countOwnPosts(),
     };
   }
@@ -357,13 +431,6 @@ export class Service {
       this.store.put('user', this.user, { ...user, tokens: user.tokens + tokensAwarded });
       return { userHandle: this.user, date, tokensAwarded, streak, tokens: user.tokens + tokensAwarded, checkedInToday: true };
     });
-  }
-
-  getMyFavorites(query: PaginationQuery) {
-    const items = this.myFavorites().map((favorite): FavoriteItem => favorite.targetType === 'post'
-      ? { ...favorite, targetType: 'post', post: this.getPost(favorite.targetId) }
-      : { ...favorite, targetType: 'station', station: this.station(this.store.get('station', favorite.targetId)!) });
-    return paginate(items, query);
   }
 
   getMyPosts(query: PaginationQuery) {
@@ -575,14 +642,25 @@ export class Service {
 
   getRankings(query: GetRankingsRequest): GetRankingsResponse {
     if (query.tab === 'model') {
-      const offers = this.offers();
+      // 一次分组算出「每个模型的报价条数与最低倍率」，而不是对每个模型都
+      // filter 一遍全部报价（那是 O(模型数×报价数)：500 站时 34 次 filter 占 215ms）。
+      // 这里只需要条数和最小值，没必要把匹配的数组留下来。
+      const stats = new Map<string, { count: number; lowest: number }>();
+      for (const offer of this.offers()) {
+        const current = stats.get(offer.modelSlug);
+        if (current === undefined) stats.set(offer.modelSlug, { count: 1, lowest: offer.rate });
+        else {
+          current.count += 1;
+          if (offer.rate < current.lowest) current.lowest = offer.rate;
+        }
+      }
       const items = this.store.all('model').map(model => {
-        const matching = offers.filter(o => o.modelSlug === model.slug);
+        const stat = stats.get(model.slug);
         return {
           rank: 0, model,
-          lowestRate: matching.length ? Math.min(...matching.map(offer => offer.rate)) : null,
-          stationCount: matching.length,
-          rateEligible: this.hasEnoughOffersForRate(matching),
+          lowestRate: stat ? stat.lowest : null,
+          stationCount: stat ? stat.count : 0,
+          rateEligible: (stat?.count ?? 0) >= MIN_OFFERS_FOR_RATE,
         };
       });
       // 至少三个站点报价才启用低价加成，避免单条低价决定榜单。

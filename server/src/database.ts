@@ -70,6 +70,13 @@ export const SCHEMA = `
   -- 而主键是 (kind, id)，排 rowid 会让 SQLite 建临时 B 树排序。
   -- 2 万篇文章实测这一层占 55% 的读取耗时，加这个索引后计划里不再出现 TEMP B-TREE。
   CREATE INDEX IF NOT EXISTS entities_kind_removed ON entities(kind, removedAt);
+  -- 按作者统计/筛选文章用。没有它，countOwnPosts（/api/me 每次页面加载都调）
+  -- 要扫全部 post 并把每一行 JSON.parse 一遍：1000 篇时 278ms。
+  -- 表达式索引让这个计数变成一次索引查找，且不需要改表结构（老库自动补建）。
+  CREATE INDEX IF NOT EXISTS entities_post_author ON entities(json_extract(data,'$.authorHandle')) WHERE kind = 'post';
+  -- 只看已上线的文章：列表、榜单、搜索都以它为起点。把过滤下推给 SQLite，
+  -- 避免为每篇待审/被拒的文章也付一次 JSON.parse。
+  CREATE INDEX IF NOT EXISTS entities_post_approved ON entities(json_extract(data,'$.status')) WHERE kind = 'post' AND removedAt IS NULL;
   CREATE INDEX IF NOT EXISTS agent_tokens_handle ON agent_tokens(handle);
   -- 限流计数。放库里而不是进程内存里，是为了让同一个库上的多个进程共享同一份计数：
   -- 内存版在多进程下每个进程各算各的，配额实际被放大成 N 倍。
