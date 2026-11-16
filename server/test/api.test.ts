@@ -235,6 +235,28 @@ describe('writes and boundary validation', () => {
     expect((await ok('putVote', { targetType, targetId, value: null })).votes).toEqual(base.votes);
   });
 
+  it('收藏数不计「目标已不存在」的条目，也不漏「还没物化的自己的待审稿」', async () => {
+    // 两个方向都要盯住，它们各自把人往相反方向带偏：
+    //  - 目标被删/被撤下后仍计入 → 收藏数虚高，用户点进去是 404；
+    //  - 自己刚提交、还只在 submissions 里的待审稿被漏掉 → 收藏数比列表少。
+    // 后者是真实出现过的：改成分页后 total 与列表走了两套实现，一度漂移。
+    const created = await ok('createPost', { kind: 'review', title: '还没上线的一篇', summary: '待审', body: '正文' });
+    await ok('putFavorite', { targetType: 'post', targetId: created.id, favorited: true });
+    const withQueued = await ok('getMyFavorites', { pageSize: 100 });
+    expect(withQueued.total).toBe(withQueued.items.length);
+    expect(withQueued.items.some(item => item.targetId === created.id)).toBe(true);
+    expect((await ok('getMe')).favoriteCount).toBe(withQueued.total);
+
+    // 目标被删除后收藏行会留下（下架是软删除、导入会把行删掉），
+    // 接口层 requireTarget 会挡住新收藏，所以这里直接写库模拟遗留数据。
+    server.db.prepare('INSERT INTO favorites (userHandle,targetType,targetId,createdAt) VALUES (?,?,?,?)')
+      .run('tester', 'post', 'no-such-post', clock.toISOString());
+    const afterGhost = await ok('getMyFavorites', { pageSize: 100 });
+    expect(afterGhost.items.some(item => item.targetId === 'no-such-post')).toBe(false);
+    expect(afterGhost.total).toBe(withQueued.total);
+    expect((await ok('getMe')).favoriteCount).toBe(withQueued.total);
+  });
+
   it('收藏列表先分页再组装，翻页不重不漏且总数一致', async () => {
     // 这条盯住「先在 SQL 里分页、只组装本页」的改造：如果退回「全量组装后
     // slice」，页数与条数仍然对得上，但每条都要多跑几条 SQL；如果分页算错，

@@ -277,13 +277,27 @@ export class Service {
     const row = this.store.db.prepare(`
       SELECT count(*) AS count FROM favorites AS favorite
       LEFT JOIN entities AS target ON target.kind = favorite.targetType AND target.id = favorite.targetId
-      WHERE favorite.userHandle = ? AND target.id IS NOT NULL AND target.removedAt IS NULL
+      WHERE favorite.userHandle = ?
         AND (
-          favorite.targetType = 'station'
-          OR json_extract(target.data,'$.status') = 'approved'
-          OR json_extract(target.data,'$.authorHandle') = ?
+          -- 站内投稿物化前只在 submissions 里，readablePost 认这一类，这里也要认。
+          -- 必须排在实体判定前面：它根本没有 entities 行，走不到下面的分支。
+          EXISTS (
+            SELECT 1 FROM submissions AS queued
+            WHERE queued.id = favorite.targetId AND queued.kind = 'post' AND queued.channel = 'web'
+              AND queued.status IN ('pending','rejected') AND queued.actorHandle = ?
+          )
+          OR (
+            -- 实体要存在且未下架。LEFT JOIN 未命中时 removedAt 是 NULL，
+            -- 光写 removedAt IS NULL 会把「目标已被删除」的收藏也算成可见。
+            target.id IS NOT NULL AND target.removedAt IS NULL
+            AND (
+              favorite.targetType = 'station'
+              OR json_extract(target.data,'$.status') = 'approved'
+              OR json_extract(target.data,'$.authorHandle') = ?
+            )
+          )
         )
-    `).get(this.user, this.handle ?? '')!;
+    `).get(this.user, this.handle ?? '', this.handle ?? '')!;
     return Number(row.count);
   }
 
@@ -325,9 +339,12 @@ export class Service {
       }
     }
     const start = (page - 1) * pageSize;
-    // total 用「实际可读条数」与「收藏总数」取小：卡片上显示的总数不能把
-    // 用户永远翻不到的隐藏项算进去。全部可见时两者相等。
-    return { items: visible.slice(start, start + pageSize), total: Math.min(total, visible.length + (offset >= total ? 0 : total - offset)), page, pageSize };
+    // total 必须与「可见条数」严格一致，否则前端的 hasMore（data.length < total）
+    // 永远不收敛，「加载更多」会一直可点。
+    // 不能从本页的循环状态推：循环只扫到凑够 page*pageSize 就停，
+    // 没扫到的部分会被当成可见（100 收藏里 50 条可见时，第 1 页报过 75）。
+    // 所以单独数一次——它的口径与 items 的可见判定共用同一个谓词。
+    return { items: visible.slice(start, start + pageSize), total: this.countVisibleFavorites(), page, pageSize };
   }
 
   /** 该账号一共投过多少篇（已物化 + 队列里待审的）。 */
