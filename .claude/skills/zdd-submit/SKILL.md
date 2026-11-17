@@ -334,6 +334,8 @@ uptime, firstTokenLatencyMs, foundedAt, status, score, lowestRate
 | `FORBIDDEN_FIELD` | 有禁字段（本地没拦住，一般是嵌套层） | 删掉 |
 | `INVALID_INPUT` | 格式问题，如 `未知模型` | 按 message 改；「未知模型」说明 slug 不存在，**回到 `zdd match` 重新确认** |
 | `TOO_MANY_PENDING` | 待审队列满 | 看 message 区分是账号级、hostname 级还是全站级；账号级用 `zdd status` 看进度 |
+| `QUEUE_FULL` | 全站待审队列满（只数 agent/web 渠道） | **不要改内容**，等管理员审完再提交；message 里明确说了「不需要修改内容」 |
+| `PENDING_DUPLICATE` | 同一个模型已有待审投稿 | 等那条审核完再提交，不要换个写法重试 |
 | `RATE_LIMITED` | 每小时额度用完 | 等 `detail.error.retryAfter` 秒 |
 
 **退出码 5（凭证问题）** —— 见第 2 步的说明，需要用户介入。

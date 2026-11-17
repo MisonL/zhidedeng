@@ -65,7 +65,11 @@ export const stationSchema = z.object({
   url: httpUrl,
   rechargeThreshold: z.number().min(0).nullable(),
   paymentMethods: z.array(text(20)).max(10),
-  offers: z.array(z.object({ modelSlug: text(200), rate: offerRate })).max(100),
+  // 每一项都要 strict。外层 z.object 默认只剥掉多余字段，元素不 strict 时
+  // 写了 inputRate / outputRate / weight 这类不存在的字段会被静默丢弃，
+  // 提交方以为生效了、榜上却没有——比报错难查得多。
+  // 报价目前只有「相对官方价格的倍率」一个口径（见 README「已知未修」）。
+  offers: z.array(z.strictObject({ modelSlug: text(200), rate: offerRate })).max(100),
 }).refine(station => new Set(station.offers.map(offer => offer.modelSlug)).size === station.offers.length, '存在重复的报价');
 
 export const postSchema = z.object({
