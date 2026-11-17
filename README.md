@@ -284,6 +284,7 @@ pnpm sync:feishu --allow-skipped     # 显式跳过坏记录，本次只提交 u
 - **`/api/agent/status` 不限频**：每次调用会 `UPDATE agent_tokens SET useCount = useCount + 1`（一次写事务），凭证持有者可以持续刷它让 WAL 增长。已改成只读事务（`BEGIN DEFERRED`），不再抢写锁，但没有次数上限。
 - **审核列表已按 `createdAt DESC` 排序**（最新在前）。同一站点有多个待审版本时，按列表从上往下审会先通过最新版本、旧版本随后被 `superseded`；批次审核还要额外保住依赖顺序（站点/模型先于文章，否则文章物化时按 hostname 找不回 slug）。
 - **保留昵称与重名判定统一走 `normalizeNickname()`**（去零宽/BOM/软连字符 + NFKC + trim + lower）。早先只做 `trim()`，「管理员」被拒但「管理员\u200B」能注册成功。改这个函数会同时影响注册、改资料、保留名单三处。
+- **autoApprove 开启后，新账号发一篇站内文章即可满足 Agent 凭证的「7 天或一篇 approved 投稿」资格**。这是设计交互不是漏洞：资格门槛要的是「一篇审核通过的站内投稿」，自动通过只是把人工审核这一步自动化了。需要收紧时关掉 autoApprove，或在 `requireEligibility` 里额外要求账号年龄。
 - **`hostname` 限额（2 条）是跨账号的**：先提交的人可以占满名额，其他账号在同一 hostname 上会收到 `TOO_MANY_PENDING`。按账号收窄会让 N 个账号各刷 2 条、上限形同虚设，所以保留跨账号，并接受这个代价。
 
 ## 第三方素材
