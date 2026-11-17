@@ -76,9 +76,26 @@ const descendingNullsLast = (a: number | null, b: number | null) => (b ?? -Infin
  * 代价是「什么值得蹬官方」这类带前后缀的写法拦不住——那由审核界面
  * 的高亮与重名判定兜底，比误伤一大片正常用户划算。
  */
+/**
+ * 昵称的可比形式：去掉不可见字符 + NFKC 归一 + 转小写。
+ *
+ * 只做 trim 不够。实测「管理员」被保留名单拒绝，但「管理员\u200B」
+ * （尾部零宽空格）、「管理员\u200D」、「管\u200B理员」都能注册成功——
+ * 视觉上完全一样，等于绕过了保留身份，也给重名判定开了口子。
+ * NFKC 顺带把全角、兼容字符折成标准形态（「ＡＤＭＩＮ」→「admin」）。
+ */
+export function normalizeNickname(nickname: string): string {
+  return nickname
+    // 零宽、方向控制符、BOM 等：肉眼不可见，但参与字符串比较
+    .replace(/[\u200B-\u200F\u202A-\u202E\u2060-\u2064\uFEFF\u00AD]/g, '')
+    .normalize('NFKC')
+    .trim()
+    .toLowerCase();
+}
+
 /** 昵称是否用了保留身份。注册与改资料走同一套判定。 */
 export function isReservedNickname(nickname: string): boolean {
-  return RESERVED_NICKNAMES.has(nickname.trim().toLowerCase());
+  return RESERVED_NICKNAMES.has(normalizeNickname(nickname));
 }
 
 const RESERVED_NICKNAMES = new Set([
@@ -427,8 +444,10 @@ export class Service {
           throw new ApiError(400, 'INVALID_INPUT', `「${nickname}」是保留身份，请换一个昵称`);
         }
         // 与站内其他用户重名同样会让人分不清谁是谁；注册时也走这条。
+        // 归一后再比：只 trim+lowercase 时「管理员」和「管理员\u200B」会被当成两个名字。
+        const wantedKey = normalizeNickname(nickname);
         const taken = this.store.all('user').find(other => other.handle !== this.user
-          && other.nickname.trim().toLowerCase() === nickname.trim().toLowerCase());
+          && normalizeNickname(other.nickname) === wantedKey);
         if (taken) throw new ApiError(409, 'NICKNAME_TAKEN', '这个昵称已被使用，请换一个');
       }
       this.store.put('user', this.user, { ...user, ...input });

@@ -303,6 +303,31 @@ describe('注册时的昵称校验', () => {
     expect(await response.json()).toMatchObject({ error: { code: 'NICKNAME_TAKEN' } });
   });
 
+  it.each([
+    ['\u200B', '零宽空格'],
+    ['\u200D', '零宽连接符'],
+    ['\uFEFF', 'BOM'],
+    ['\u00AD', '软连字符'],
+  ])('保留身份加不可见字符 %s（%s）也不能绕过', async invisible => {
+    // 实测这些写法视觉上与「管理员」完全一致，却都能注册成功——
+    // 等于绕过保留名单，也让重名判定失效。
+    const response = await browser().register('nasty_zero', { nickname: `管${invisible}理员` });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ error: { code: 'INVALID_INPUT' } });
+  });
+
+  it('重名判定同样忽略不可见字符与全角差异', async () => {
+    await browser().register('first_user', { nickname: '蹬蹬爱好者' });
+    // 尾部零宽空格看起来一模一样，必须当作重名
+    const zero = await browser('198.51.100.88').register('second_user', { nickname: '蹬蹬爱好者\u200B' });
+    expect(zero.status).toBe(409);
+    expect(await zero.json()).toMatchObject({ error: { code: 'NICKNAME_TAKEN' } });
+    // NFKC：全角字母折成半角
+    await browser('198.51.100.89').register('third_user', { nickname: 'Ｋｉｍｉ用户' });
+    const fullwidth = await browser('198.51.100.90').register('fourth_user', { nickname: 'Kimi用户' });
+    expect(fullwidth.status).toBe(409);
+  });
+
   it('正常昵称不受影响，包括含保留词的普通昵称', async () => {
     for (const [index, nickname] of ['系统工程师', '中国女排官方', '官方粉丝'].entries()) {
       const response = await browser(`198.51.100.${100 + index}`).register(`nick_user_${index}`, { nickname });

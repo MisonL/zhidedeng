@@ -135,15 +135,34 @@ export class AgentApi {
     return this.enqueue('model', payload, `model:${payload.slug}`, null, request);
   }
 
+  /**
+   * 待审计数。`handle` 为空时是「全站用户侧待审」，供 globalPending 配额用。
+   *
+   * 只数 agent / web 渠道：飞书批次是管理员自己推的量，一次全量同步天然几百条，
+   * 把它算进来会让状态接口报 remaining=0，而普通用户其实还能投稿——
+   * 熔断那边已经按同样的口径拆开了，这里必须跟着，否则两边说的不是一回事。
+   */
   private pendingCount(handle?: string): number {
-    const where = handle === undefined ? '' : ' AND actorHandle = ?';
+    const where = handle === undefined ? " AND channel IN ('agent','web')" : ' AND actorHandle = ?';
     return Number(this.store.db.prepare(`SELECT count(*) AS count FROM submissions WHERE status = 'pending'${where}`)
       .get(...(handle === undefined ? [] : [handle]))!.count);
   }
 
+  /**
+   * 某个 hostname 上的待审条数（**跨账号**）。
+   *
+   * 跨账号是刻意的：这个上限保护的是「同一个站点不要被反复提交」，
+   * 而不是「某个账号不要刷」。按账号收窄会让 N 个账号各刷 2 条，
+   * 上限形同虚设。
+   *
+   * 已知代价：先提交的人可以占满名额，其他账号在同 hostname 上会收到
+   * TOO_MANY_PENDING。这是有意的取舍——站点只要有人在审核，别人等一等
+   * 是合理的；比起「换个账号就能绕过」，这个代价更小。
+   */
   private hostnameCount(hostname: string): number {
-    return Number(this.store.db.prepare(`SELECT count(*) AS count FROM submissions WHERE status = 'pending' AND (${HOSTNAME_SQL}) = ?`)
-      .get(hostKey(hostname))!.count);
+    return Number(this.store.db.prepare(
+      `SELECT count(*) AS count FROM submissions WHERE status = 'pending' AND (${HOSTNAME_SQL}) = ?`,
+    ).get(hostKey(hostname))!.count);
   }
 
   private reserve(request: AgentRequest): () => void {

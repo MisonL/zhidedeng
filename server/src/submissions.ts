@@ -254,7 +254,14 @@ export function enqueueSubmission(store: Store, input: {
     // Agent 拿到的错误会来自它自己账号的配额，反而被引导去「改数据」。
     // 用独立的错误码 QUEUE_FULL：它表示「等管理员审完」，不是「你写错了」。
     if (options.globalPendingBreaker !== false) {
-      const pending = Number(store.db.prepare("SELECT count(*) AS count FROM submissions WHERE status = 'pending'").get()!.count);
+      // 只数**用户侧**渠道的待审（agent / web），不数飞书批次。
+      // 原因：管理端批次入队天然会一次超过 200 条（一次全量同步几百个站点），
+      // 而它自己不受熔断约束。若熔断数全渠道，同步刚跑完就把所有用户挡在
+      // QUEUE_FULL 外面，要人工审完几百条才恢复——实测 500 条同步后普通用户
+      // 立刻投稿失败。飞书队列本就是管理员按批次推进的，不需要对用户侧负责。
+      const pending = Number(store.db.prepare(
+        "SELECT count(*) AS count FROM submissions WHERE status = 'pending' AND channel IN ('agent','web')",
+      ).get()!.count);
       if (pending >= GLOBAL_PENDING) {
         throw new ApiError(409, 'QUEUE_FULL', `全站待审队列已满（${GLOBAL_PENDING} 条），请稍后再提交，不需要修改内容`);
       }

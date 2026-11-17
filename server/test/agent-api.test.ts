@@ -400,14 +400,16 @@ describe('六个配额维度', () => {
     expect(first.submission.id).toBeTruthy();
   });
 
-  it('全局 pending 达到 200 条熔断，计入其他渠道，审核后恢复', async () => {
+  it('全局 pending 达到 200 条熔断，审核后恢复', async () => {
     const key = credential();
-    seedPending(200);
+    // 用 agent 渠道播种：熔断现在只数用户侧（agent/web）。
+    // 飞书批次是管理员自己推的量，不该把普通用户堵住（见下一条用例）。
+    seedPending(200, 0, 'Other', 'agent');
     // 队列满与「你自己的配额满了」必须是不同的码：前者等一等，后者说明确实提交过多。
     // 混在一起时 Agent 会去改数据而不是等待。
     await error(await submitStation(key), 409, 'QUEUE_FULL', '全站待审队列已满');
     expect((await status(key)).quotas.globalPending).toEqual({ limit: 200, remaining: 0 });
-    const id = server.db.prepare('SELECT id FROM submissions ORDER BY rowid LIMIT 1').get()!.id as string;
+    const id = server.db.prepare("SELECT id FROM submissions WHERE channel = 'agent' ORDER BY rowid LIMIT 1").get()!.id as string;
     reject(id, '信息不完整');
     await submitted(await submitStation(key));
     expect(pendingCount()).toBe(200);
@@ -421,9 +423,20 @@ describe('六个配额维度', () => {
     expect((await status(key)).quotas.token.remaining).toBe(5);
   });
 
+  it('飞书批次堆满队列也不会挡住用户侧投稿', async () => {
+    // 一次全量同步会入队几百条飞书投稿，且刻意不受熔断约束。
+    // 若熔断数全渠道，同步刚跑完所有用户就被 QUEUE_FULL 挡住，
+    // 要人工审完几百条才恢复——实测 500 条同步后普通用户立刻投稿失败。
+    const key = credential();
+    seedPending(300, 0, 'FeishuBatch', 'feishu');
+    const pending = (await status(key)).quotas.globalPending;
+    expect(pending.remaining).toBe(200);
+    await submitted(await submitStation(key));
+  });
+
   it('并发请求不能越过全局 pending 上限', async () => {
     const keys = [credential(), credential('Bobby')];
-    seedPending(199);
+    seedPending(199, 0, 'Other', 'agent');
     const responses = await Promise.all(keys.map((key, index) => submitStation(key, station(index))));
     expect(responses.map(response => response.status).sort()).toEqual([200, 409]);
     expect(pendingCount()).toBe(200);
