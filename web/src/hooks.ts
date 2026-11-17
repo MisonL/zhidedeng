@@ -47,12 +47,16 @@ export function usePaged<T>(
   deps: DependencyList,
 ) {
   const first = useAsync((signal) => fetchPage(1, signal), deps);
-  const [more, setMore] = useState<{ source?: unknown; items: T[]; page: number }>({ items: [], page: 1 });
+  // `exhausted`：某一页返回空就认为到底了。只靠 `data.length < total` 不够——
+  // 只要服务端报的 total 比实际能取到的条数多（跳过不可读目标、翻页期间有新写入等），
+  // length 就永远追不上 total，「加载更多」变成一直可点、每点一次发一个空请求。
+  // 实测：total 说还有，但第 2、3 页都是空，hasMore 仍为 true。
+  const [more, setMore] = useState<{ source?: unknown; items: T[]; page: number; exhausted: boolean }>({ items: [], page: 1, exhausted: false });
   const [loadingMore, setLoadingMore] = useState(false);
   const [moreFailure, setMoreFailure] = useState<{ source?: unknown; error: Error }>();
 
   // 换了筛选条件后，上一批的追加内容作废。
-  const extra = more.source === first.data ? more : { items: [], page: 1 };
+  const extra = more.source === first.data ? more : { items: [], page: 1, exhausted: false };
   const data = first.data && [...first.data.items, ...extra.items];
   const source = useRef(first.data);
   source.current = first.data;
@@ -64,7 +68,11 @@ export function usePaged<T>(
     try {
       const next = await fetchPage(extra.page + 1);
       if (source.current === origin) {
-        setMore({ source: origin, items: [...extra.items, ...next.items], page: extra.page + 1 });
+        setMore({
+          source: origin, items: [...extra.items, ...next.items], page: extra.page + 1,
+          // 空页即到底；同时也把 total 的变化记下来，见 hasMore
+          exhausted: next.items.length === 0,
+        });
       }
     } catch (error) {
       if (source.current === origin) setMoreFailure({ source: origin, error: error as Error });
@@ -77,7 +85,7 @@ export function usePaged<T>(
     data,
     error: first.error,
     reload: first.reload,
-    hasMore: first.data !== undefined && data!.length < first.data.total,
+    hasMore: first.data !== undefined && !extra.exhausted && data!.length < first.data.total,
     loadingMore,
     moreError: moreFailure?.source === first.data ? moreFailure?.error : undefined,
     loadMore,

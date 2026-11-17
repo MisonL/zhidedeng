@@ -452,8 +452,14 @@ const stationIndexCache = new WeakMap<Store, StationHostIndex>();
  * 名称、描述、报价变了不影响索引，不必重建。
  */
 function stationHostFingerprint(store: Store): string {
+  // 顺序必须是 **rowid**，不能按 id 排：索引里的「同 hostname 取第一个」
+  // 依据的是 `store.all` 的 rowid 顺序。删除再插回（全量导入就是删了重建）
+  // 会改变 rowid 次序——按 id 排时指纹看不出变化，于是沿用旧索引，
+  // 结果指向的 slug 与重建后应当指向的不是同一个。
+  // 实测：a-slug/b-slug 共享 hostname，重插后 rowid 序反转，
+  // 按 id 的指纹不变（误判），按 rowid 的指纹会变（正确）。
   const rows = store.db.prepare(
-    "SELECT id, json_extract(data,'$.url') AS url FROM entities WHERE kind = 'station' AND removedAt IS NULL ORDER BY id",
+    "SELECT id, json_extract(data,'$.url') AS url FROM entities WHERE kind = 'station' AND removedAt IS NULL ORDER BY rowid",
   ).all() as unknown as { id: string; url: string | null }[];
   const hash = createHash('sha1');
   for (const row of rows) hash.update(row.id).update('\u0000').update(row.url ?? '').update('\u0001');
