@@ -78,16 +78,34 @@ describe('投稿入队与列表', () => {
     expect(again.submission.status).toBe('pending');
   });
 
-  it('按创建时间升序，支持 kind、status 过滤和分页', () => {
+  it('按创建时间倒序（最新在前），支持 kind、status 过滤和分页', () => {
+    // 倒序是刻意的：同一站点常有多个待审版本，审核员按列表从上往下审，
+    // 升序会先通过旧版本、把新版本标成 superseded，站点停在旧数据上。
     const latest = queue({ originKey: 'latest.example.com', payload: { ...stationPayload, url: 'https://latest.example.com/' }, now: new Date('2026-11-07T03:00:00Z') }).submission;
     const oldest = queue({ originKey: 'oldest.example.com', payload: { ...stationPayload, url: 'https://oldest.example.com/' }, now: new Date('2026-11-07T01:00:00Z') }).submission;
     const middle = queue({ originKey: 'middle.example.com', payload: { ...stationPayload, url: 'https://middle.example.com/' }, now: new Date('2026-11-07T02:00:00Z') }).submission;
     const model = queue({ kind: 'model', originKey: modelPayload.slug, payload: modelPayload }).submission;
     reviewSubmission(store, clock(), model.id, { status: 'rejected', reason: '模型信息有误' });
+    // 倒序后第 2 页是中间那条（第 1 页是最新的 latest）
     expect(listSubmissions(store, { kind: 'station', status: 'pending', page: 2, pageSize: 1 }))
       .toEqual({ items: [middle], total: 3, page: 2, pageSize: 1 });
-    expect(listSubmissions(store, { kind: 'station' }).items.map(item => item.id)).toEqual([oldest.id, middle.id, latest.id]);
+    expect(listSubmissions(store, { kind: 'station' }).items.map(item => item.id)).toEqual([latest.id, middle.id, oldest.id]);
     expect(listSubmissions(store, { status: 'rejected' }).items.map(item => item.id)).toEqual([model.id]);
+  });
+
+  it('同一站点多个待审版本时，按列表顺序从上往下审得到的是最新版本', () => {
+    // 回归：列表曾经是升序，审核员从上往下点「通过」，先通过旧版本、
+    // 新版本被 superseded，站点停在旧数据上——而界面上完全看不出来。
+    const older = queue({ originKey: 'v.example.com', payload: { ...stationPayload, url: 'https://v.example.com/', name: '第一版·旧' }, now: new Date('2026-11-07T01:00:00Z') }).submission;
+    const newer = queue({ originKey: 'v.example.com', payload: { ...stationPayload, url: 'https://v.example.com/', name: '第二版·新' }, now: new Date('2026-11-07T02:00:00Z') }).submission;
+    const pending = listSubmissions(store, { status: 'pending', pageSize: 10 }).items;
+    expect(pending.map(item => item.id)).toEqual([newer.id, older.id]);
+    // 逐条通过，跳过已被替代的
+    for (const item of pending) {
+      if (listSubmissions(store, { status: 'pending', pageSize: 10 }).items.every(row => row.id !== item.id)) continue;
+      reviewSubmission(store, clock(), item.id, { status: 'approved' });
+    }
+    expect(store.all('station').find(station => station.url === 'https://v.example.com/')?.name).toBe('第二版·新');
   });
 
   it.each([undefined, 1n])('拒绝不能存成 JSON 的 payload %s，不留下记录', payload => {

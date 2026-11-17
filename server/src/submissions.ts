@@ -349,7 +349,11 @@ export function listSubmissions(store: Store, input: {
   // 裸 BEGIN。外层事务本身就是同一个快照，直接读即可。
   const read = () => {
     const total = Number(store.db.prepare(`SELECT COUNT(*) AS total FROM submissions${where}`).get(...params)!.total);
-    const rows = store.db.prepare(`SELECT * FROM submissions${where} ORDER BY createdAt, rowid LIMIT ? OFFSET ?`)
+    // 新的排前面。同一站点常有多个待审版本，管理员按列表从上往下审：
+    // 升序时先遇到旧版本，通过后新版本被标成 superseded——站点停在旧数据上。
+    // 实测：先后提交「第一版·旧」「第二版·新」，升序审核的最终站点名是「第一版·旧」。
+    // 倒序则先看到最新版本，符合「我要的是最新状态」的直觉。
+    const rows = store.db.prepare(`SELECT * FROM submissions${where} ORDER BY createdAt DESC, rowid DESC LIMIT ? OFFSET ?`)
       .all(...params, pageSize, (page - 1) * pageSize);
     return { items: rows.map(submissionRecord), total, page, pageSize };
   };

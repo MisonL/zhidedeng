@@ -420,7 +420,16 @@ export function buildApp(store: Store, now: () => Date, options: AppOptions = {}
     // ids 保留最多 100 条；batchId 处理整批 pending。每条仍是独立事务。
     const input = submissionBatchReviewSchema.parse(await c.req.json());
     const decision = { status: input.status, reason: input.reason };
-    const ids = 'ids' in input ? input.ids : store.db.prepare("SELECT id FROM submissions WHERE batchId = ? AND status = 'pending' ORDER BY createdAt, rowid")
+    // 排序有两层约束，缺一不可：
+    // 1. 依赖顺序——评价文章物化时要靠 hostname 找回站点 slug，站点必须先通过。
+    //    单纯倒序会让文章排在站点前面，stationSlug 落成 null（实测）。
+    // 2. 同类型内最新优先——同一站点常有多个待审版本，先审旧的会让新版本被
+    //    supersedePending 标成 superseded，站点停在旧数据上（界面上看不出来）。
+    // 所以按「站点/模型 → 文章」分组，组内 createdAt 倒序。
+    const ids = 'ids' in input ? input.ids : store.db.prepare(
+      "SELECT id FROM submissions WHERE batchId = ? AND status = 'pending' "
+      + "ORDER BY CASE kind WHEN 'post' THEN 1 ELSE 0 END, createdAt DESC, rowid DESC",
+    )
       .all(input.batchId).map(row => row.id as string);
     const results: ({ id: string; submission: ReturnType<typeof reviewSubmission> } | { id: string; error: { status: number; code: string; message: string } })[] = [];
     for (const id of ids) {

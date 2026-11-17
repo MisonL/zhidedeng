@@ -88,9 +88,10 @@ describe('批次入队与审核', () => {
     const repeated = await submit([stationItem()], 'batch-one');
     expect(repeated.results[0]).toMatchObject({ id: first.results[0].id, deduplicated: true });
     const response = await server.app.request('/api/admin/submissions?batchId=batch-one', { headers: admin });
+    // 倒序：后追加的那条排在前面
     expect(await response.json()).toMatchObject({ total: 2, items: [
-      { id: first.results[0].id, batchId: 'batch-one' },
       { id: appended.results[0].id, batchId: 'batch-one' },
+      { id: first.results[0].id, batchId: 'batch-one' },
     ] });
   });
 
@@ -218,6 +219,26 @@ describe('批次入队与审核', () => {
     expect(store.get('model', 'batch-model')?.name).toBe('批次模型');
     expect(store.get('post', `sub-${batch.results[2].id}`)).toMatchObject({ stationSlug: 'sub-batch-example-com', source: 'submission' });
     expect(listSubmissions(store, { batchId: other.batchId }).items[0].status).toBe('pending');
+  });
+
+  it('整批审核先过站点再过文章，且同一站点多版本时以最新为准', async () => {
+    // 两条约束叠在一起，任意一条被打破界面上都看不出来：
+    //  - 文章物化要靠 hostname 找回站点 slug，站点没先通过 → stationSlug 落成 null
+    //  - 同一站点有新旧两版时先审旧的 → 新版被 superseded，站点停在旧数据
+    // 一个批次里同时有：站点旧版本、站点新版本、关联该站点的文章。
+    // 入队顺序刻意把「文章」和「旧版本」放在前面，让升序/单纯倒序都会出错。
+    // 文章必须**最后**入队，纯倒序才会把它排到最前面——那时站点还没物化，
+    // 按 hostname 找回 slug 会落成 null。这就是「依赖顺序」必须存在的原因。
+    const depPost: Item = { ...postItem, payload: { ...(postItem.payload as object), hostname: 'other.example.com' } };
+    await submit([{ ...stationItem('other.example.com'), payload: { ...(stationItem('other.example.com').payload as object), name: '第一版·旧' } }], 'dep-order');
+    await submit([{ ...stationItem('other.example.com'), payload: { ...(stationItem('other.example.com').payload as object), name: '第二版·新' } }], 'dep-order');
+    await submit([depPost], 'dep-order');
+    const reviewed = await batchReview('dep-order');
+    expect(reviewed.results.every(item => item.submission?.status === 'approved')).toBe(true);
+    // 新版赢（组内倒序）
+    expect(store.all('station').find(station => station.url === 'https://other.example.com/')?.name).toBe('第二版·新');
+    // 文章关联到了那个站点（站点先物化）
+    expect(store.all('post').find(post => post.stationSlug === 'sub-other-example-com')?.title).toBe('群友评价');
   });
 
   it('整批审核跳过已经单独审核的条目，其余照常通过', async () => {

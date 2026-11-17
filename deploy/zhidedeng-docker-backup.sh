@@ -28,6 +28,10 @@ db.close();
 " 2>/dev/null
 
 docker cp "$container:$tmp_in_container" "$target.partial"
+# docker cp 会沿用容器内文件的权限（node 以默认 umask 建的，644），
+# 脚本自己的 umask 对它不起作用。备份里有密码哈希和会话摘要，
+# 不能只靠目录 700 兜底——显式收紧到 600。
+chmod 600 "$target.partial"
 
 # 校验：能打开、integrity_check 通过、核心表在。
 integrity="$(sqlite3 "$target.partial" 'PRAGMA integrity_check' 2>/dev/null || echo failed)"
