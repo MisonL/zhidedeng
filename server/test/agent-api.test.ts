@@ -363,13 +363,24 @@ describe('六个配额维度', () => {
     expect(pendingCount()).toBe(2);
   });
 
-  it('hostname 限额计入其他渠道 pending，端口和尾点不能绕过', async () => {
+  it('hostname 限额计入同属用户侧的其他 channel，端口和尾点不能绕过', async () => {
+    // 计入 web（站内表单）但**不计入 feishu**：飞书批次是管理员自己推的量，
+    // 让它占用用户侧名额会变成「管理员越勤快，用户越提交不了」。
     const key = credential();
     for (let index = 0; index < 2; index++) enqueueSubmission(store, {
-      kind: 'station', channel: 'feishu', originKey: 'station-0.example.com', payload: station(0, { name: '已有版本 ' + index }), ip: IP, now: clock,
+      kind: 'station', channel: 'web', originKey: 'station-0.example.com', payload: station(0, { name: '已有版本 ' + index }), ip: IP, now: clock,
     });
     await error(await submitStation(key, station(0, { url: 'https://STATION-0.EXAMPLE.COM.:8443/' })), 409, 'TOO_MANY_PENDING', 'hostname');
     expect(pendingCount()).toBe(2);
+  });
+
+  it('飞书批次里的同 hostname 投稿不占用用户侧的 hostname 名额', async () => {
+    const key = credential();
+    for (let index = 0; index < 2; index++) enqueueSubmission(store, {
+      kind: 'station', channel: 'feishu', originKey: 'station-0.example.com', payload: station(0, { name: '同步来的版本 ' + index }), ip: IP, now: clock,
+    }, { globalPendingBreaker: false });
+    // 飞书那边堆了 2 条，用户侧仍然能提交这个站点。
+    await submitted(await submitStation(key, station(0, { name: '用户提交的版本' })));
   });
 
   it('其他渠道留下的 originKey 大小写或尾点变体，同样计入 hostname 限额', async () => {
@@ -378,7 +389,7 @@ describe('六个配额维度', () => {
     const key = credential();
     const raw = (id: string) => server.db.prepare(`INSERT INTO submissions
       (id, kind, channel, originKey, batchId, action, autoApproved, payload, payloadHash, actorHandle, ip, status, createdAt)
-      VALUES (?, 'station', 'feishu', 'Station-0.Example.COM.', NULL, 'upsert', 0, ?, ?, NULL, ?, 'pending', ?)`)
+      VALUES (?, 'station', 'web', 'Station-0.Example.COM.', NULL, 'upsert', 0, ?, ?, NULL, ?, 'pending', ?)`)
       .run(id, JSON.stringify(station(0, { name: '历史版本 ' + id })), 'hash-' + id, IP, clock.toISOString());
     raw('legacy-1');
     raw('legacy-2');

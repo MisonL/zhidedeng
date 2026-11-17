@@ -160,8 +160,11 @@ export class AgentApi {
    * 是合理的；比起「换个账号就能绕过」，这个代价更小。
    */
   private hostnameCount(hostname: string): number {
+    // 只数用户侧渠道，理由与全站熔断相同：飞书批次是管理员自己推的量，
+    // 同一站点在批次里堆了 2 条待审时，Agent 提交同一站点会被挡在外面，
+    // 而挡它的不是它自己的行为——正是这一轮想消掉的那类连累。
     return Number(this.store.db.prepare(
-      `SELECT count(*) AS count FROM submissions WHERE status = 'pending' AND (${HOSTNAME_SQL}) = ?`,
+      `SELECT count(*) AS count FROM submissions WHERE status = 'pending' AND channel IN ('agent','web') AND (${HOSTNAME_SQL}) = ?`,
     ).get(hostKey(hostname))!.count);
   }
 
