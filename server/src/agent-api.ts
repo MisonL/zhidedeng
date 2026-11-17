@@ -240,7 +240,11 @@ export class AgentApi {
     const rateQuota = (limiter: AttemptLimiter, key: string, max: number): AgentRateQuota => ({
       limit: max, remaining: limiter.remaining(key, time), retryAfter: limiter.retryAfter(key, time),
     });
-    return this.store.transaction(() => {
+    // 这里全是读操作（rateQuota 只是读计数）。用 BEGIN DEFERRED 而不是
+    // store.transaction() 的 BEGIN IMMEDIATE：后者会先抢写锁，让「查一下还剩多少额度」
+    // 和别人的投稿互相排隊——而这个接口是 Agent 每次提交前都会打的。
+    // 开启读事务只为让下面几条查询看到同一个快照（pendingCount 与 hostnames 要自洽）。
+    const read = () => {
       const pendingCount = this.pendingCount(request.handle);
       const hostnames = this.store.db.prepare(`SELECT DISTINCT (${HOSTNAME_SQL}) AS hostname FROM submissions
         WHERE actorHandle = ? AND status = 'pending' ORDER BY hostname`).all(request.handle)
@@ -267,6 +271,16 @@ export class AgentApi {
         },
         submissions: rows as unknown as GetAgentStatusResponse['submissions'],
       };
-    });
+    };
+    if (this.store.inTransaction()) return read();
+    this.store.db.prepare('BEGIN DEFERRED').run();
+    try {
+      const result = read();
+      this.store.db.prepare('COMMIT').run();
+      return result;
+    } catch (error) {
+      try { this.store.db.prepare('ROLLBACK').run(); } catch { /* 已经结束就不用再回滚 */ }
+      throw error;
+    }
   }
 }
