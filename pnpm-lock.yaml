@@ -127,8 +127,8 @@ importers:
   server:
     dependencies:
       '@hono/node-server':
-        specifier: ^1.19.0
-        version: 1.19.18(hono@4.13.16)
+        specifier: ^2.1.9
+        version: 2.1.9(hono@4.13.16)
       '@zhidedeng/shared':
         specifier: workspace:*
         version: link:../shared
@@ -468,11 +468,11 @@ packages:
   '@fontsource-variable/noto-serif-sc@5.3.1':
     resolution: {integrity: sha512-aIHcBaL13QctVaJFeT6wqfgO9Rq/cNtD5g2ob4ze59fYPYwacGthnIrHBe83kDpMEB/k6VGtGc6fS99RImcoSQ==}
 
-  '@hono/node-server@1.19.18':
-    resolution: {integrity: sha512-609kppIP9GITS+EwPyB6Kiq8z2yXONaYD1VHpo7MMP9celRJYbkFr9KakJncHwK0EK/XYtlogqmrLchDv5HX5w==}
-    engines: {node: '>=18.14.1'}
+  '@hono/node-server@2.1.9':
+    resolution: {integrity: sha512-Sk4NQd3GFY0WZWCzndwFMPwJhtD0y9qjsQ+pjID0/03nK9pxyBCUoUHCho8QYBLBVhi0ssL8UkNPHqbgSOFPIQ==}
+    engines: {node: '>=20'}
     peerDependencies:
-      hono: ^4
+      hono: ^4 || ^5.0.0-0
 
   '@jridgewell/resolve-uri@3.1.2':
     resolution: {integrity: sha512-bRISgCIjP20/tbWSPWMEi54QVPRZExkuD9lJL+UIxUKtwVJA8wW1Trb1jMs1RFXo1CBTNZ/5hpC9QvmKWdopKw==}
@@ -1817,7 +1817,7 @@ snapshots:
 
   '@fontsource-variable/noto-serif-sc@5.3.1': {}
 
-  '@hono/node-server@1.19.18(hono@4.13.16)':
+  '@hono/node-server@2.1.9(hono@4.13.16)':
     dependencies:
       hono: 4.13.16
 
