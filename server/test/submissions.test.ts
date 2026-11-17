@@ -375,7 +375,7 @@ describe('投稿管理接口', () => {
       // 厂商缺失是可重试的（补回厂商就能审），所以错误码独立且记录保持 pending。
       { id: invalid.id, error: { status: 400, code: 'VENDOR_MISSING' } },
       { id: 'missing-id', error: { status: 404, code: 'NOT_FOUND' } },
-      { id: valid.id, submission: { id: valid.id, status: 'approved' } },
+      { id: valid.id, status: 'approved' },
     ] });
     expect(record(invalid.id).status).toBe('pending');
     expect(record(valid.id).status).toBe('approved');

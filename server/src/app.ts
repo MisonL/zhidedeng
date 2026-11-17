@@ -431,12 +431,18 @@ export function buildApp(store: Store, now: () => Date, options: AppOptions = {}
       + "ORDER BY CASE kind WHEN 'post' THEN 1 ELSE 0 END, createdAt DESC, rowid DESC",
     )
       .all(input.batchId).map(row => row.id as string);
-    const results: ({ id: string; submission: ReturnType<typeof reviewSubmission> } | { id: string; error: { status: number; code: string; message: string } })[] = [];
+    // 只回 {id, status}，不回整条 SubmissionRecord。
+    // 500 条时整条记录让响应体到 295KB，而前端只用到「哪些失败、失败原因」；
+    // 单条详情本来就有 /api/admin/submissions 可查。
+    const results: ({ id: string; status: string; reason: string | null } | { id: string; error: { status: number; code: string; message: string } })[] = [];
     for (const id of ids) {
       // 同批次的其他版本可能刚被前一条审核替代，这些已经不是待审条目。
       if ('batchId' in input && store.db.prepare('SELECT status FROM submissions WHERE id = ?').get(id)?.status !== 'pending') continue;
       try {
-        results.push({ id, submission: reviewSubmission(store, now(), id, decision) });
+        // reason 一并回：审核员需要知道「为什么被写成这个状态」
+        // （例如下架目标不存在时写的是「站点已不存在，视为已下架」）。
+        const reviewed = reviewSubmission(store, now(), id, decision);
+        results.push({ id, status: reviewed.status, reason: reviewed.reason });
       } catch (error) {
         if (isDatabaseBusyError(error)) throw error;
         if (error instanceof ApiError) results.push({ id, error: { status: error.status, code: error.code, message: error.message, ...error.details } });

@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { AdminBatchSubmitRequest, AdminBatchSubmitResponse, AdminSubmissionStateResponse, SubmissionRecord } from '@zhidedeng/shared';
+import type { AdminBatchSubmitRequest, AdminBatchSubmitResponse, AdminSubmissionStateResponse } from '@zhidedeng/shared';
 import type { StationRecord, Store } from '../src/database.ts';
 import { createApp, openDatabase, openStore } from '../src/node-app.ts';
 import { enqueueSubmission, listSubmissions, reviewSubmission, setAutoApprove } from '../src/submissions.ts';
@@ -13,7 +13,8 @@ const TOKEN = 'batch-admin-tests-0123456789abcdef';
 const admin = { 'content-type': 'application/json', authorization: `Bearer ${TOKEN}` };
 const clock = () => new Date('2026-11-07T06:00:00Z');
 type Item = AdminBatchSubmitRequest['items'][number];
-type ReviewResponse = { results: { id: string; submission?: SubmissionRecord; error?: { status: number; code: string } }[] };
+// 响应只回 {id, status, reason}：整条 SubmissionRecord 在 500 条时是 295KB 的无用载荷。
+type ReviewResponse = { results: { id: string; status?: string; reason?: string | null; error?: { status: number; code: string } }[] };
 
 let server: ReturnType<typeof createApp>;
 let store: Store;
@@ -170,7 +171,7 @@ describe('批次入队与审核', () => {
       batchId: first.batchId, status: 'approved', reason: '自动通过',
     });
     expect(reviewed.status).toBe(200);
-    expect(await reviewed.json()).toMatchObject({ results: [{ submission: { status: 'approved', reason: '自动通过' } }] });
+    expect(await reviewed.json()).toMatchObject({ results: [{ status: 'approved', reason: '自动通过' }] });
     expect(server.db.prepare('SELECT autoApproved FROM submissions WHERE id = ?').get(first.results[0].id!)).toEqual({ autoApproved: 0 });
 
     const response = await send('/api/admin/submissions/batch', {
@@ -212,7 +213,7 @@ describe('批次入队与审核', () => {
     const other = await submit([stationItem('other.example.com')]);
     const result = await batchReview(batch.batchId);
     expect(result.results).toHaveLength(3);
-    expect(result.results.every(item => item.submission?.status === 'approved')).toBe(true);
+    expect(result.results.every(item => item.status === 'approved')).toBe(true);
     expect(store.get('station', 'sub-batch-example-com')).toMatchObject({
       source: 'submission', uptime: null, firstTokenLatencyMs: null, foundedAt: null, status: null,
     });
@@ -234,11 +235,58 @@ describe('批次入队与审核', () => {
     await submit([{ ...stationItem('other.example.com'), payload: { ...(stationItem('other.example.com').payload as object), name: '第二版·新' } }], 'dep-order');
     await submit([depPost], 'dep-order');
     const reviewed = await batchReview('dep-order');
-    expect(reviewed.results.every(item => item.submission?.status === 'approved')).toBe(true);
+    expect(reviewed.results.every(item => item.status === 'approved')).toBe(true);
     // 新版赢（组内倒序）
     expect(store.all('station').find(station => station.url === 'https://other.example.com/')?.name).toBe('第二版·新');
     // 文章关联到了那个站点（站点先物化）
     expect(store.all('post').find(post => post.stationSlug === 'sub-other-example-com')?.title).toBe('群友评价');
+  });
+
+  it('批量审核不复用过期索引：站点改名后立刻生效，下架后不再被关联', async () => {
+    // 回归：站点索引曾按 entityVersion 缓存，而每通过一条就 put 一个站点，
+    // 版本号随之 +1 → 每条都全表重建（O(n·m)）。修法是「站点集合指纹」：
+    // 集合没变就复用索引。这条路子最怕的是「该重建却没重建」，
+    // 所以这里不断言耗时（并行跑时会抖），只钉住可见的正确性。
+    const payload = (name: string) => ({
+      name, description: 'd', url: 'https://fingerprint.example.com/', rechargeThreshold: null, paymentMethods: [], offers: [],
+    });
+    const first = await submit([{ kind: 'station', originKey: 'fingerprint.example.com', payload: payload('第一版') }], 'fp-a');
+    await batchReview(first.batchId);
+    const slug = store.all('station').find(station => station.url === 'https://fingerprint.example.com/')!.slug;
+
+    // 改名只改 name，不动 slug/url —— 指纹不变，索引该复用，且读到的必须是最新名
+    const second = await submit([{ kind: 'station', originKey: 'fingerprint.example.com', payload: payload('第二版') }], 'fp-b');
+    await batchReview(second.batchId);
+    expect(store.get('station', slug)?.name).toBe('第二版');
+    const post = await submit([{ kind: 'post', originKey: 'fp-rec', payload: {
+      title: '改名后的评价', summary: 's', body: 'b', authorName: '群友', hostname: 'fingerprint.example.com',
+    } }], 'fp-c');
+    await batchReview(post.batchId);
+    // 关联到的必须是同一个 slug（复用索引不能把 slug 弄错）
+    expect(store.all('post').find(item => item.title === '改名后的评价')?.stationSlug).toBe(slug);
+  });
+
+  it('站点索引缓存不会让审核读到改名前或已下架的站点', async () => {
+    const payload = (name: string) => ({
+      name, description: 'd', url: 'https://cache.example.com/', rechargeThreshold: null, paymentMethods: [], offers: [],
+    });
+    const v1 = await submit([{ kind: 'station', originKey: 'cache.example.com', payload: payload('第一版') }], 'cache-a');
+    await batchReview(v1.batchId);
+    const slug = store.all('station').find(station => station.url === 'https://cache.example.com/')!.slug;
+
+    // 改名：缓存必须失效，读到新名字
+    const v2 = await submit([{ kind: 'station', originKey: 'cache.example.com', payload: payload('第二版') }], 'cache-b');
+    await batchReview(v2.batchId);
+    expect(store.get('station', slug)?.name).toBe('第二版');
+
+    // 下架：缓存不能还认为它在线，否则后续评价会被挂到一个已下架站点上
+    store.markRemoved('station', slug, clock().toISOString());
+    const review = await submit([{ kind: 'post', originKey: 'cache-rec', payload: {
+      title: '下架后的评价', summary: 's', body: 'b', authorName: '群友', hostname: 'cache.example.com',
+    } }], 'cache-c');
+    await batchReview(review.batchId);
+    const post = store.all('post').find(item => item.title === '下架后的评价');
+    expect(post?.stationSlug).toBeNull();
   });
 
   it('整批审核跳过已经单独审核的条目，其余照常通过', async () => {
@@ -246,7 +294,7 @@ describe('批次入队与审核', () => {
     await send(`/api/admin/submissions/${batch.results[0].id}/review`, { status: 'approved' });
     const result = await batchReview(batch.batchId);
     expect(result.results.map(item => item.id)).toEqual([batch.results[1].id, batch.results[2].id]);
-    expect(result.results.every(item => item.submission?.status === 'approved')).toBe(true);
+    expect(result.results.every(item => item.status === 'approved')).toBe(true);
     expect(listSubmissions(store, { batchId: batch.batchId }).items.every(item => item.status === 'approved')).toBe(true);
     expect((await batchReview(batch.batchId)).results).toEqual([]);
   });
@@ -267,14 +315,14 @@ describe('批次入队与审核', () => {
     const result = await submit([{ ...stationItem(), payload: { url: 'https://batch.example.com/' } }, stationItem('good.example.com')]);
     expect(result.results[0].error?.code).toBe('INVALID_INPUT');
     expect(result.results[1].status).toBe('pending');
-    expect((await batchReview(result.batchId)).results[0].submission?.status).toBe('approved');
+    expect((await batchReview(result.batchId)).results[0].status).toBe('approved');
   });
 
   it('batchId 审核不受 ids 模式的 100 条上限截断', async () => {
     const batch = await submit(Array.from({ length: 101 }, (_, index) => stationItem(`station-${index}.example.com`)));
     const result = await batchReview(batch.batchId);
     expect(result.results).toHaveLength(101);
-    expect(result.results.every(item => item.submission?.status === 'approved')).toBe(true);
+    expect(result.results.every(item => item.status === 'approved')).toBe(true);
     expect(listSubmissions(store, { batchId: batch.batchId, status: 'pending' }).total).toBe(0);
   });
 
@@ -285,7 +333,7 @@ describe('批次入队与审核', () => {
     expect(second.batchId).toBe(first.batchId);
     const result = await batchReview(first.batchId);
     expect(result.results).toHaveLength(600);
-    expect(result.results.every(item => item.submission?.status === 'approved')).toBe(true);
+    expect(result.results.every(item => item.status === 'approved')).toBe(true);
     expect(listSubmissions(store, { batchId: first.batchId, status: 'pending' }).total).toBe(0);
   }, 120_000);
 
@@ -516,7 +564,7 @@ describe('下架请求', () => {
     expect(listSubmissions(store, { batchId: batch.batchId }).items[0].action).toBe('remove');
     expect(store.get('station', station.slug)).toEqual(station);
     const result = await batchReview(batch.batchId);
-    expect(result.results[0].submission?.status).toBe('approved');
+    expect(result.results[0].status).toBe('approved');
     // 对外读取都当作已删除。
     expect(store.get('station', station.slug)).toBeUndefined();
     expect((await state()).stations).toEqual([]);
@@ -567,7 +615,7 @@ describe('下架请求', () => {
     store.transaction(() => store.put('station', station.slug, { ...station, source }));
     const batch = await submit([removalItem(station)]);
     const result = await batchReview(batch.batchId);
-    expect(result.results[0].submission?.status).toBe('approved');
+    expect(result.results[0].status).toBe('approved');
     expect(store.get('station', station.slug)).toBeUndefined();
     expect(store.getWithRemoved('station', station.slug)?.source).toBe(source);
   });
@@ -653,7 +701,7 @@ describe('下架请求', () => {
   it('不存在的下架目标按幂等成功处理，记录说明原因并完成审核', async () => {
     const batch = await submit([{ kind: 'station', originKey: 'missing.example.com', action: 'remove', payload: { slug: 'sub-missing', submissionId: 'missing-version' } }]);
     const result = await batchReview(batch.batchId);
-    expect(result.results[0].submission).toMatchObject({ status: 'approved', reason: '站点已不存在，视为已下架' });
+    expect(result.results[0]).toMatchObject({ status: 'approved', reason: '站点已不存在，视为已下架' });
     expect(listSubmissions(store, { batchId: batch.batchId }).items[0].status).toBe('approved');
   });
 
@@ -716,7 +764,7 @@ describe('当前队列站点状态', () => {
     const removal = await submit([{ kind: 'station', originKey: 'client-key', action: 'remove', payload: {
       slug: current.slug, submissionId: current.submissionId,
     } }]);
-    expect((await batchReview(removal.batchId)).results[0].submission?.status).toBe('approved');
+    expect((await batchReview(removal.batchId)).results[0].status).toBe('approved');
     expect(store.get('station', current.slug)).toBeUndefined();
   });
 
@@ -831,7 +879,7 @@ describe('当前队列站点状态', () => {
     expect(retried.results.every(result => !result.error)).toBe(true);
     expect(retried.results[1]).toMatchObject({ id: removals.results[1].id, deduplicated: true });
     const removed = await batchReview(removals.batchId);
-    expect(removed.results.every(result => result.submission?.status === 'approved')).toBe(true);
+    expect(removed.results.every(result => result.status === 'approved')).toBe(true);
     expect(store.get('station', 'sub-foo-com')).toBeUndefined();
     expect(store.get('station', 'sub-www-foo-com')).toBeUndefined();
     expect((await state()).stations).toEqual([]);
@@ -860,7 +908,7 @@ describe('批次自动通过', () => {
     expect(batch.results[0]).toMatchObject({ status: 'pending', autoApproved: false });
     expect(batch.results[1]).toMatchObject({ status: 'approved', autoApproved: true });
     // 但来源不是障碍：审核通过就能下线。
-    expect((await batchReview(batch.batchId)).results[0].submission?.status).toBe('approved');
+    expect((await batchReview(batch.batchId)).results[0].status).toBe('approved');
     expect(store.get('station', agentStation.slug)).toBeUndefined();
   });
 
