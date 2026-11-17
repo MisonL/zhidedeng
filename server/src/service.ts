@@ -58,6 +58,25 @@ const COMMENTS_PER_MINUTE = 5;
 const POSTS_PER_HOUR = 10;
 const MAX_PENDING_POSTS = 20;
 const MIN_OFFERS_FOR_RATE = 3;
+/**
+ * 按发布时间比较，**按真实时刻**而不是字符串。
+ *
+ * publishedAt 允许带时区偏移（`z.iso.datetime({ offset: true })`，因为 Agent 从中文
+ * 站点抓到的多是 `+08:00`），所以字符串比较会跟时间比较给出相反结论：
+ *   A = 2026-11-17T09:00:00+08:00（UTC 01:00）
+ *   B = 2026-11-17T02:00:00Z     （UTC 02:00）
+ * 字符串比 `'17T09' > '17T02'` 认为 A 更晚，实际 A 更早一小时。
+ * 结果是「最新」列表顺序错乱——实测 A 排在了 B 前面。
+ *
+ * 解析失败时退回字符串比较，保证顺序至少稳定（不会变成随机）。
+ */
+export function comparePublishedAt(a: string, b: string): number {
+  const left = Date.parse(a);
+  const right = Date.parse(b);
+  if (Number.isNaN(left) || Number.isNaN(right)) return a.localeCompare(b);
+  return left - right;
+}
+
 const POST_AUTHOR = "kind = 'post' AND json_extract(data,'$.authorHandle') = ?";
 
 const descendingNullsLast = (a: number | null, b: number | null) => (b ?? -Infinity) - (a ?? -Infinity) || 0;
@@ -470,7 +489,12 @@ export class Service {
   }
 
   getMyPosts(query: PaginationQuery) {
-    const approved = this.store.all('post').filter(p => p.authorHandle === this.user);
+    // 原来是 `store.all('post')` 全量反序列化再在 JS 里按作者过滤：
+    // 2 万篇文章时 280~650ms，只为了取出自己的那几十篇。作者已有表达式索引
+    // （entities_post_author），直接下推给 SQLite。
+    const approved = this.store.db.prepare(
+      `SELECT data FROM entities WHERE ${POST_AUTHOR} AND removedAt IS NULL ORDER BY rowid`,
+    ).all(this.user).map(row => JSON.parse(row.data as string) as PostRecord);
     // 加上还在队列里的待审稿：站内发帖已走统一队列，
     // 不列出来作者会以为投稿丢了。
     // 待审与被拒的都列出来：被拒也是作者的记录，他要能看到状态和原因。
@@ -478,7 +502,7 @@ export class Service {
       "SELECT * FROM submissions WHERE kind = 'post' AND channel = 'web' AND actorHandle = ? AND status IN ('pending','rejected')",
     ).all(this.user).map(row => this.queuedPost(row));
     const posts = [...approved, ...pending]
-      .sort((a, b) => b.publishedAt.localeCompare(a.publishedAt)).map(p => this.post(p));
+      .sort((a, b) => comparePublishedAt(b.publishedAt, a.publishedAt)).map(p => this.post(p));
     return paginate(posts, query);
   }
 
@@ -589,7 +613,7 @@ export class Service {
     const net = query.sort === 'hot' ? this.netVotes('post') : null;
     records.sort((a, b) => (net
       ? this.hotScoreRecord(b, net.get(b.id) ?? 0) - this.hotScoreRecord(a, net.get(a.id) ?? 0)
-      : 0) || b.publishedAt.localeCompare(a.publishedAt));
+      : 0) || comparePublishedAt(b.publishedAt, a.publishedAt));
     // 这里不预取互动数据：组装被推迟到切片之后，只需按 id 点查本页那 20 条。
     //
     // 实测（2 万篇 × 各 1 票 1 评论）：全量聚合 125ms，点查 20 条 2ms、
@@ -712,7 +736,7 @@ export class Service {
       const up = this.countVotes('post', 'up');
       const comments = this.countComments('post');
       records.sort((a, b) => ((up.get(b.id) ?? 0) * 2 + (comments.get(b.id) ?? 0)) - ((up.get(a.id) ?? 0) * 2 + (comments.get(a.id) ?? 0))
-        || b.publishedAt.localeCompare(a.publishedAt));
+        || comparePublishedAt(b.publishedAt, a.publishedAt));
       return { tab: 'community', ...paginate(records.slice(0, 12).map((record, index) => ({ rank: index + 1, post: this.post(record) })), query) };
     }
     // 专家榜同样：up 数与篇数各用一条聚合查询算，再只组装上榜的 12 条。

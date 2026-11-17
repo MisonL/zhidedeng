@@ -3,6 +3,7 @@ import type { Post } from '@zhidedeng/shared';
 import type { StationRecord, Store } from '../src/database.ts';
 import { ApiError } from '../src/errors.ts';
 import { createApp, openStore } from '../src/node-app.ts';
+import { comparePublishedAt } from '../src/service.ts';
 import { enqueueSubmission, listSubmissions, reviewSubmission, setAutoApprove } from '../src/submissions.ts';
 
 const TOKEN = 'submission-admin-tests-0123456789abcdef';
@@ -424,6 +425,26 @@ describe('站内发帖统一入队', () => {
     expect(submission.status).toBe('approved');
     expect(store.get('post', submission.id)?.status).toBe('approved');
   });
+});
+
+describe('发布时间排序', () => {
+  it('带时区偏移的发布时间按真实时刻排序，不按字符串', () => {
+    // 回归：publishedAt 允许 `+08:00` 这类偏移（Agent 从中文站点抓到的多是这种），
+    // 而排序用过 localeCompare。字符串 '17T09' > '17T02' 会认为前者更晚，
+    // 实际 09:00+08:00（UTC 01:00）比 02:00Z（UTC 02:00）早一小时。
+    const later = '2026-11-17T02:00:00Z';
+    const earlier = '2026-11-17T09:00:00+08:00';
+    expect(Date.parse(earlier)).toBeLessThan(Date.parse(later));
+    // 字符串比较会给出相反结论，这正是当初的 bug
+    expect(earlier.localeCompare(later)).toBeGreaterThan(0);
+    // 现在按真实时刻
+    expect(comparePublishedAt(earlier, later)).toBeLessThan(0);
+    expect(comparePublishedAt(later, earlier)).toBeGreaterThan(0);
+    expect(comparePublishedAt(later, later)).toBe(0);
+    // 不可解析时退回字符串比较，保证顺序稳定而不是随机
+    expect(comparePublishedAt('not-a-date', '2026-11-17T02:00:00Z')).not.toBe(0);
+  });
+
 });
 
 describe('下架后重新上架', () => {

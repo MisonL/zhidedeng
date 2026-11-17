@@ -235,6 +235,24 @@ describe('writes and boundary validation', () => {
     expect((await ok('putVote', { targetType, targetId, value: null })).votes).toEqual(base.votes);
   });
 
+  it('我的投稿只含自己的、未下架的，且与分享数一致', async () => {
+    // 回归：getMyPosts 曾用 store.all('post') 全量反序列化再在 JS 里按作者过滤
+    // （2 万篇时 280~650ms）。改成把 authorHandle 下推给 SQLite 后，
+    // 「只看自己」「排除已下架」这两条语义必须与原来完全一致。
+    await signIn();
+    const mine = await ok('createPost', { kind: 'review', title: '我的第一篇', summary: 's', body: 'b' });
+    const mineList = await ok('getMyPosts', { pageSize: 100 });
+    expect(mineList.items.map(item => item.id)).toContain(mine.id);
+    // 分享数与列表必须一致（两者共用同一套「只看自己 + 排除已下架」的判定）
+    expect(mineList.total).toBe((await ok('getMe')).shareCount);
+
+    // 换一个账号：看不到别人的
+    await request('register', { username: 'another', password: 'correct-horse-battery', nickname: '另一个' });
+    const another = await ok('getMyPosts', { pageSize: 100 });
+    expect(another.items.map(item => item.id)).not.toContain(mine.id);
+    expect(another.total).toBe((await ok('getMe')).shareCount);
+  });
+
   it('收藏数不计「目标已不存在」的条目，也不漏「还没物化的自己的待审稿」', async () => {
     // 两个方向都要盯住，它们各自把人往相反方向带偏：
     //  - 目标被删/被撤下后仍计入 → 收藏数虚高，用户点进去是 404；

@@ -1,13 +1,14 @@
 import type { AdminDisableUserResponse, PostStatus } from '@zhidedeng/shared';
 import type { Store } from './database.ts';
 import { ApiError } from './errors.ts';
+import { comparePublishedAt } from './service.ts';
 import { reviewSubmission } from './submissions.ts';
 
 // 管理接口的动作，由 app.ts 在 Bearer 校验之后调用。没有后台页面，运维用 curl。
 
 export function listPosts(store: Store, status: PostStatus) {
   const items = store.all('post').filter(post => post.status === status)
-    .sort((a, b) => a.publishedAt.localeCompare(b.publishedAt))
+    .sort((a, b) => comparePublishedAt(a.publishedAt, b.publishedAt))
     .map(({ id, kind, title, summary, body, authorHandle, stationSlug, modelSlug, publishedAt, status: current }) => ({ id, kind, title, summary, body, authorHandle, stationSlug, modelSlug, publishedAt, status: current }));
   // 站内投稿已进统一队列，物化前只在 submissions 里，不列出来审核员就看不到。
   // 排除已物化的：物化时 post id 就是 submission id，两边都查会列出同一条两次。
@@ -17,7 +18,7 @@ export function listPosts(store: Store, status: PostStatus) {
     const payload = JSON.parse(row.payload as string) as { kind: string; title: string; summary: string; body: string; stationSlug: string | null; modelSlug: string | null };
     return { id: row.id as string, ...payload, authorHandle: row.actorHandle as string | null, publishedAt: row.createdAt as string, status };
   });
-  return { items: [...items, ...queued].sort((a, b) => a.publishedAt.localeCompare(b.publishedAt)) };
+  return { items: [...items, ...queued].sort((a, b) => comparePublishedAt(a.publishedAt, b.publishedAt)) };
 }
 
 export function reviewPost(store: Store, now: () => Date, id: string, status: PostStatus) {
