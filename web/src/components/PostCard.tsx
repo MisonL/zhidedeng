@@ -34,6 +34,11 @@ export default function PostCard({ post }: { post: PostSummary }) {
           {model && <Link className="tag" to={`/models/${model.slug}`}>{model.name}</Link>}
         </div>
         <p className="post-summary">{post.summary}</p>
+        {/* 驳回理由只在作者自己的列表里出现（服务端也只对作者返回该字段）。
+            之前只显示「未通过」，作者不知道哪里不合格，也没法据此重投。 */}
+        {post.status === 'rejected' && post.reviewReason && (
+          <p className="post-review-reason">未通过原因：{post.reviewReason}</p>
+        )}
         <div className="post-foot">
           <VoteButtons targetType="post" targetId={post.id} votes={post.votes} currentUserVote={post.currentUserVote} />
           <FavoriteButton targetType="post" targetId={post.id} favorited={post.favorited} favoriteCount={post.favoriteCount} />

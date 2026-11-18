@@ -187,6 +187,32 @@ export interface SuggestModelResponse {
   status: SubmissionStatus;
   deduplicated: boolean;
 }
+/**
+ * 推荐一个新中转站。
+ *
+ * 在这之前站内用户**根本无法推荐站点**：网页投稿只有文章和补录模型两种，
+ * 站点只能由飞书同步或 Agent 送来。结果是站点供给完全依赖外部通道——
+ * 一个刚开的中转站读者无从提交，站方也收不到任何信号。
+ *
+ * 字段取「知道多少填多少」：网址必填（站点身份由 hostname 决定），
+ * 名称必填，报价、最低充值、支付方式都是可选的。管理员审核时再补全，
+ * 与飞书同步走同一个投稿队列和同一套物化逻辑。
+ */
+export interface SuggestStationRequest {
+  name: string;
+  url: string;
+  description?: string;
+  /** 每行一个「模型slug=倍率」，由前端拆分后按模型提交。 */
+  offers?: { modelSlug: string; rate: number }[];
+  rechargeThreshold?: number | null;
+  paymentMethods?: string[];
+}
+/** 站点推荐同样没有实体可回，返回入队结果。 */
+export interface SuggestStationResponse {
+  id: string;
+  status: SubmissionStatus;
+  deduplicated: boolean;
+}
 export interface GetAgentStatusRequest {
   // 默认最近 20 条，最多 50 条。
   limit?: number;
@@ -399,6 +425,7 @@ export interface ApiContracts {
   createAgentPost: { request: CreateAgentPostRequest; response: ApiResponse<CreateAgentPostResponse> };
   createAgentModel: { request: CreateAgentModelRequest; response: ApiResponse<CreateAgentModelResponse> };
   suggestModel: { request: SuggestModelRequest; response: ApiResponse<SuggestModelResponse> };
+  suggestStation: { request: SuggestStationRequest; response: ApiResponse<SuggestStationResponse> };
   getAgentStatus: { request: GetAgentStatusRequest; response: ApiResponse<GetAgentStatusResponse> };
   getMe: { request: GetMeRequest; response: ApiResponse<GetMeResponse> };
   updateMe: { request: UpdateMeRequest; response: ApiResponse<UpdateMeResponse> };

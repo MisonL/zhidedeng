@@ -430,6 +430,11 @@ export class Service {
       // 用户刷新才发现早就发布了。
       publishedAt: row.createdAt as string,
       status: (row.status as string) === 'rejected' ? 'rejected' : (row.status as string) === 'approved' ? 'approved' : 'pending',
+      // 驳回理由要跟着状态一起给作者：只显示「已拒绝」而不说哪里不合格，
+      // 作者既改不了也不知道该不该重投。paylaod 里没有这个字段，只能从
+      // submissions.reason 带出来；未驳回时给 null 而不是 undefined，
+      // 前端可以直接判断「有没有理由」。
+      reviewReason: (row.reason as string | null | undefined) ?? null,
     } as PostRecord;
   }
 

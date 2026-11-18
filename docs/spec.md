@@ -180,6 +180,7 @@ channel 是队列的来源渠道，source 是物化内容的展示来源，二�
 - `GET /stations?vendor=&sort=score|rate|uptime&q=`、`GET /stations/:slug`（含 offers、指标、投票汇总、当前用户投票与收藏状态）
 - `GET /posts?kind=&vendor=&station=&model=&sort=latest|hot&q=`、`GET /posts/:id`、`POST /posts`（kind、title、summary、body、stationSlug?、modelSlug?）
 - `POST /models/suggest`（slug、vendor、name、description）—— 站内补录模型，与 Agent 通道同一套字段，进同一个待审队列
+- `POST /stations/suggest`（name、url、description?、offers?、rechargeThreshold?、paymentMethods?）—— 站内推荐新中转站。此前站内根本没有这条路，站点只能由飞书同步或 Agent 送来。与其它投稿进同一个待审队列，审核通过后由同一套物化逻辑建站；报价里的模型必须已存在，写错在提交时就报错而不是留成停在 pending 的坏记录
 - `POST /admin/invite-codes`（note?、maxUses?、expiresAt?）、`GET /admin/invite-codes`、`POST /admin/invite-codes/:id/revoke` —— 邀请码管理，`Authorization: Bearer` 鉴权。明文只在创建响应里返回一次，库里只存 SHA-256 与前缀；`maxUses` 为 null 表示不限次数，同一账号对同一个码只核销一次
 - `PUT /votes`（targetType: post|station、targetId、value: up|down|null）返回最新汇总
 - `PUT /favorites`（targetType、targetId、favorited）

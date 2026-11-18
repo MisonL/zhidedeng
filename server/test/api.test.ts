@@ -235,6 +235,55 @@ describe('writes and boundary validation', () => {
     expect((await ok('putVote', { targetType, targetId, value: null })).votes).toEqual(base.votes);
   });
 
+  it('站内用户可以推荐新站点，审核通过后自动建站', async () => {
+    // 回归：网页投稿只有文章和补录模型两条路，站点只能由飞书同步或 Agent 送来。
+    // 读者发现一个新站，页面上根本没有地方提交。
+    await signIn();
+    const queued = await ok('suggestStation', { name: '新发现的站', url: 'https://brand-new.example.com/' });
+    expect(queued).toMatchObject({ status: 'pending', deduplicated: false });
+    // 还没审核，站点不该存在
+    expect(server.db.prepare("SELECT id FROM entities WHERE kind = 'station' AND json_extract(data,'$.url') = 'https://brand-new.example.com/'").get()).toBeUndefined();
+
+    // 进的是同一个审核队列（管理端能看到），渠道记为 web
+    const row = server.db.prepare("SELECT channel, status, kind FROM submissions WHERE id = ?").get(queued.id);
+    expect(row).toMatchObject({ channel: 'web', status: 'pending', kind: 'station' });
+  });
+
+  it('推荐新站时模型写错立刻报错，不会变成停在 pending 的坏记录', async () => {
+    await signIn();
+    const result = await request('suggestStation', {
+      name: '某站', url: 'https://bad-model.example.com/', offers: [{ modelSlug: 'no-such-model', rate: 0.5 }],
+    });
+    expect(result.status).toBe(400);
+    expect(JSON.stringify(result.data)).toContain('未知模型');
+    // 坏记录没有落库：否则它会一直占着 pending 配额，审核者也修不了
+    expect(server.db.prepare("SELECT count(*) AS c FROM submissions WHERE channel = 'web' AND kind = 'station'").get()).toEqual({ c: 0 });
+  });
+
+  it('被驳回的投稿带出审核理由，且只有作者本人看得到', async () => {
+    // 回归：服务端把理由写进了 submissions.reason，却没有任何接口把它送出来。
+    // 「我的分享」只显示 status=rejected，作者不知道哪里不合格，也没法据此重投。
+    await signIn();
+    const mine = await ok('createPost', { kind: 'review', title: '我的评测', summary: 's', body: 'b' });
+    server.db.prepare("UPDATE submissions SET status = 'rejected', reason = ? WHERE id = ?")
+      .run('缺少站点信息，请补充后重投', mine.id);
+    const list = await ok('getMyPosts', { pageSize: 10 });
+    expect(list.items[0]).toMatchObject({ status: 'rejected', reviewReason: '缺少站点信息，请补充后重投' });
+    // 已公开的文章不该带这个字段
+    expect(list.items.every(item => item.status !== 'rejected' || item.reviewReason)).toBe(true);
+    return mine;
+  });
+
+  it('未经审核的投稿理由不会泄漏给其他账号', async () => {
+    await signIn();
+    await ok('createPost', { kind: 'review', title: '甲的文章', summary: 's', body: 'b' });
+    const row = server.db.prepare("SELECT id FROM submissions WHERE channel = 'web' ORDER BY rowid DESC LIMIT 1").get() as { id: string };
+    server.db.prepare("UPDATE submissions SET status = 'rejected', reason = ? WHERE id = ?").run('内部审核备注', row.id);
+    await request('register', { username: 'observer', password: 'correct-horse-battery', nickname: '旁观者' });
+    const others = await ok('getMyPosts', { pageSize: 10 });
+    expect(others.items.some(item => item.reviewReason === '内部审核备注')).toBe(false);
+  });
+
   it('我的投稿只含自己的、未下架的，且与分享数一致', async () => {
     // 回归：getMyPosts 曾用 store.all('post') 全量反序列化再在 JS 里按作者过滤
     // （2 万篇时 280~650ms）。改成把 authorHandle 下推给 SQLite 后，

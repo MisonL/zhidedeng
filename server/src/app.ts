@@ -741,6 +741,45 @@ export function buildApp(store: Store, now: () => Date, options: AppOptions = {}
     });
     return { id: result.submission.id, slug: payload.slug, status: result.submission.status, deduplicated: result.deduplicated };
   });
+  // 站内推荐新中转站。此前用户只能写文章或补录模型，站点供给完全靠飞书和 Agent，
+  // 读者看到没收录的站无处可提。走 web 渠道进同一个队列，审核后由同一套
+  // materialize 建站，和其他投稿没有两样。
+  route('suggestStation', z.strictObject({
+    name: z.string().trim().min(1).max(60),
+    url: z.string().trim().min(1).max(300),
+    description: z.string().trim().max(300).optional(),
+    // 报价可以留空：推荐人未必知道倍率，管理员审核时补。
+    offers: z.array(z.strictObject({
+      modelSlug: z.string().trim().min(1).max(200),
+      rate: z.number(),
+    })).max(100).optional(),
+    rechargeThreshold: z.number().min(0).nullable().optional(),
+    paymentMethods: z.array(z.string().trim().min(1).max(20)).max(10).optional(),
+  }), (service, input, ip) => {
+    service.assertCanSubmitPost();
+    // stationSchema 要求字段齐全，而推荐人是「知道多少填多少」，这里补默认值。
+    // 名称是必填项，描述可留空——审核时再补。
+    const payload = {
+      name: input.name,
+      description: input.description?.trim() || '待补充',
+      url: input.url,
+      rechargeThreshold: input.rechargeThreshold ?? null,
+      paymentMethods: input.paymentMethods ?? [],
+      offers: input.offers ?? [],
+    };
+    // 报价里的模型必须真实存在：物化时未知模型会抛 400 让整条记录停在 pending，
+    // 不如在提交时就报清楚，推荐人才知道是模型名写错了。
+    for (const offer of payload.offers) {
+      if (!store.get('model', offer.modelSlug)) throw new ApiError(400, 'INVALID_INPUT', `未知模型：${offer.modelSlug}`);
+    }
+    // url 的合法性（http/https、非内网、不带 query）由 enqueueSubmission 里的
+    // stationSchema 校验兜住，这里不重复实现一套规则。
+    const originKey = `web:${service.handle}:station:${createHash('sha256').update(JSON.stringify(payload)).digest('hex')}`;
+    const result = enqueueSubmission(store, {
+      kind: 'station', channel: 'web', originKey, payload, actorHandle: service.handle, ip, now: now(),
+    });
+    return { id: result.submission.id, status: result.submission.status, deduplicated: result.deduplicated };
+  });
   route('putVote', z.strictObject({ ...target, value: z.enum(['up', 'down']).nullable() }), (service, input) => service.putVote(input));
   route('putFavorite', z.strictObject({ ...target, favorited: z.boolean() }), (service, input) => service.putFavorite(input));
   route('getComments', z.strictObject({ ...pagination, ...target }), (service, input) => service.getComments(input));

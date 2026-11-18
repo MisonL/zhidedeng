@@ -9,7 +9,7 @@ import { loginPath } from '../format';
 import { useCatalog, useHere, useMe, useToast } from '../state';
 
 /** 补录模型不是文章，但和投稿共用一个入口，所以类型放宽一格。 */
-type SubmitKind = PostKind | 'model';
+type SubmitKind = PostKind | 'model' | 'station';
 
 const KINDS: { value: SubmitKind; label: string }[] = [
   { value: 'deal', label: '发爆料' },
@@ -17,6 +17,8 @@ const KINDS: { value: SubmitKind; label: string }[] = [
   { value: 'guide', label: '写指南' },
   { value: 'community', label: '发社区' },
   { value: 'model', label: '补充模型' },
+  // 站点供给原来只靠飞书同步和 Agent：读者发现一个新站，页面上根本没有地方提交。
+  { value: 'station', label: '推荐新站' },
 ];
 
 const REQUIRED = { title: '请填写标题', summary: '请填写摘要', body: '请填写正文' };
@@ -31,9 +33,13 @@ export default function Submit() {
   const requested = params.get('kind');
   const kind: SubmitKind = KINDS.find(({ value }) => value === requested)?.value ?? 'deal';
   const isModel = kind === 'model';
+  const isStation = kind === 'station';
   const [form, setForm] = useState({ title: '', summary: '', body: '', stationSlug: '', modelSlug: '' });
   // 补录模型自己的字段；模型不属于文章，不共用 title/summary/body。
   const [modelForm, setModelForm] = useState({ slug: '', vendor: '', name: '', description: '' });
+  // 推荐站点同理。报价是可选的：推荐人常常只知道站名和网址，
+  // 倍率由审核时补，不该因此挡住「先让这个站被收录」。
+  const [stationForm, setStationForm] = useState({ name: '', url: '', description: '', rate: '' });
   const [errors, setErrors] = useState<Partial<typeof REQUIRED>>({});
   const [serverError, setServerError] = useState<string>();
   const [submitting, setSubmitting] = useState(false);
@@ -61,6 +67,31 @@ export default function Submit() {
         await api.suggestModel(fields);
         me.refreshMe();
         toast('已提交，审核通过后进入模型库');
+        navigate('/me?tab=posts');
+      } catch (error) {
+        setServerError((error as Error).message);
+        setSubmitting(false);
+      }
+      return;
+    }
+    // 推荐站点走独立接口：站点不是文章，没有标题/摘要/正文。
+    if (isStation) {
+      const name = stationForm.name.trim();
+      const url = stationForm.url.trim();
+      if (!name || !url) {
+        setServerError('请填写站点名称和网址');
+        return;
+      }
+      setSubmitting(true);
+      setServerError(undefined);
+      try {
+        await api.suggestStation({
+          name, url,
+          ...(stationForm.description.trim() ? { description: stationForm.description.trim() } : {}),
+          ...(stationForm.rate.trim() ? { offers: [{ modelSlug: stationForm.rate.trim().split('=')[0], rate: Number(stationForm.rate.trim().split('=')[1]) }] } : {}),
+        });
+        me.refreshMe();
+        toast('已提交，审核通过后进入中转站库');
         navigate('/me?tab=posts');
       } catch (error) {
         setServerError((error as Error).message);
@@ -153,7 +184,30 @@ export default function Submit() {
             </div>
           </>
         )}
-        {!isModel && (<>
+        {isStation && (
+          <>
+            <p className="hint">推荐平台还没收录的中转站。审核通过后会进入中转站库，其他人就能在对比页看到它。</p>
+            <div className="field">
+              <label className="field-label" htmlFor="station-name">站点名称</label>
+              <input id="station-name" maxLength={60} value={stationForm.name} onChange={event => setStationForm({ ...stationForm, name: event.target.value })} />
+            </div>
+            <div className="field">
+              <label className="field-label" htmlFor="station-url">网址</label>
+              <input id="station-url" maxLength={300} inputMode="url" placeholder="https://" value={stationForm.url} onChange={event => setStationForm({ ...stationForm, url: event.target.value })} />
+              <p className="hint">同一个域名只收录一个站点，带不带端口或 www 都视为同一站。</p>
+            </div>
+            <div className="field">
+              <label className="field-label" htmlFor="station-description">一句话说明（可选）</label>
+              <textarea id="station-description" rows={2} maxLength={300} value={stationForm.description} onChange={event => setStationForm({ ...stationForm, description: event.target.value })} />
+            </div>
+            <div className="field">
+              <label className="field-label" htmlFor="station-rate">报价倍率（可选）</label>
+              <input id="station-rate" placeholder="例如 gpt-4-1=0.5" value={stationForm.rate} onChange={event => setStationForm({ ...stationForm, rate: event.target.value })} />
+              <p className="hint">格式「模型slug=倍率」。不确定就留空，审核时再补。</p>
+            </div>
+          </>
+        )}
+        {!isModel && !isStation && (<>
         <div className="field">
           <label className="field-label" htmlFor="submit-title">标题</label>
           <input id="submit-title" maxLength={100} value={form.title} onChange={(event) => change('title', event.target.value)} aria-invalid={Boolean(errors.title)} />

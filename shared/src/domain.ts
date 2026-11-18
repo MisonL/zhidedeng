@@ -144,6 +144,14 @@ export interface Post extends InteractionState {
   source: ContentSource | 'user';
   // pending/rejected 只有作者本人读得到。
   status: PostStatus;
+  /**
+   * 审核理由（驳回原因），仅对作者本人可见。
+   *
+   * 之前这个字段不存在：作者在「我的分享」里看得到 status=rejected，
+   * 却完全不知道哪里不合格——服务端明明把理由写进了 submissions.reason，
+   * 却没有任何接口把它送出来。只有作者自己能看到，别人读到的仍是 undefined。
+   */
+  reviewReason?: string | null;
 }
 
 /**
