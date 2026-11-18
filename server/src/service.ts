@@ -3,11 +3,15 @@ import type {
   CurrentUser, Favorite, FavoriteItem, GetCommentsRequest, GetModelsRequest, GetPostsRequest,
   GetRankingsRequest, GetRankingsResponse, GetStationsRequest, InteractionState, ModelDetail,
   PaginationQuery, Post, PutFavoriteRequest, PutFavoriteResponse, PutVoteRequest, PutVoteResponse,
-  SearchResponse, Station, StationDetail, StationOffer, Target, UpdateMeRequest, VendorWithModels, Vote,
+  SearchResponse, Station, StationDetail, StationOffer, SubmissionStatus, Target, UpdateMeRequest,
+  VendorWithModels, Vote,
 } from '@zhidedeng/shared';
 import { ApiError } from './errors.ts';
 import { Store } from './database.ts';
 import type { PostRecord, StationRecord } from './database.ts';
+// 只借一个纯函数算 hostname，避免和 submissions.ts 之间形成运行时循环依赖：
+// submissions.ts 不 import service.ts，这个方向是单向的。
+import { hostnameOf } from './submissions.ts';
 
 const dayMs = 86400000;
 const shanghaiDate = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit' });
@@ -493,6 +497,58 @@ export class Service {
       this.store.put('user', this.user, { ...user, tokens: user.tokens + tokensAwarded });
       return { userHandle: this.user, date, tokensAwarded, streak, tokens: user.tokens + tokensAwarded, checkedInToday: true };
     });
+  }
+
+  /**
+   * 「我的投稿」：文章、模型、站点三类放在一起，带状态和驳回理由。
+   *
+   * 之前只有 `getMyPosts` 查文章，作者补录模型或推荐站点之后在站内查不到
+   * 任何结果——那两条通道照样会驳回、照样会写理由，但提交人看不到。
+   * 这个接口直接读 submissions，三类一视同仁。
+   *
+   * 只读 channel='web'：飞书同步的内容来源是表格，Agent 投稿有自己的
+   * `/api/agent/status` 列表和凭证语义，混进来会把内部 originKey 暴露出去。
+   */
+  getMySubmissions(query: PaginationQuery) {
+    const rows = this.store.db.prepare(
+      `SELECT id, kind, status, reason, payload, createdAt, reviewedAt
+       FROM submissions WHERE channel = 'web' AND actorHandle = ?
+       ORDER BY createdAt DESC, rowid DESC`,
+    ).all(this.user) as unknown as {
+      id: string; kind: 'station' | 'model' | 'post'; status: SubmissionStatus; reason: string | null;
+      payload: string; createdAt: string; reviewedAt: string | null;
+    }[];
+    // 物化后的 slug 要按各自的规则查，不能从 payload 里猜：
+    // 文章 id 是 `sub-<投稿id>`（见 submissions.ts 的 materialize），
+    // 站点 slug 由 hostname 决定而不是 originKey，模型 slug 就是 payload.slug。
+    const items = rows.map((row) => {      const payload = JSON.parse(row.payload) as { title?: string; name?: string; slug?: string };
+      return {
+        id: row.id, kind: row.kind, status: row.status, reason: row.reason ?? null,
+        title: payload.title ?? payload.name ?? payload.slug ?? row.id,
+        createdAt: row.createdAt, reviewedAt: row.reviewedAt ?? null,
+        targetSlug: this.materializedSlug(row, payload),
+      };
+    });
+    return paginate(items, query);
+  }
+
+  /** 只对已通过的投稿算：待审/被拒的还没物化，给了链接也是 404。 */
+  private materializedSlug(
+    row: { id: string; kind: string; status: string },
+    payload: { slug?: string; url?: string },
+  ): string | null {
+    if (row.status !== 'approved') return null;
+    if (row.kind === 'model') return payload.slug ?? null;
+    // 文章：站内投稿（channel=web）直接用自己的 id 当文章 id；
+    // 飞书/Agent 走 `sub-<投稿id>` 或 `feishu-<originKey>`（见 submissions.ts 的 materialize）。
+    // 这里只服务 web 渠道，所以就是投稿 id 本身——但仍要确认实体真的存在，
+    // 否则给出去的是一个 404 链接。
+    if (row.kind === 'post') return this.store.get('post', row.id) ? row.id : null;
+    // 站点：slug 由 hostname 决定，用同一个 hostnameOf 重新算一遍再查。
+    const hostname = hostnameOf(payload.url ?? null);
+    if (hostname === null) return null;
+    const found = this.store.all('station').find(station => hostnameOf(station.url ?? null) === hostname);
+    return found?.slug ?? null;
   }
 
   getMyPosts(query: PaginationQuery) {

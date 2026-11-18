@@ -85,6 +85,7 @@ export const api = {
   createPost: (body: CreatePostRequest) => call('createPost', { body }),
   suggestModel: (body: SuggestModelRequest) => call('suggestModel', { body }),
   suggestStation: (body: SuggestStationRequest) => call('suggestStation', { body }),
+  getMySubmissions: (query: PaginationQuery, signal?: AbortSignal) => call('getMySubmissions', { query, signal }),
   putVote: (body: PutVoteRequest) => call('putVote', { body }),
   putFavorite: (body: PutFavoriteRequest) => call('putFavorite', { body }),
   getComments: (query: Target & PaginationQuery, signal?: AbortSignal) => call('getComments', { query, signal }),

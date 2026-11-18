@@ -19,6 +19,7 @@ export const API_ROUTES = {
   checkIn: { method: 'POST', path: '/api/me/checkin' },
   getMyFavorites: { method: 'GET', path: '/api/me/favorites' },
   getMyPosts: { method: 'GET', path: '/api/me/posts' },
+  getMySubmissions: { method: 'GET', path: '/api/me/submissions' },
   getVendors: { method: 'GET', path: '/api/vendors' },
   getModels: { method: 'GET', path: '/api/models' },
   getModel: { method: 'GET', path: '/api/models/:slug' },

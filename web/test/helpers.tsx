@@ -27,6 +27,7 @@ export function deferred<T>() {
 const defaults: Record<string, Handler> = {
   'GET /api/me': me,
   'GET /api/me/posts': page([makePost('mine', { title: '我的第一篇分享' })]),
+  'GET /api/me/submissions': page([]),
   'GET /api/me/favorites': page([]),
   'GET /api/account/agent-tokens': [],
   'GET /api/vendors': page(vendors),

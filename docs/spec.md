@@ -175,6 +175,7 @@ channel 是队列的来源渠道，source 是物化内容的展示来源，二�
 - `GET /me`、`PATCH /me`（nickname、bio）
 - `POST /me/checkin`（当天重复调用返回 409 ALREADY_CHECKED_IN）；`GET /me` 含 tokens、checkedInToday、streak、favoriteCount、shareCount
 - `GET /me/favorites`、`GET /me/posts`
+- `GET /me/submissions` —— 「我的投稿」：文章、模型、站点三类统一返回，带状态与驳回理由；已通过的给出可点的详情链接。此前补录模型和推荐站点这两条通道的审核结果，提交人完全看不到
 - `GET /vendors`（含 models 摘要）
 - `GET /models?vendor=&q=`、`GET /models/:slug`（含 offers：各站倍率，按倍率升序）
 - `GET /stations?vendor=&sort=score|rate|uptime&q=`、`GET /stations/:slug`（含 offers、指标、投票汇总、当前用户投票与收藏状态）

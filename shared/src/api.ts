@@ -1,7 +1,7 @@
 import type {
   AgentToken, Banner, CheckIn, Comment, CommentReply, CommunityRanking, CurrentUser,
   ExpertRanking, FavoriteItem, Model, ModelDetail, ModelRanking, Post, PostKind, PostSummary,
-  RankingTab, Station, StationDetail, Target, Vendor, VendorWithModels, VoteSummary, VoteValue,
+  ISODateTime, RankingTab, Station, StationDetail, Target, Vendor, VendorWithModels, VoteSummary, VoteValue,
 } from './domain.js';
 
 export interface PaginationQuery {
@@ -256,6 +256,27 @@ export type GetMyFavoritesRequest = PaginationQuery;
 export type GetMyFavoritesResponse = PaginatedResponse<FavoriteItem>;
 export type GetMyPostsRequest = PaginationQuery;
 export type GetMyPostsResponse = PaginatedResponse<Post>;
+
+/**
+ * 「我的投稿」的一条记录，覆盖文章、模型、站点三类。
+ *
+ * `getMyPosts` 只返回文章，作者补录了模型或推荐了站点就查不到结果——
+ * 那两条通道有自己的审核流程和驳回理由，但提交人在站内看不到任何反馈。
+ */
+export interface MySubmission {
+  id: string;
+  kind: 'station' | 'model' | 'post';
+  status: SubmissionStatus;
+  /** 驳回理由；通过或待审时为 null。 */
+  reason: string | null;
+  /** 人可读的标题：文章取标题，模型取名称，站点取站名。 */
+  title: string;
+  createdAt: ISODateTime;
+  reviewedAt: ISODateTime | null;
+  /** 已通过时指向物化后的实体，方便前端给出去看它的链接。 */
+  targetSlug: string | null;
+}
+export type GetMySubmissionsResponse = PaginatedResponse<MySubmission>;
 export type GetVendorsRequest = PaginationQuery;
 export type GetVendorsResponse = PaginatedResponse<VendorWithModels>;
 
@@ -432,6 +453,7 @@ export interface ApiContracts {
   checkIn: { request: CheckInRequest; response: ApiResponse<CheckInResponse> };
   getMyFavorites: { request: GetMyFavoritesRequest; response: ApiResponse<GetMyFavoritesResponse> };
   getMyPosts: { request: GetMyPostsRequest; response: ApiResponse<GetMyPostsResponse> };
+  getMySubmissions: { request: PaginationQuery; response: ApiResponse<GetMySubmissionsResponse> };
   getVendors: { request: GetVendorsRequest; response: ApiResponse<GetVendorsResponse> };
   getModels: { request: GetModelsRequest; response: ApiResponse<GetModelsResponse> };
   getModel: { request: GetModelRequest; response: ApiResponse<GetModelResponse> };

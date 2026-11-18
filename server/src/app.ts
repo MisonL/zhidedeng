@@ -780,6 +780,7 @@ export function buildApp(store: Store, now: () => Date, options: AppOptions = {}
     });
     return { id: result.submission.id, status: result.submission.status, deduplicated: result.deduplicated };
   });
+  route('getMySubmissions', z.strictObject(pagination), (service, input) => service.getMySubmissions(input));
   route('putVote', z.strictObject({ ...target, value: z.enum(['up', 'down']).nullable() }), (service, input) => service.putVote(input));
   route('putFavorite', z.strictObject({ ...target, favorited: z.boolean() }), (service, input) => service.putFavorite(input));
   route('getComments', z.strictObject({ ...pagination, ...target }), (service, input) => service.getComments(input));

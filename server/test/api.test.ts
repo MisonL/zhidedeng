@@ -268,6 +268,50 @@ describe('writes and boundary validation', () => {
     expect(server.db.prepare("SELECT count(*) AS c FROM submissions WHERE channel = 'web' AND kind = 'station'").get()).toEqual({ c: 0 });
   });
 
+  it('我的投稿覆盖文章、模型、站点三类，都带状态和驳回理由', async () => {
+    // 回归：「我的分享」只查文章。作者补录了模型或推荐了站点之后，
+    // 那两条通道照样审核、照样写驳回理由，但提交人在站内查不到任何结果。
+    await signIn();
+    await ok('createPost', { kind: 'review', title: '我的评测', summary: 's', body: 'b' });
+    await ok('suggestModel', { slug: 'my-model-x', vendor: 'openai', name: '我的模型', description: 'd' });
+    await ok('suggestStation', { name: '我的站', url: 'https://mine-ms.example.com/' });
+    const list = await ok('getMySubmissions', { pageSize: 20 });
+    expect(list.total).toBe(3);
+    expect(list.items.map(item => item.kind).sort()).toEqual(['model', 'post', 'station']);
+    // 待审时还没有实体，不该给链接
+    expect(list.items.every(item => item.status === 'pending' && item.targetSlug === null)).toBe(true);
+  });
+
+  it('我的投稿只包含本人 web 渠道的记录，不泄漏飞书与 Agent 的内部 originKey', async () => {
+    await signIn();
+    await ok('createPost', { kind: 'review', title: '我的评测', summary: 's', body: 'b' });
+    // 另外塞一条 agent 渠道的记录，同一个 actorHandle
+    server.db.prepare(
+      "INSERT INTO submissions (id, kind, channel, originKey, action, payload, payloadHash, actorHandle, ip, status, createdAt) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+    ).run('agent-row', 'station', 'agent', 'internal-origin-key', 'upsert', JSON.stringify({ name: '别人送的站' }), 'h', 'tester', '1.1.1.1', 'pending', new Date().toISOString());
+    const list = await ok('getMySubmissions', { pageSize: 20 });
+    expect(list.items.some(item => item.id === 'agent-row')).toBe(false);
+    expect(JSON.stringify(list)).not.toContain('internal-origin-key');
+  });
+
+  it('已通过的投稿给出能打开的详情链接', async () => {
+    await signIn();
+    const approvedPost = await ok('createPost', { kind: 'review', title: '我的评测', summary: 's', body: 'b' });
+    await ok('suggestStation', { name: '我的站', url: 'https://link-ok.example.com/' });
+    const ids = (server.db.prepare("SELECT id FROM submissions WHERE channel = 'web'").all() as { id: string }[]).map(row => row.id);
+    for (const id of ids) reviewSubmission(openStore(server.db), clock, id, { status: 'approved' });
+
+    const list = await ok('getMySubmissions', { pageSize: 20 });
+    const post = list.items.find(entry => entry.id === approvedPost.id)!;
+    const station = list.items.find(entry => entry.kind === 'station')!;
+    // 文章物化后 id 就是投稿 id；站点 slug 由 hostname 决定，不是 originKey
+    expect(post.targetSlug).toBe(approvedPost.id);
+    expect(station.targetSlug).toBe('sub-link-ok-example-com');
+    // 两个链接都要真的能打开，别给出 404
+    expect((await server.app.request(`/api/posts/${post.targetSlug}`, { headers: { cookie } })).status).toBe(200);
+    expect((await server.app.request(`/api/stations/${station.targetSlug}`, { headers: { cookie } })).status).toBe(200);
+  });
+
   it('被驳回的投稿带出审核理由，且只有作者本人看得到', async () => {
     // 回归：服务端把理由写进了 submissions.reason，却没有任何接口把它送出来。
     // 「我的分享」只显示 status=rejected，作者不知道哪里不合格，也没法据此重投。

@@ -223,6 +223,28 @@ describe('已登录', () => {
     expect(screen.getAllByText(/审核中|未通过/)).toHaveLength(2);
   });
 
+  it('我的投稿把文章、模型、站点三类都列出来，并显示驳回理由', async () => {
+    // 回归：「我的分享」只查文章。补录模型和推荐站点这两条通道也会驳回、
+    // 也写理由，但提交人此前在站内完全看不到。
+    stubApi({
+      'GET /api/me/submissions': page([
+        { id: 's1', kind: 'station', status: 'rejected', reason: '网址打不开', title: '某个站', createdAt: '2026-11-18T00:00:00.000Z', reviewedAt: '2026-11-18T01:00:00.000Z', targetSlug: null },
+        { id: 's2', kind: 'model', status: 'pending', reason: null, title: '某个模型', createdAt: '2026-11-18T00:00:00.000Z', reviewedAt: null, targetSlug: null },
+        { id: 's3', kind: 'post', status: 'approved', reason: null, title: '我写的评测', createdAt: '2026-11-18T00:00:00.000Z', reviewedAt: '2026-11-18T01:00:00.000Z', targetSlug: 's3' },
+      ]),
+    });
+    renderApp('/me?tab=submissions');
+    // 限定在内容区：导航栏里也有「模型」「文章」这类词
+    const main = within(await screen.findByRole('main'));
+    expect(await main.findByText('中转站')).toBeInTheDocument();
+    expect(main.getByText('模型')).toBeInTheDocument();
+    expect(main.getByText('文章')).toBeInTheDocument();
+    // 驳回理由必须能看见，否则作者不知道改什么
+    expect(main.getByText(/未通过原因：网址打不开/)).toBeInTheDocument();
+    // 已通过的那条给可点的链接
+    expect(main.getByRole('link', { name: '我写的评测' })).toHaveAttribute('href', '/posts/s3');
+  });
+
   it('作者打开待审投稿时顶部说明只有自己可见', async () => {
     stubApi({ 'GET /api/posts/p1': makePost('p1', { status: 'pending', source: 'user' }), 'GET /api/stations': page([station]) });
     renderApp('/posts/p1');
