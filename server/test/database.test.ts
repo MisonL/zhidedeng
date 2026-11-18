@@ -5,6 +5,9 @@ import { spawnSync } from 'node:child_process';
 import { describe, expect, it } from 'vitest';
 import { createApp, defaultDbPath, openDatabase, openStore } from '../src/node-app.ts';
 
+/** 测试口令用常量：username/password 相邻字面量会被 GitGuardian 当成硬编码凭据（已误报三次）。 */
+const PASSWORD = 'correct-horse-battery';
+
 describe('实体版本号与派生缓存', () => {
   const station = (slug: string, overrides: Record<string, unknown> = {}) => ({
     slug, name: slug, url: `https://${slug}.example.com/`, description: 'd', source: 'agent' as const,
@@ -74,7 +77,7 @@ describe('database initialization and persistence', () => {
     let server = createApp({ dbPath, now });
     try {
       const json = { 'content-type': 'application/json' };
-      const registered = await server.app.request('/api/auth/register', { method: 'POST', headers: json, body: JSON.stringify({ username: 'db_tester', password: 'correct-horse-battery' }) });
+      const registered = await server.app.request('/api/auth/register', { method: 'POST', headers: json, body: JSON.stringify({ username: 'db_tester', password: PASSWORD }) });
       const headers = { ...json, cookie: registered.headers.get('set-cookie')!.split(';')[0] };
       const post = await server.app.request('/api/posts', { method: 'POST', headers, body: JSON.stringify({ kind: 'guide', title: '可恢复的写入', summary: '重启后仍能读取', body: '# 保留\n\n测试正文' }) });
       expect(post.status).toBe(200);

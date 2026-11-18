@@ -398,7 +398,9 @@ export class Service {
     // 再把 entities 加进来会把同一篇算两次，10 篇/小时实际只剩 5 篇。
     const hourAgo = new Date(this.now().getTime() - 3_600_000).toISOString();
     return Number(this.store.db.prepare(
-      "SELECT count(*) AS count FROM submissions WHERE kind IN ('post','model') AND channel = 'web' AND actorHandle = ? AND createdAt > ?",
+      // station 也要数：站内推荐新站走同一个队列，漏掉它等于给了一条
+      // 不受限流和待审配额约束的通道（实测同一账号能连推 25 条，全部入队）。
+      "SELECT count(*) AS count FROM submissions WHERE kind IN ('post','model','station') AND channel = 'web' AND actorHandle = ? AND createdAt > ?",
     ).get(this.user, hourAgo)!.count);
   }
 
@@ -408,7 +410,7 @@ export class Service {
   private pendingOwnPosts(): number {
     // 同上：pending 只可能出现在队列里，物化后的状态就是 approved。
     return Number(this.store.db.prepare(
-      "SELECT count(*) AS count FROM submissions WHERE kind IN ('post','model') AND channel = 'web' AND actorHandle = ? AND status = 'pending'",
+      "SELECT count(*) AS count FROM submissions WHERE kind IN ('post','model','station') AND channel = 'web' AND actorHandle = ? AND status = 'pending'",
     ).get(this.user)!.count);
   }
 

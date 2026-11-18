@@ -2,6 +2,11 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { CurrentUser, Post, StationDetail } from '@zhidedeng/shared';
 import { createApp } from '../src/node-app.ts';
 
+// 故意写错的测试口令也提到常量：username/password 相邻字面量会被 GitGuardian
+// 当成硬编码凭据，哪怕是 '1234567' 这种一眼假的（已误报三次）。
+const SHORT_PASSWORD = '1234567';
+const WRONG_PASSWORD = 'wrong-password';
+
 const json = { 'content-type': 'application/json' };
 const PASSWORD = 'correct-horse-battery';
 
@@ -83,7 +88,7 @@ describe('注册', () => {
     ['用户名太长', { username: 'a'.repeat(21), password: PASSWORD }],
     ['用户名含连字符（防撞种子用户）', { username: 'demo-pedal', password: PASSWORD }],
     ['用户名含中文', { username: '爱丽丝', password: PASSWORD }],
-    ['密码不足 8 位', { username: 'alice', password: '1234567' }],
+    ['密码不足 8 位', { username: 'alice', password: SHORT_PASSWORD }],
     ['多余字段', { username: 'alice', password: PASSWORD, tokens: 999 }],
   ])('拒绝%s', async (_name, body) => {
     const response = await browser().call('POST', '/api/auth/register', body);
@@ -184,7 +189,7 @@ describe('登录与登出', () => {
   it('只信任本机反代的 X-Forwarded-For：直连方不是本机时用真实地址', async () => {
     await browser().register('alice');
     const env = { incoming: { socket: { remoteAddress: '198.51.100.7' } } };
-    const attempt = (forged: string) => server.app.request('/api/auth/login', { method: 'POST', headers: { ...json, 'x-forwarded-for': forged }, body: JSON.stringify({ username: 'alice', password: 'wrong-password' }) }, env);
+    const attempt = (forged: string) => server.app.request('/api/auth/login', { method: 'POST', headers: { ...json, 'x-forwarded-for': forged }, body: JSON.stringify({ username: 'alice', password: WRONG_PASSWORD }) }, env);
     for (let index = 0; index < 5; index++) await attempt(`10.0.0.${index}`);
     expect((await attempt('10.0.0.99')).status).toBe(429);
   }, 30_000);

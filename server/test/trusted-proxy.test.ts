@@ -2,6 +2,9 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../src/node-app.ts';
 import { isTrustedProxy, normalizeIp } from '../src/app.ts';
 
+// 占位口令用常量，避免 username/password 相邻字面量被当成硬编码凭据。
+const DUMMY_PASSWORD = 'y';
+
 const json = { 'content-type': 'application/json' };
 // 复用 auth.test.ts 的约定。之前这里写了一个大小写+数字+符号的字面量，
 // 被 GitGuardian 当成真实口令告警——测试夹具不该长得像真凭据。
@@ -90,7 +93,7 @@ describe('无请求体的写接口', () => {
     const server = createApp({ dbPath: ':memory:', now: () => clock });
     const response = await server.app.request('/api/auth/login', {
       method: 'POST',
-      body: JSON.stringify({ username: 'x', password: 'y' }),
+      body: JSON.stringify({ username: 'x', password: DUMMY_PASSWORD }),
     }, { incoming: { socket: { remoteAddress: '127.0.0.1' } } });
     expect(response.status).toBe(415);
   });

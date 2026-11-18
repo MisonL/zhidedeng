@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, statSync } from 'node:fs';
+import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -429,5 +429,34 @@ describe('管理员重置密码', () => {
     // 与其它管理接口一致：密钥不对是 403，不是 404——404 留给「用户名不存在」。
     const reset = await resetAdmin({ username: 'target_user', newPassword: NEXT_PASSWORD }, 'wrong-token');
     expect(reset.status).toBe(403);
+  });
+});
+
+describe('仓库卫生', () => {
+  it('测试里不出现 username/password 相邻字面量（GitGuardian 会判成硬编码凭据）', () => {
+    // 这类误报已经来过三次（ff32468 / dbb5ffd / 我加「推荐新站」测试那次）。
+    // 每次都是「拿一个本意无害的测试口令，但写成 { username: 'x', password: 'y' } 这种
+    // 相邻形态」。约定是提到常量（见本文件顶部 PASSWORD），这里把它钉死：
+    // 以后谁再这么写，这条测试直接红，不用等邮件通知。
+    const roots = ['server/test', 'web/test', 'shared/test', 'scripts/test'];
+    const offenders: string[] = [];
+    const walk = (dir: string) => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const path = join(dir, entry.name);
+        if (entry.isDirectory()) { walk(path); continue; }
+        if (!/\.(ts|tsx)$/.test(entry.name)) continue;
+        // 跳过本测试自己：它的正则源码里就含 `password: '` 这样的字面量，
+        // 不排除的话会自己报自己。
+        if (path.endsWith('hardening.test.ts')) continue;
+        for (const [index, line] of readFileSync(path, 'utf8').split('\n').entries()) {
+          // 只看同一行里 username 与 password（或 currentPassword/newPassword）都跟了字面量
+          const pair = /username:\s*'[^']*'[\s\S]{0,80}?password:\s*'[^']*'|password:\s*'[^']*'[\s\S]{0,80}?username:\s*'[^']*'/;
+          // 常量不算：password: PASSWORD 没有引号，不会命中
+          if (pair.test(line)) offenders.push(`${path}:${index + 1}`);
+        }
+      }
+    };
+    for (const root of roots) walk(join(process.cwd(), '..', root));
+    expect(offenders).toEqual([]);
   });
 });
