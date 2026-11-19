@@ -1,4 +1,4 @@
-import type { ContentSource, PostKind, StationStatus } from '@zhidedeng/shared';
+import type { ContentSource, PostKind, RateBasis, StationStatus } from '@zhidedeng/shared';
 
 export const KIND_LABEL: Record<PostKind, string> = {
   deal: '爆料', review: '评测', community: '社区', guide: '指南',
@@ -33,6 +33,37 @@ export const formatLatency = (ms: number | null) => ms === null ? NOT_AVAILABLE 
 export const formatStatus = (status: StationStatus | null) => status === null ? NOT_AVAILABLE : status === 'running' ? '运行中' : '运行波动';
 
 export const formatRate = (rate: number) => `${rate}x`;
+
+/**
+ * 计价口径的展示名。
+ *
+ * `rate` 只说「相对官方价多少」，不说这个数字怎么来的。输入按量、输出按量、
+ * 打包价、整站混合四种口径下同一个数字含义完全不同，并排放又不标口径，
+ * 会让读者以为是同一件事的四个报价。
+ */
+const RATE_BASIS_LABEL: Record<RateBasis, string> = {
+  blended: '综合',
+  input: '按输入',
+  output: '按输出',
+  package: '打包价',
+};
+export const formatRateBasis = (basis: RateBasis | undefined) => {
+  // 缺字段按综合读（老数据）；但「有值但不是四种之一」只能来自老库的历史脏值
+  // （ALTER 补不上 CHECK），显示成未知口径——默默按综合读会替它编一个口径。
+  if (basis === undefined) return RATE_BASIS_LABEL.blended;
+  return RATE_BASIS_LABEL[basis] ?? '未知口径';
+};
+
+/**
+ * 报价时间。null 表示来源没说，显示成「时间未知」而不是「刚刚」——
+ * 后者是凭空给了一条它没有的信息。
+ */
+export const formatQuotedAt = (iso: string | null | undefined) => {
+  if (!iso) return '时间未知';
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return '时间未知';
+  return formatDate(iso);
+};
 export const formatPercent = (ratio: number) => `${Math.round(ratio * 100)}%`;
 
 // 与服务端日期口径一致；en-CA 输出 YYYY-MM-DD。

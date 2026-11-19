@@ -22,8 +22,10 @@ it('starts the native HTTP entry with PORT and DB_PATH overrides, serves writes,
   child.stderr.on('data', data => { output += String(data); });
   try {
     await new Promise<void>((ready, reject) => {
-      // 该计时器限制服务就绪等待；外层用例也设为 30 秒，提前退出仍会立即报错。
-      const timeout = setTimeout(() => reject(new Error(`启动超时：${output}`)), 30_000);
+      // 该计时器限制服务就绪等待。子进程要加载整棵 src（本机空载约 3s，负载高时
+      // 实测 44s），所以它必须和外层用例的超时一起放宽——只放大外层的话，
+      // 这里仍会在 30s 抛「启动超时」，看上去像服务起不来。
+      const timeout = setTimeout(() => reject(new Error(`启动超时：${output}`)), 110_000);
       child.once('exit', code => { clearTimeout(timeout); reject(new Error(`服务提前退出 ${code}：${output}`)); });
       child.once('error', error => { clearTimeout(timeout); reject(error); });
       child.stdout.on('data', data => {
@@ -53,4 +55,5 @@ it('starts the native HTTP entry with PORT and DB_PATH overrides, serves writes,
     }
   }
   expect(child.exitCode).toBe(0);
-}, 30_000);
+  // 同上：起真实 HTTP 子进程，负载高时需要更久。
+}, 120_000);

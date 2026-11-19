@@ -10,7 +10,7 @@ import PostCard from '../components/PostCard';
 import StationCard from '../components/StationCard';
 import { StationTile } from '../components/visuals';
 import VoteButtons from '../components/VoteButtons';
-import { DISCLAIMER, formatLatency, formatRate, formatStatus, formatUptime, NOT_AVAILABLE, SITE_NOTICE, sourceLabel } from '../format';
+import { DISCLAIMER, formatLatency, formatQuotedAt, formatRate, formatRateBasis, formatStatus, formatUptime, NOT_AVAILABLE, SITE_NOTICE, sourceLabel } from '../format';
 import { useAsync, usePaged } from '../hooks';
 import { useCatalog } from '../state';
 
@@ -117,13 +117,15 @@ export function StationDetailPage() {
               <h2 className="section-title">模型倍率</h2>
               <div className="table-scroll">
                 <table className="data-table data-table-compact">
-                  <thead><tr><th>模型</th><th>厂商</th><th>倍率</th></tr></thead>
+                  <thead><tr><th>模型</th><th>厂商</th><th>倍率</th><th>计价口径</th><th>报价时间</th></tr></thead>
                   <tbody>
                     {station.offers.map((offer) => (
                       <tr key={offer.modelSlug}>
                         <td><Link to={`/models/${offer.modelSlug}`}>{offer.model.name}</Link></td>
                         <td>{vendorBySlug.get(offer.model.vendor)?.name}</td>
                         <td className="num rate-cell">{formatRate(offer.rate)}</td>
+                        <td>{formatRateBasis(offer.basis)}</td>
+                        <td className="num">{formatQuotedAt(offer.quotedAt)}</td>
                       </tr>
                     ))}
                   </tbody>

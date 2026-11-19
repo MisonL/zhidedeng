@@ -1,7 +1,7 @@
 import type {
   AgentToken, Banner, CheckIn, Comment, CommentReply, CommunityRanking, CurrentUser,
   ExpertRanking, FavoriteItem, Model, ModelDetail, ModelRanking, Post, PostKind, PostSummary,
-  ISODateTime, RankingTab, Station, StationDetail, Target, Vendor, VendorWithModels, VoteSummary, VoteValue,
+  ISODateTime, RankingTab, RateBasis, Station, StationDetail, Target, Vendor, VendorWithModels, VoteSummary, VoteValue,
 } from './domain.js';
 
 export interface PaginationQuery {
@@ -147,7 +147,7 @@ export interface CreateAgentStationRequest {
   url: string;
   rechargeThreshold: number | null;
   paymentMethods: string[];
-  offers: { modelSlug: string; rate: number }[];
+  offers: { modelSlug: string; rate: number; basis?: RateBasis; quotedAt?: ISODateTime | null }[];
 }
 export interface CreateAgentPostRequest {
   title: string;
@@ -203,7 +203,7 @@ export interface SuggestStationRequest {
   url: string;
   description?: string;
   /** 每行一个「模型slug=倍率」，由前端拆分后按模型提交。 */
-  offers?: { modelSlug: string; rate: number }[];
+  offers?: { modelSlug: string; rate: number; basis?: RateBasis; quotedAt?: ISODateTime | null }[];
   rechargeThreshold?: number | null;
   paymentMethods?: string[];
 }
@@ -364,7 +364,7 @@ export interface CatalogImportStation {
   url: string;
   rechargeThreshold: number | null;
   paymentMethods: string[];
-  offers: { modelSlug: string; rate: number }[];
+  offers: { modelSlug: string; rate: number; basis?: RateBasis; quotedAt?: ISODateTime | null }[];
 }
 export interface CatalogImportPost {
   recordId: string;

@@ -2,6 +2,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { DatabaseSync } from 'node:sqlite';
 import { describe, expect, it } from 'vitest';
 import { createApp, defaultDbPath, openDatabase, openStore } from '../src/node-app.ts';
 
@@ -48,8 +49,10 @@ describe('database initialization and persistence', () => {
     expect(result.stderr).not.toContain('ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX');
     expect(result.status).toBe(0);
     expect(result.stdout.trim()).toBe('11');
-    // 这条要起一个真实 node 子进程；机器负载高时默认 5 秒不够，会变成偶发失败。
-  }, 30_000);
+    // 这条要起一个真实 node 子进程加载整棵 src。本机实测空载约 3s，
+    // 负载高时（已见 load avg 40+）会到 44s——这是等 I/O，不是被测代码变慢：
+    // 同一个命令在改动前的提交上也是 45s。放长超时免得变成偶发红。
+  }, 120_000);
 
   it('defaults to server/data/app.db', () => {
     expect(defaultDbPath).toBe(resolve('data/app.db'));
@@ -95,5 +98,30 @@ describe('database initialization and persistence', () => {
       server.db.close();
       rmSync(directory, { recursive: true });
     }
+  });
+});
+
+describe('offers 计价口径迁移', () => {
+  it('老库打开时补上 basis/quotedAt，老行按 blended 读', () => {
+    // 建表是 CREATE TABLE IF NOT EXISTS，对已存在的库不生效。老库的 offers
+    // 只有 stationSlug/modelSlug/rate，不补列的话新代码一 SELECT basis 就报错。
+    const path = join(mkdtempSync(join(tmpdir(), 'zdd-offers-')), 'old.db');
+    const legacy = new DatabaseSync(path);
+    legacy.exec(`CREATE TABLE offers (
+      stationSlug TEXT NOT NULL, modelSlug TEXT NOT NULL, rate REAL NOT NULL CHECK(rate > 0),
+      PRIMARY KEY (stationSlug, modelSlug));
+      INSERT INTO offers (stationSlug, modelSlug, rate) VALUES ('s1','m1',0.5);`);
+    legacy.close();
+
+    const db = openDatabase(path);
+    const columns = db.prepare('PRAGMA table_info(offers)').all().map(row => row.name);
+    expect(columns).toContain('basis');
+    expect(columns).toContain('quotedAt');
+    // 老数据不回填：DEFAULT 'blended' 让它们保持原语义。
+    expect(db.prepare('SELECT basis, quotedAt FROM offers WHERE stationSlug = ?').get('s1')).toEqual({ basis: 'blended', quotedAt: null });
+    db.close();
+
+    // 再开一次不应报错（ALTER 只在缺列时执行）
+    expect(() => openDatabase(path).close()).not.toThrow();
   });
 });

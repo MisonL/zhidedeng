@@ -74,6 +74,7 @@ channel 是队列的来源渠道，source 是物化内容的展示来源，二�
 - 只审核 pending，已审核或被替代条目返回 409 ALREADY_REVIEWED。reason 可选、最长 1000 字；物化失败整条回滚，原投稿仍为 pending（`server/src/submissions.ts` 的 `reviewSubmission`、`server/src/node-app.ts` 的事务辅助）
 - 默认自动通过关闭；管理员可持久化开启，队列 upsert 在入队事务中立即物化，下架始终 pending。自动通过只影响管理队列，公开 Agent 入口传 pendingOnly，永远等待人工审核（`server/src/submissions.ts` 的 `enqueueSubmission` 中 `auto` 的判定）。批次入队和整批审核都是逐条事务，部分成功保留，HTTP 200 的 results 中可能含逐条错误（`server/src/app.ts` 的 batch 与 batch-review 路由）
 - 站点身份来自 URL hostname，服务端不信任客户端 originKey；只有飞书批次沿用 www 与裸域归组规则。slug 共用 shared/src/slug.ts，已有同站点沿用 slug，清洗撞车时加哈希后缀（`server/src/submissions.ts` 的 `submissionOriginKey` 与 `stationSlug`）
+- 报价带计价口径与来源时间。`offers.basis` ∈ `blended`（输入输出混算）/ `input` / `output` / `package`，缺省 `blended`；`offers.quotedAt` 是来源给出的报价时间，可为 null 表示来源没说（**不要**用入库时间顶上）。同一个 `rate` 在不同口径下不可比，所以：站点卡片的「低至」只统计 `blended`，没有综合口径报价时为 null 显示「暂无」；模型页报价表先按口径分组再按倍率排序，最低价高亮只在同口径内生效。旧库启动时 `ensureOfferColumns` 自动补两列，老行按 `blended` 读，不回填（`server/src/database.ts`、`server/src/service.ts`、`web/src/format.ts`）。已知限制：主键仍是 `(stationSlug, modelSlug)`，一个站点在一个模型上只能登记一条报价，所以「输入 0.3、输出 0.9」这种双价无法表达成同一模型的两行
 - 站点更新是完整替换信息和报价，空 offers 会清空旧报价，不是「只合并非空字段」。模型报价必须引用已收录模型；同批 pending 模型不能供站点引用。模型投稿只新增，重名 409 MODEL_EXISTS，改名和更换厂商走管理员 PATCH，tags 保留（`server/src/submissions.ts` 的 `materialize`、`server/src/catalog.ts` 的 `updateModel`）
 - 幂等分两种入口，不能混用。管理队列按 kind、规范化 originKey、action、batchId、payloadHash 和状态查重，不按 actorHandle 隔离；默认只对同批 pending 去重，自动通过时也检查仍为最新版本的 approved；新批次相同内容可以重新入队，新 pending 不会替代旧 pending。公开 Agent 入口不接受 batchId，查重键加上 channel 和 actorHandle，因此同一账号不同凭证提交相同 pending 内容也会命中原记录；审结过的内容再提交会产生新 pending（`server/src/submissions.ts` 的 `enqueueSubmission` 查重语句、`server/src/agent-api.ts` 的 `deduplicateByActor`）
 - 批次入口逐条校验业务 payload；单条管理入口在关闭自动通过时主要校验外层、站点 URL 和下架版本，完整业务校验在审核阶段完成。Agent 提交入口则在入队前就以 `stationSchema`/`postSchema` 的 strict 版本校验完整 payload，不接受多余字段（`server/src/submissions.ts` 的 `validatePayload`、`server/src/agent-api.ts` 的 schema 常量）
@@ -87,13 +88,14 @@ channel 是队列的来源渠道，source 是物化内容的展示来源，二�
 - 物化路径（`submissions.ts` 的 `materialize` 与 `catalog.ts` 的运维导入）都要先查软删除标记，已下架的直接跳过。不加这个守卫，下架等于白做：两条路径每次同步都无条件写 `status: 'approved'`，而 `store.put` 会顺手把 `removedAt` 清成 NULL
 - 恢复就是把标记清掉，正文、报价一直是原样留着的；重复下架/恢复返回 409 而不是静默成功
 - 恢复不会回查飞书。「下架时正文是什么，恢复出来就是什么」——服务端没有回读表格的能力，若期间表格里改过内容，恢复出来的是旧版，需要再同步一次才会更新。提示语不宣称「已是最新」
-- 已知边界：同一飞书评价走队列（`sub-<投稿id>`）与走 `/api/admin/import`（`feishu-<recordId>`）会得到**不同的实体 id**。因此下架队列版本后，若运维再跑一次旧式导入，会新建一条 `feishu-<recordId>` 并公开——软删除标记防不住另一条 id。这是两条路径 id 方案不一致的既有问题，不是本次改动引入的；守卫只保证「同一条路径的同一 id 不被复活」。彻底解决要统一两边的 id 派生规则
+- 两条写入路径的 id 派生已经对齐：队列物化与 `/api/admin/import` 都先看有没有同 `originKey` 的已通过投稿——有就沿用 `feishu-<recordId>`（若该实体还在）或用 `sub-<投稿id>`；两边用同一段判定，同一个飞书记录只对应一个实体，软删除才挡得住。此前两条路各按各的规则派生，下架一篇后换个入口同步会另建一篇，实测前台会多出一篇内容相同的新文章
+- 判定「老文章还在不在」一律用 `getWithRemoved`。`store.get` 看不见已下架的行，用它做归属判断会把「已下架」误判成「不存在」，于是换 id 重建——这是上面那个复活漏洞的直接成因（`server/src/submissions.ts` 的 `legacy` 判定、`server/src/catalog.ts` 的文章循环）
 
 ## 页面
 
 ### `/admin` 审核台
 
-待审投稿、待审文章、已下架站点三个页签，支持逐条通过/拒绝、全部通过、一键恢复。
+待审投稿、待审文章、已上线文章、已下架站点、已下架文章五个页签（顺序与页面按钮一致），支持逐条通过/拒绝、全部通过、逐篇下架与恢复。撤回入口只在「已上线文章」里——待审的还没物化，实体不存在，在那里下架必然 404，而作者会以为稿子没了。
 用**管理密钥**进入（`Authorization: Bearer`），不是登录会话——管理接口本来就不在公开契约里。
 
 密钥只写 `sessionStorage`：关掉标签页即失效，不像 `localStorage` 会在公共机器上长期留存。
@@ -152,7 +154,10 @@ channel 是队列的来源渠道，source 是物化内容的展示来源，二�
 | GET | /api/admin/settings | 读取 autoApprove |
 | POST | /api/admin/settings | 设置 autoApprove，持久化到 settings 表 |
 | GET | /api/admin/posts | 必填 status=pending/approved/rejected，列出对应文章 |
-| POST | /api/admin/posts/:id/review | 调整非 submission 来源文章状态；群友来源仍 409 MANAGED_BY_SOURCE |
+| POST | /api/admin/posts/:id/review | 调整文章审核状态；群友来源传 rejected 等于下架它（不再返回 409 MANAGED_BY_SOURCE） |
+| POST | /api/admin/posts/:id/withdraw | 下架一篇已发布文章（软删除），前台立刻不可见；演示数据 409 |
+| POST | /api/admin/posts/:id/restore | 恢复已下架文章，只清软删除标记 |
+| GET | /api/admin/posts/removed | 已下架文章列表，含下架时间 |
 | POST | /api/admin/comments/:id/hide | hidden=true/false，隐藏父评论时回复也不公开 |
 | POST | /api/admin/users/:handle/disable | disabled=true/false，按用户名查账号；禁用时删除会话，公开内容保留 |
 
@@ -186,7 +191,7 @@ channel 是队列的来源渠道，source 是物化内容的展示来源，二�
 - `GET /me/favorites`、`GET /me/posts`
 - `GET /me/submissions` —— 「我的投稿」：文章、模型、站点三类统一返回，带状态与驳回理由；已通过的给出可点的详情链接。此前补录模型和推荐站点这两条通道的审核结果，提交人完全看不到
 - `GET /vendors`（含 models 摘要）
-- `GET /models?vendor=&q=`、`GET /models/:slug`（含 offers：各站倍率，按倍率升序）
+- `GET /models?vendor=&q=`、`GET /models/:slug`（含 offers：各站倍率，先按计价口径分组、组内按倍率升序；每条带 `basis` 与可为 null 的 `quotedAt`）
 - `GET /stations?vendor=&sort=score|rate|uptime&q=`、`GET /stations/:slug`（含 offers、指标、投票汇总、当前用户投票与收藏状态）
 - `GET /posts?kind=&vendor=&station=&model=&sort=latest|hot&q=`、`GET /posts/:id`、`POST /posts`（kind、title、summary、body、stationSlug?、modelSlug?）
 - `POST /models/suggest`（slug、vendor、name、description）—— 站内补录模型，与 Agent 通道同一套字段，进同一个待审队列

@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import type { FormEvent } from 'react';
 import { useNavigate, useSearchParams } from 'react-router';
-import type { PostKind } from '@zhidedeng/shared';
+import type { PostKind, RateBasis } from '@zhidedeng/shared';
 import { api } from '../api';
 import Markdown from '../components/Markdown';
 import { Empty } from '../components/AsyncView';
@@ -39,7 +39,7 @@ export default function Submit() {
   const [modelForm, setModelForm] = useState({ slug: '', vendor: '', name: '', description: '' });
   // 推荐站点同理。报价是可选的：推荐人常常只知道站名和网址，
   // 倍率由审核时补，不该因此挡住「先让这个站被收录」。
-  const [stationForm, setStationForm] = useState({ name: '', url: '', description: '', rate: '' });
+  const [stationForm, setStationForm] = useState({ name: '', url: '', description: '', rate: '', basis: 'blended' });
   const [errors, setErrors] = useState<Partial<typeof REQUIRED>>({});
   const [serverError, setServerError] = useState<string>();
   const [submitting, setSubmitting] = useState(false);
@@ -88,7 +88,12 @@ export default function Submit() {
         await api.suggestStation({
           name, url,
           ...(stationForm.description.trim() ? { description: stationForm.description.trim() } : {}),
-          ...(stationForm.rate.trim() ? { offers: [{ modelSlug: stationForm.rate.trim().split('=')[0], rate: Number(stationForm.rate.trim().split('=')[1]) }] } : {}),
+          ...(stationForm.rate.trim() ? { offers: [{
+            modelSlug: stationForm.rate.trim().split('=')[0]!,
+            rate: Number(stationForm.rate.trim().split('=')[1]),
+            // 不带口径的报价会和别的口径混在一起比大小，推荐时能选就别留空。
+            basis: stationForm.basis as RateBasis,
+          }] } : {}),
         });
         me.refreshMe();
         toast('已提交，审核通过后进入中转站库');
@@ -204,6 +209,20 @@ export default function Submit() {
               <label className="field-label" htmlFor="station-rate">报价倍率（可选）</label>
               <input id="station-rate" placeholder="例如 gpt-4-1=0.5" value={stationForm.rate} onChange={event => setStationForm({ ...stationForm, rate: event.target.value })} />
               <p className="hint">格式「模型slug=倍率」。不确定就留空，审核时再补。</p>
+            </div>
+            <div className="field">
+              <label className="field-label" htmlFor="station-basis">计价口径</label>
+              <select
+                id="station-basis"
+                value={stationForm.basis}
+                onChange={event => setStationForm({ ...stationForm, basis: event.target.value })}
+              >
+                <option value="blended">综合倍率（输入输出混算）</option>
+                <option value="input">按输入计价</option>
+                <option value="output">按输出计价</option>
+                <option value="package">打包价</option>
+              </select>
+              <p className="hint">不同口径的倍率不能直接比大小，选错会让榜上的排序失真。</p>
             </div>
           </>
         )}

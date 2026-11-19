@@ -125,6 +125,9 @@ const RESERVED_NICKNAMES = new Set([
   '官方', '管理员', 'admin', 'administrator', '客服', '版主', '小编', '系统',
 ]);
 
+/** 报价表的展示顺序：综合在前，其余按「谁更常被拿来比」排。 */
+const BASIS_ORDER = ['blended', 'input', 'output', 'package'];
+
 export class Service {
   readonly store: Store;
   readonly now: () => Date;
@@ -211,7 +214,12 @@ export class Service {
       ? (prefetched.get(record.slug) ?? emptyInteraction())
       : this.interaction({ targetType: 'station', targetId: record.slug });
     const offers = this.offersByStation().get(record.slug) ?? [];
-    const lowestRate = offers.length ? Math.min(...offers.map(offer => offer.rate)) : null;
+    // 最低倍率只算综合口径。按输入 0.3 和打包价 0.5 取 min 得到 0.3，
+    // 卡片上就成了「低至 0.3x」——那是个只对输入 token 成立的数字，
+    // 和「整站最低价」不是一回事。榜单的 1/lowestRate 加分同理。
+    // 没有任何综合口径报价时返回 null（显示「暂无报价」），而不是拿别的口径冒充。
+    const blended = offers.filter(offer => (offer.basis ?? 'blended') === 'blended');
+    const lowestRate = blended.length ? Math.min(...blended.map(offer => offer.rate)) : null;
     const score = record.uptime === null ? null : Number((record.uptime * 0.6 + (interaction.votes.total ? interaction.votes.upRatio : 0.5) * 30 + (1 / (lowestRate ?? 1)) * 3).toFixed(2));
     return { ...record, ...interaction, lowestRate, score };
   }
@@ -250,7 +258,9 @@ export class Service {
     // 只算在线站点的报价。下架是软删除，报价行仍在库里（恢复时要原样拿回来），
     // 但不能让它们继续参与最低倍率、榜单和模型页的统计。
     return this.cachedOffers ??= this.store.db.prepare(
-      "SELECT offer.stationSlug, offer.modelSlug, offer.rate FROM offers AS offer JOIN entities AS station ON station.kind = 'station' AND station.id = offer.stationSlug WHERE station.removedAt IS NULL",
+      `SELECT offer.stationSlug, offer.modelSlug, offer.rate, offer.basis, offer.quotedAt
+       FROM offers AS offer JOIN entities AS station ON station.kind = 'station' AND station.id = offer.stationSlug
+       WHERE station.removedAt IS NULL`,
     ).all() as unknown as StationOffer[];
   }
 
@@ -270,8 +280,16 @@ export class Service {
     })();
   }
 
+  /**
+   * 有没有足够多的**可比**报价。
+   *
+   * 门槛原本只数条数。但「按输入 0.1」这类报价条数达标却算不出最低倍率
+   * （`lowestRate` 只统计综合口径），于是这个站被分进「达标组」、倍率是 null，
+   * 在 ?sort=rate 里排到真正有 0.5x 的站前面——一个没有可比价格的站排第一。
+   * 所以门槛也按综合口径数。
+   */
   private hasEnoughOffersForRate(offers: StationOffer[]): boolean {
-    return offers.length >= MIN_OFFERS_FOR_RATE;
+    return offers.reduce((count, offer) => count + Number((offer.basis ?? 'blended') === 'blended'), 0) >= MIN_OFFERS_FOR_RATE;
   }
 
   /**
@@ -588,7 +606,12 @@ export class Service {
     // 实测报价条数达到阈值以上，预取才开始划算。
     const ratedStations = this.offers().reduce((count, offer) => count + Number(offer.modelSlug === slug), 0);
     const interactions = ratedStations >= PREFETCH_MIN_ROWS ? this.interactionMap('station') : null;
-    const offers = this.offers().filter(o => o.modelSlug === slug).sort((a, b) => a.rate - b.rate)
+    // 先按口径分组、组内再按倍率排。只按 rate 排会把「按输入 0.3」排在
+    // 「综合 0.5」前面，而这两个数字不可比——榜上第一行会被误读成「最便宜」。
+    // 综合口径排最前（它能代表整站常态），其余按固定顺序。
+    const basisRank = (basis: string | undefined) => BASIS_ORDER.indexOf(basis ?? 'blended');
+    const offers = this.offers().filter(o => o.modelSlug === slug)
+      .sort((a, b) => basisRank(a.basis) - basisRank(b.basis) || a.rate - b.rate)
       // 站点已被下架时报价不该出现；用 filter 兜底而不是非空断言，
       // 一条孤儿报价不能把整个模型页变成 500。
       .flatMap(o => { const station = this.store.get('station', o.stationSlug); return station ? [{ ...o, station: this.station(station, interactions ?? undefined) }] : []; });
@@ -614,8 +637,12 @@ export class Service {
       items.sort((a, b) => {
         const aOffers = offersByStation.get(a.slug) ?? [];
         const bOffers = offersByStation.get(b.slug) ?? [];
+        // 没有综合口径报价的站（lowestRate === null）无条件排在最后：
+        // 它没有能和别人比较的价格，放在前面等于替读者主张「这站最便宜」。
+        const aRate = a.lowestRate, bRate = b.lowestRate;
+        if (aRate === null || bRate === null) return Number(bRate !== null) - Number(aRate !== null);
         return Number(this.hasEnoughOffersForRate(bOffers)) - Number(this.hasEnoughOffersForRate(aOffers))
-          || (a.lowestRate ?? Infinity) - (b.lowestRate ?? Infinity);
+          || aRate - bRate;
       });
     } else {
       items.sort((a, b) => query.sort === 'uptime' ? descendingNullsLast(a.uptime, b.uptime) : descendingNullsLast(a.score, b.score));
@@ -626,7 +653,10 @@ export class Service {
   getStation(slug: string): StationDetail {
     const station = this.store.get('station', slug);
     if (!station) throw new ApiError(404, 'NOT_FOUND', '中转站不存在');
-    return { ...this.station(station), offers: this.offers().filter(o => o.stationSlug === slug).sort((a, b) => a.rate - b.rate)
+    // 和模型页同一套：先按口径分组再按倍率。只按 rate 排会把「按输入 0.3」
+    // 排在「综合 0.5」上面，读者看到的第一个数字就是个不可比的局部价。
+    return { ...this.station(station), offers: this.offers().filter(o => o.stationSlug === slug)
+      .sort((a, b) => BASIS_ORDER.indexOf(a.basis ?? 'blended') - BASIS_ORDER.indexOf(b.basis ?? 'blended') || a.rate - b.rate)
       .flatMap(o => { const model = this.store.get('model', o.modelSlug); return model ? [{ ...o, model }] : []; }) };
   }
 
@@ -768,22 +798,34 @@ export class Service {
       // 一次分组算出「每个模型的报价条数与最低倍率」，而不是对每个模型都
       // filter 一遍全部报价（那是 O(模型数×报价数)：500 站时 34 次 filter 占 215ms）。
       // 这里只需要条数和最小值，没必要把匹配的数组留下来。
-      const stats = new Map<string, { count: number; lowest: number }>();
+      // count 数所有口径（它表示「有多少站在报这个模型」），但 lowest 只算综合口径——
+      // 模型榜的 1/lowestRate 是加分项，混入口径后「按输入 0.1」的站会把整模型顶上去，
+      // 而那个数字只对输入 token 成立。没有任何综合口径报价时 lowest 保持 Infinity，
+      // 下面据此返回 null（而不是 Infinity 泄漏到 JSON 里）。
+      // count 数全部口径（它是「多少站在报这个模型」，展示用）；
+      // blendedCount 数综合口径，门槛与最低倍率都只认它——两处口径必须一致，
+      // 否则会出现「够格参与低价加成、却算不出可比最低价」的自相矛盾状态。
+      const stats = new Map<string, { count: number; blendedCount: number; lowest: number }>();
       for (const offer of this.offers()) {
+        const blended = (offer.basis ?? 'blended') === 'blended';
         const current = stats.get(offer.modelSlug);
-        if (current === undefined) stats.set(offer.modelSlug, { count: 1, lowest: offer.rate });
-        else {
+        if (current === undefined) {
+          stats.set(offer.modelSlug, { count: 1, blendedCount: blended ? 1 : 0, lowest: blended ? offer.rate : Number.POSITIVE_INFINITY });
+        } else {
           current.count += 1;
-          if (offer.rate < current.lowest) current.lowest = offer.rate;
+          if (blended) {
+            current.blendedCount += 1;
+            if (offer.rate < current.lowest) current.lowest = offer.rate;
+          }
         }
       }
       const items = this.store.all('model').map(model => {
         const stat = stats.get(model.slug);
         return {
           rank: 0, model,
-          lowestRate: stat ? stat.lowest : null,
+          lowestRate: stat && Number.isFinite(stat.lowest) ? stat.lowest : null,
           stationCount: stat ? stat.count : 0,
-          rateEligible: (stat?.count ?? 0) >= MIN_OFFERS_FOR_RATE,
+          rateEligible: (stat?.blendedCount ?? 0) >= MIN_OFFERS_FOR_RATE,
         };
       });
       // 至少三个站点报价才启用低价加成，避免单条低价决定榜单。

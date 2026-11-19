@@ -1,6 +1,6 @@
 import { z, ZodError } from 'zod';
 import { MAX_RATE, MIN_RATE } from '@zhidedeng/shared';
-import { adminSlug, httpUrl, offerRate } from '@zhidedeng/shared/submission';
+import { adminSlug, httpUrl, offerRate, rateBasis } from '@zhidedeng/shared/submission';
 import type {
   AdminCreateModelRequest, AdminCreateVendorRequest, AdminDeleteModelResponse, AdminUpdateModelRequest,
   CatalogImportRequest, CatalogImportResponse, Model, Vendor,
@@ -24,7 +24,16 @@ const importSchema: z.ZodType<CatalogImportRequest> = z.strictObject({
     url: httpUrl,
     rechargeThreshold: z.number().min(0).nullable(),
     paymentMethods: z.array(singleLine(20)).max(10),
-    offers: z.array(z.strictObject({ modelSlug: singleLine(200), rate: offerRate })).max(100),
+    // basis 与 quotedAt 必须放进来：写入 SQL 早就带这两列了，schema 不放行的话
+    // 运维带上口径会被当成未知字段整条拒掉，库里的口径永远是默认值。
+    offers: z.array(z.strictObject({
+      modelSlug: singleLine(200),
+      rate: offerRate,
+      // 用 shared 的 rateBasis，别在这里另写一份 enum：两处枚举一旦不同步，
+      // 同一个值会出现「导入接受、Agent 提交被拒」这种查不出原因的漂移。
+      basis: rateBasis.optional(),
+      quotedAt: z.iso.datetime({ offset: true }).nullish(),
+    })).max(100),
   })),
   posts: z.array(z.strictObject({
     recordId: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/),
@@ -47,7 +56,7 @@ const importSchema: z.ZodType<CatalogImportRequest> = z.strictObject({
 function submissionFingerprint(store: Store) {
   return JSON.stringify([
     store.db.prepare(`SELECT kind, id, data FROM entities WHERE ${IS_SUBMISSION} ORDER BY kind, id`).all(),
-    store.db.prepare(`SELECT stationSlug, modelSlug, rate FROM offers WHERE stationSlug IN ${SUBMITTED_STATIONS} ORDER BY stationSlug, modelSlug`).all(),
+    store.db.prepare(`SELECT stationSlug, modelSlug, rate, basis, quotedAt FROM offers WHERE stationSlug IN ${SUBMITTED_STATIONS} ORDER BY stationSlug, modelSlug`).all(),
   ]);
 }
 
@@ -125,10 +134,20 @@ function importCatalog(store: Store, input: CatalogImportRequest): CatalogImport
       });
     }
     for (const offer of offers) {
-      store.db.prepare('INSERT INTO offers (stationSlug, modelSlug, rate) VALUES (?, ?, ?)').run(offer.stationSlug, offer.modelSlug, offer.rate);
+      store.db.prepare("INSERT INTO offers (stationSlug, modelSlug, rate, basis, quotedAt) VALUES (?, ?, ?, ?, ?)")
+        .run(offer.stationSlug, offer.modelSlug, offer.rate, offer.basis ?? 'blended', offer.quotedAt ?? null);
     }
     for (const { recordId, authorName, ...post } of input.posts) {
-      const id = `feishu-${recordId}`;
+      // id 必须和队列物化那条路径算得一样，否则同一个飞书记录会对应两个实体。
+      // 队列物化优先沿用 `feishu-<recordId>`，那条不在了才用 `sub-<投稿id>`；
+      // 这里反过来：有已通过的投稿就用它的 id，没有才退回 `feishu-<recordId>`。
+      // 两边都收敛到同一个 id，软删除才挡得住——实测先队列后导入时，
+      // 下架的那篇会以另一个 id 重新出现。
+      const approved = store.db.prepare(
+        "SELECT id FROM submissions WHERE kind = 'post' AND channel = 'feishu' AND originKey = ? AND status = 'approved' ORDER BY rowid LIMIT 1",
+      ).get(recordId) as { id: string } | undefined;
+      const legacyId = `feishu-${recordId}`;
+      const id = approved && !store.getWithRemoved('post', legacyId) ? `sub-${approved.id}` : legacyId;
       // 管理员下架过的文章不能被下一次导入复活。上面那句 DELETE 带 `removedAt IS NULL`，
       // 已下架的行走不到，于是这份 put 会把标记清掉、文章原样回来——下架等于白做。
       // 走 submissions 队列的那条物化路径有同样的守卫（见 submissions.ts 的 materialize），

@@ -29,7 +29,7 @@ const GROUPS: { title: string; routes: Partial<Record<ApiRouteName, { summary: s
     routes: {
       getVendors: { summary: '厂商列表，含模型摘要' },
       getModels: { summary: '模型列表', params: 'query: vendor, q, page, pageSize' },
-      getModel: { summary: '模型详情，offers 为各站倍率，按倍率升序' },
+      getModel: { summary: '模型详情，offers 为各站倍率，先按计价口径分组、组内按倍率升序；含 basis 与 quotedAt' },
     },
   },
   {

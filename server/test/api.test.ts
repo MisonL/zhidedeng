@@ -268,6 +268,55 @@ describe('writes and boundary validation', () => {
     expect(server.db.prepare("SELECT count(*) AS c FROM submissions WHERE channel = 'web' AND kind = 'station'").get()).toEqual({ c: 0 });
   });
 
+  it('报价带计价口径与来源时间，缺省按综合倍率读', async () => {
+    // 回归：rate 只说「相对官方价多少」，不说这个数字怎么来的。输入按量、
+    // 输出按量、打包价、综合四种口径下同一个数字含义完全不同，而榜单把
+    // 「数字越小越便宜」当成普适结论——那条结论只有在同一口径内成立。
+    await signIn();
+    // 演示种子已经给这几个模型挂了综合口径报价，不先清掉就测不出「只算综合口径」
+    // ——那样断言即使代码没改对也会通过。
+    server.db.prepare("DELETE FROM offers WHERE modelSlug IN ('deepseek-chat','deepseek-reasoner','deepseek-coder')").run();
+    await request('suggestStation', {
+      name: '口径测试站', url: 'https://basis.example.com/',
+      offers: [
+        { modelSlug: 'deepseek-chat', rate: 0.3, basis: 'input' },
+        { modelSlug: 'deepseek-reasoner', rate: 0.45, basis: 'output', quotedAt: '2026-11-01T00:00:00.000Z' },
+        { modelSlug: 'deepseek-coder', rate: 0.6 },
+      ],
+    });
+    // 这个文件建 app 时没配 syncToken，管理接口用不了。直接查库拿投稿 id。
+    const pending = server.db.prepare("SELECT id FROM submissions WHERE kind = 'station' AND status = 'pending' ORDER BY rowid DESC LIMIT 1").get() as { id: string };
+    reviewSubmission(openStore(server.db), clock, pending.id, { status: 'approved' });
+
+    const detail = await (await server.app.request('/api/stations/sub-basis-example-com')).json() as {
+      lowestRate: number | null;
+      offers: { modelSlug: string; rate: number; basis: string; quotedAt: string | null }[];
+    };
+    const byModel = new Map(detail.offers.map(offer => [offer.modelSlug, offer]));
+    expect(byModel.get('deepseek-chat')).toMatchObject({ basis: 'input', quotedAt: null });
+    expect(byModel.get('deepseek-reasoner')).toMatchObject({ basis: 'output', quotedAt: '2026-11-01T00:00:00.000Z' });
+    // 不给 basis 的老写法必须落到 blended，而不是变成 undefined 让前端崩
+    expect(byModel.get('deepseek-coder')).toMatchObject({ basis: 'blended', quotedAt: null });
+    // 「低至 x」只认综合口径。三条报价里最低的是按输入的 0.3，但那个数只对
+    // 输入 token 成立；拿它当整站最低价挂到卡片上，是把局部价冒充成整体价。
+    expect(detail.lowestRate).toBe(0.6);
+    // 详情页的报价表也得先按口径分组：只按 rate 排的话第一行是按输入的 0.3，
+    // 读者第一眼看到的是个不可比的局部价。
+    expect(detail.offers.map(offer => offer.basis)).toEqual(['blended', 'input', 'output']);
+  });
+
+  it('只有非综合口径报价时，最低倍率显示「暂无」而不是拿别的口径冒充', async () => {
+    await signIn();
+    await request('suggestStation', {
+      name: '纯输入价站', url: 'https://input-only.example.com/',
+      offers: [{ modelSlug: 'deepseek-chat', rate: 0.2, basis: 'input' }],
+    });
+    const pending = server.db.prepare("SELECT id FROM submissions WHERE kind = 'station' AND status = 'pending' ORDER BY rowid DESC LIMIT 1").get() as { id: string };
+    reviewSubmission(openStore(server.db), clock, pending.id, { status: 'approved' });
+    const detail = await (await server.app.request('/api/stations/sub-input-only-example-com')).json() as { lowestRate: number | null };
+    expect(detail.lowestRate).toBeNull();
+  });
+
   it('我的投稿覆盖文章、模型、站点三类，都带状态和驳回理由', async () => {
     // 回归：「我的分享」只查文章。作者补录了模型或推荐了站点之后，
     // 那两条通道照样审核、照样写驳回理由，但提交人在站内查不到任何结果。

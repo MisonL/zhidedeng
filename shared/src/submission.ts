@@ -30,6 +30,12 @@ export const offerRate = z.number().refine(rate => rate >= MIN_RATE && rate <= M
 });
 
 /**
+ * 计价口径。同一个 rate 在不同口径下不可比，榜单把「数字越小越便宜」当成
+ * 普适结论是错的——输入价 0.3 和打包价 0.3 说的根本不是一件事。
+ */
+export const rateBasis = z.enum(['blended', 'input', 'output', 'package']);
+
+/**
  * 可入库的站点网址：http/https，不带查询串、片段和账号密码，且不指向内网。
  *
  * 内网判定与 Agent 通道共用同一套规则。原先这里完全不判，导致同一个地址
@@ -68,8 +74,17 @@ export const stationSchema = z.object({
   // 每一项都要 strict。外层 z.object 默认只剥掉多余字段，元素不 strict 时
   // 写了 inputRate / outputRate / weight 这类不存在的字段会被静默丢弃，
   // 提交方以为生效了、榜上却没有——比报错难查得多。
-  // 报价目前只有「相对官方价格的倍率」一个口径（见 README「已知未修」）。
-  offers: z.array(z.strictObject({ modelSlug: text(200), rate: offerRate })).max(100),
+  // 报价 = 倍率 + 计价口径 + 来源时间。只给 rate 时按 blended（整站混合倍率）读，
+  // 与历史数据一致；要表达「这是输入价」必须显式给 basis，否则两个不可比的
+  // 数字会并排排在同一张榜上。
+  offers: z.array(z.strictObject({
+    modelSlug: text(200),
+    rate: offerRate,
+    basis: rateBasis.optional(),
+    // 报价来源时间。允许带时区偏移（中文站点常见 +08:00），与 postSchema 的
+    // publishedAt 同一套规则。
+    quotedAt: z.iso.datetime({ offset: true }).nullish(),
+  })).max(100),
 }).refine(station => new Set(station.offers.map(offer => offer.modelSlug)).size === station.offers.length, '存在重复的报价');
 
 export const postSchema = z.object({

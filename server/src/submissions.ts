@@ -628,8 +628,11 @@ function materialize(store: Store, submission: SubmissionRecord, reviewedAt: str
       source: previous ? previous.source : sourceByChannel[submission.channel],
     });
     store.db.prepare('DELETE FROM offers WHERE stationSlug = ?').run(slug);
-    const insert = store.db.prepare('INSERT INTO offers (stationSlug, modelSlug, rate) VALUES (?, ?, ?)');
-    for (const offer of offers) insert.run(slug, offer.modelSlug, offer.rate);
+    // basis 缺省 blended：老提交方不带这个字段，沿用「整站混合倍率」的原语义。
+    // quotedAt 缺省 null（来源没说），**不要**在这里塞审核时间——那是入库时间，
+    // 不是报价时间，冒充成来源时间会让榜上的「报价于」全是假的。
+    const insert = store.db.prepare("INSERT INTO offers (stationSlug, modelSlug, rate, basis, quotedAt) VALUES (?, ?, ?, ?, ?)");
+    for (const offer of offers) insert.run(slug, offer.modelSlug, offer.rate, offer.basis ?? 'blended', offer.quotedAt ?? null);
   } else if (submission.channel === 'web') {
     // 站内发帖：payload 是作者填的表单，不是飞书那种带 hostname 的结构。
     const payload = parse(webPostSchema, submission.payload);
@@ -653,7 +656,12 @@ function materialize(store: Store, submission: SubmissionRecord, reviewedAt: str
       ? store.db.prepare("SELECT id FROM submissions WHERE kind = 'post' AND channel = 'feishu' AND originKey = ? AND status = 'approved' ORDER BY rowid LIMIT 1").get(submission.originKey)
       : undefined;
     const legacyId = `feishu-${submission.originKey}`;
-    const legacy = submission.channel === 'feishu' && submission.batchId !== null && store.get('post', legacyId)?.source === 'submission';
+    // 必须用 getWithRemoved：store.get 看不见已下架的行，于是「老文章还在吗」
+    // 这个判断会把已下架的老文章当成不存在，改用 `sub-<投稿id>` 建出一篇新的。
+    // 软删除只认 id，换个 id 就是复活——实测下架旧式导入的文章后同步一次，
+    // 前台立刻又多出一篇内容相同的新文章。
+    const legacy = submission.channel === 'feishu' && submission.batchId !== null
+      && store.getWithRemoved('post', legacyId)?.source === 'submission';
     const postId = legacy ? legacyId : `sub-${first?.id ?? submission.id}`;
     // 管理员下架过的文章不能被下一次同步复活。软删除标记的含义是「人已经决定这篇
     // 不该在线」，而这里每次同步都无条件写 status: 'approved'——实测：下架后重同步，

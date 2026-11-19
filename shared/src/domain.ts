@@ -105,11 +105,26 @@ export interface Station extends InteractionState {
   source: ContentSource | 'user';
 }
 
+/**
+ * 倍率的计价口径。
+ *
+ * `rate` 本身只说「相对官方价多少」，不说这个数字是怎么算出来的。中转站至少
+ * 有四种常见口径，同一个数字在不同口径下差得很远：输入按量、输出按量、
+ * 打包价、以及把输入输出混在一起的整站倍率。它们放在同一张榜上排序是错的，
+ * 但 schema 里原先没有字段能表达差异，只能靠审核时人判断——榜上却写着
+ * 「数字越小越便宜」。
+ */
+export type RateBasis = 'blended' | 'input' | 'output' | 'package';
+
 export interface StationOffer {
   stationSlug: string;
   modelSlug: string;
   // 仅表示相对官方价格的倍率。
   rate: number;
+  /** 这个倍率对应的口径。历史数据没有该字段时按 blended 读。 */
+  basis: RateBasis;
+  /** 报价来源时间（提交/同步时给出）。null 表示来源没说，不代表「刚刚」。 */
+  quotedAt: ISODateTime | null;
 }
 
 export interface ModelOffer extends StationOffer {

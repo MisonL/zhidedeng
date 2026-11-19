@@ -27,6 +27,12 @@ export const SCHEMA = `
   );
   CREATE TABLE IF NOT EXISTS offers (
     stationSlug TEXT NOT NULL, modelSlug TEXT NOT NULL, rate REAL NOT NULL CHECK(rate > 0),
+    -- 计价口径：同一个 rate 在不同口径下不可比。默认 blended 让老数据与
+    -- 老写入方（没这个字段的）继续按原语义读，不需要一次性回填。
+    basis TEXT NOT NULL DEFAULT 'blended' CHECK(basis IN ('blended','input','output','package')),
+    -- 报价来源时间。NULL 表示来源没说，**不等于「刚刚」**——列表按它排序时要
+    -- 把未知排在已知的后面，而不是当成最新。
+    quotedAt TEXT,
     PRIMARY KEY (stationSlug, modelSlug)
   );
   CREATE TABLE IF NOT EXISTS votes (
@@ -261,6 +267,20 @@ export function ensureAgentTokenColumns(store: Store) {
   if (!table) return; // 表不存在时由 SCHEMA 的 CREATE TABLE 建全，不需要补列。
   store.transaction(() => {
     ensureColumn(store.db, 'tokenPrefix', "TEXT NOT NULL DEFAULT ''", 'agent_tokens');
+  });
+}
+
+/**
+ * 旧库的 offers 表补两列。
+ *
+ * 建表用的是 `CREATE TABLE IF NOT EXISTS`，对已存在的库不生效——所以新字段
+ * 必须走 ALTER。CHECK 约束在这里补不上（SQLite 不能给已有列加约束），
+ * 口径合法性由应用层 `rateBasis` 校验保证。
+ */
+export function ensureOfferColumns(store: Store) {
+  store.transaction(() => {
+    ensureColumn(store.db, 'basis', "TEXT NOT NULL DEFAULT 'blended'", 'offers');
+    ensureColumn(store.db, 'quotedAt', 'TEXT', 'offers');
   });
 }
 

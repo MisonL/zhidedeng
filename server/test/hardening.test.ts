@@ -332,6 +332,76 @@ describe('审核群友提交', () => {
     expect(pending.items.map(item => item.id)).toContain(created.id);
   });
 
+  it('旧式导入的文章下架后，走队列同步也不会换个 id 复活', async () => {
+    // 同一篇飞书评价可能有两条写入路径：老运维导入建 `feishu-<recordId>`，
+    // 队列物化建 `sub-<投稿id>`。materialize 靠「legacy 文章还在不在」来决定
+    // 沿用哪个 id，但判断用 store.get——**它看不见已下架的行**。于是下架后
+    // legacy 判定失败，物化改用新 id 建出一篇内容一样的新文章，前台又能看到。
+    // 软删除挡不住另一个 id，这是真实的复活路径。
+    const importBody = {
+      stations: [{ slug: 'sub-legacy-com', name: '老站', description: '描述', url: 'https://legacy.com/', rechargeThreshold: null, paymentMethods: [], offers: [] }],
+      posts: [{ recordId: 'recLegacy', stationSlug: 'sub-legacy-com', title: '旧式导入的评测', summary: '摘要', body: '正文', authorName: '群友', publishedAt: '2026-11-04T08:00:00.000Z' }],
+    };
+    expect((await server.app.request('/api/admin/import', { method: 'POST', headers: admin, body: JSON.stringify(importBody) })).status).toBe(200);
+    expect((await server.app.request('/api/posts/feishu-recLegacy')).status).toBe(200);
+
+    await server.app.request('/api/admin/posts/feishu-recLegacy/withdraw', { method: 'POST', headers: admin });
+    expect((await server.app.request('/api/posts/feishu-recLegacy')).status).toBe(404);
+
+    // 队列同步同一条飞书记录
+    const batch = await server.app.request('/api/admin/submissions/batch', {
+      method: 'POST', headers: admin,
+      body: JSON.stringify({ channel: 'feishu', items: [{ kind: 'post', originKey: 'recLegacy', payload: { recordId: 'recLegacy', title: '队列同步的评测', summary: '摘要', body: '正文', authorName: '群友', publishedAt: '2026-11-04T08:00:00.000Z', hostname: 'legacy.com' } }] }),
+    });
+    expect(batch.status).toBe(200);
+    const pending = server.db.prepare("SELECT id FROM submissions WHERE kind = 'post' AND status = 'pending'").all() as { id: string }[];
+    for (const { id } of pending) {
+      await server.app.request('/api/admin/submissions/batch-review', { method: 'POST', headers: admin, body: JSON.stringify({ ids: [id], status: 'approved' }) });
+    }
+
+    // 不该出现第二篇同一来源的文章
+    const submissions = server.db.prepare("SELECT id, removedAt FROM entities WHERE kind = 'post' AND json_extract(data,'$.source') = 'submission'").all() as { id: string; removedAt: string | null }[];
+    expect(submissions.map(row => row.id)).toEqual(['feishu-recLegacy']);
+    expect(submissions[0]!.removedAt).not.toBeNull();
+    const visible = await (await server.app.request('/api/posts?pageSize=100')).json() as { items: { title: string }[] };
+    expect(visible.items.map(item => item.title)).not.toContain('队列同步的评测');
+  });
+
+  it('队列已物化的文章下架后，运维导入同一条也沿用同一个 id，不会另建一篇', async () => {
+    // 反方向的同一个漏洞：先走队列物化（id = sub-<投稿id>），下架后再跑运维导入
+    // （id = feishu-<recordId>）。两条路径按不同的规则派生 id，同一个飞书记录
+    // 就对应两个实体，软删除只能挡住它认识的那个 id。
+    const payload = { recordId: 'recBoth', title: '先队列后导入', summary: '摘要', body: '正文', authorName: '群友', publishedAt: '2026-11-04T08:00:00.000Z', hostname: 'both.example.com' };
+    await server.app.request('/api/admin/submissions/batch', {
+      method: 'POST', headers: admin,
+      body: JSON.stringify({ channel: 'feishu', items: [{ kind: 'post', originKey: 'recBoth', payload }] }),
+    });
+    const pending = server.db.prepare("SELECT id FROM submissions WHERE kind = 'post' AND status = 'pending'").all() as { id: string }[];
+    for (const { id } of pending) {
+      await server.app.request('/api/admin/submissions/batch-review', { method: 'POST', headers: admin, body: JSON.stringify({ ids: [id], status: 'approved' }) });
+    }
+    const materialized = server.db.prepare("SELECT id FROM entities WHERE kind = 'post' AND json_extract(data,'$.source') = 'submission'").all() as { id: string }[];
+    expect(materialized).toHaveLength(1);
+    const queueId = materialized[0]!.id;
+    expect(queueId.startsWith('sub-')).toBe(true);
+
+    await server.app.request(`/api/admin/posts/${queueId}/withdraw`, { method: 'POST', headers: admin });
+    expect((await server.app.request(`/api/posts/${queueId}`)).status).toBe(404);
+
+    const importBody = {
+      stations: [{ slug: 'sub-both-example-com', name: '同一条站', description: '描述', url: 'https://both.example.com/', rechargeThreshold: null, paymentMethods: [], offers: [] }],
+      posts: [{ recordId: 'recBoth', stationSlug: 'sub-both-example-com', title: '先队列后导入', summary: '摘要', body: '正文', authorName: '群友', publishedAt: '2026-11-04T08:00:00.000Z' }],
+    };
+    expect((await server.app.request('/api/admin/import', { method: 'POST', headers: admin, body: JSON.stringify(importBody) })).status).toBe(200);
+
+    // 还是那一个实体，还是下架状态
+    const after = server.db.prepare("SELECT id, removedAt FROM entities WHERE kind = 'post' AND json_extract(data,'$.source') = 'submission'").all() as { id: string; removedAt: string | null }[];
+    expect(after.map(row => row.id)).toEqual([queueId]);
+    expect(after[0]!.removedAt).not.toBeNull();
+    const visible = await (await server.app.request('/api/posts?pageSize=100')).json() as { items: { title: string }[] };
+    expect(visible.items.map(item => item.title)).not.toContain('先队列后导入');
+  });
+
   it('站内作者自己的文章也能被管理员下架，不必走投稿队列', async () => {
     // source='user' 的文章原本只能改状态：前台确实看不见了，但管理端既没有
     // 恢复入口，也查不到下架时间。统一走软删除后两者都有了。
@@ -343,8 +413,14 @@ describe('审核群友提交', () => {
     expect((await server.app.request(`/api/posts/${created.id}`, { headers: { cookie } })).status).toBe(200);
     expect((await server.app.request(`/api/admin/posts/${created.id}/withdraw`, { method: 'POST', headers: admin })).status).toBe(200);
     expect((await server.app.request(`/api/posts/${created.id}`, { headers: { cookie } })).status).toBe(404);
-    // 作者自己也看不到了：下架就是下架，不是「只对别人隐藏」
-    expect((await server.app.request('/api/me/posts', { headers: { cookie } })).status).toBe(200);
+    // 作者自己也看不到了：下架就是下架，不是「只对别人隐藏」。
+    // 只断言 200 是不够的——列表接口当然可能返回 200 而里面仍然列着这篇，
+    // 那正是要防的回归。这里断言列表内容为空。
+    const mine = await server.app.request('/api/me/posts', { headers: { cookie } });
+    expect(mine.status).toBe(200);
+    const listed = await mine.json() as { items: { id: string }[]; total: number };
+    expect(listed.items.map(item => item.id)).not.toContain(created.id);
+    expect(listed.total).toBe(0);
   });
 });
 

@@ -11,7 +11,7 @@ describe('数据诚信声明', () => {
   it('全站页脚常驻，站点详情顶部也显示', async () => {
     const detail: StationDetail = {
       ...station,
-      offers: [{ stationSlug: 'yunzhan', modelSlug: 'deepseek-v4', rate: 0.6, model: vendors[0].models[0] }],
+      offers: [{ stationSlug: 'yunzhan', modelSlug: 'deepseek-v4', rate: 0.6, basis: 'blended', quotedAt: null, model: vendors[0].models[0] }],
     };
     stubApi({ 'GET /api/stations/yunzhan': detail });
     renderApp('/stations/yunzhan');
@@ -20,6 +20,42 @@ describe('数据诚信声明', () => {
     expect(await screen.findByRole('heading', { name: '云栈' })).toBeInTheDocument();
     expect(within(screen.getByRole('main')).getByText(new RegExp(DISCLAIMER))).toBeInTheDocument();
     expect(screen.getByText('0.6x')).toBeInTheDocument();
+  });
+
+  it('报价标明计价口径与来源时间，来源没说不写成「刚刚」', async () => {
+    // rate 只说「相对官方价多少」。不标口径的话，按输入 0.3 和综合 0.5
+    // 会并排放着，读者以为能直接比大小——而它们说的不是一回事。
+    const detail: StationDetail = {
+      ...station,
+      offers: [
+        { stationSlug: 'yunzhan', modelSlug: 'deepseek-v4', rate: 0.3, basis: 'input', quotedAt: null, model: vendors[0].models[0] },
+        { stationSlug: 'yunzhan', modelSlug: 'gpt-5', rate: 0.5, basis: 'blended', quotedAt: '2026-11-01T00:00:00.000Z', model: vendors[1].models[0] },
+      ],
+    };
+    stubApi({ 'GET /api/stations/yunzhan': detail });
+    renderApp('/stations/yunzhan');
+    expect(await screen.findByText('按输入')).toBeInTheDocument();
+    expect(screen.getByText('综合')).toBeInTheDocument();
+    // null 表示来源没说，不能显示成「刚刚」或今天
+    expect(screen.getByText('时间未知')).toBeInTheDocument();
+    expect(screen.getByText('2026-11-01')).toBeInTheDocument();
+  });
+
+  it('老库里没有口径字段按综合读，认不出的口径显示未知而不是默默当综合', async () => {
+    // 老库的 offers 只有三列，补列后是 blended；但 ALTER 补不上 CHECK，
+    // 历史脏值（比如手工 UPDATE 进去的）确实可能存在。这时不能替它编一个口径。
+    const detail = {
+      ...station,
+      offers: [
+        { stationSlug: 'yunzhan', modelSlug: 'deepseek-v4', rate: 0.4, model: vendors[0].models[0] },
+        { stationSlug: 'yunzhan', modelSlug: 'gpt-5', rate: 0.5, basis: 'garbage', quotedAt: null, model: vendors[1].models[0] },
+      ],
+    } as unknown as StationDetail;
+    stubApi({ 'GET /api/stations/yunzhan': detail });
+    renderApp('/stations/yunzhan');
+    expect(await screen.findByText('综合')).toBeInTheDocument();
+    expect(screen.getByText('未知口径')).toBeInTheDocument();
+    expect(screen.queryByText('按输入')).toBeNull();
   });
 });
 

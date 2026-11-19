@@ -43,6 +43,32 @@ describe('全量导入', () => {
     expect(post).toMatchObject({ kind: 'review', source: 'submission', stationSlug: 'sub-api-example-com', body: '挺稳，<script>alert(1)</script>', author: { nickname: '群友甲' } });
   });
 
+  it('导入可以带计价口径与报价时间，非法口径被拒绝', async () => {
+    // 回归：offers 的写入 SQL 早就带上 basis/quotedAt 了，但导入的校验 schema
+    // 还是 strictObject({modelSlug, rate})——运维把口径写进请求会被当成未知字段
+    // 整条拒掉（400 导入内容无效），于是飞书同步过来的口径永远进不了库。
+    const store = newStore();
+    const withBasis: CatalogImportRequest = {
+      ...submission,
+      stations: [{ ...submission.stations[0]!, offers: [
+        { modelSlug: 'gpt-4-1', rate: 0.5, basis: 'input', quotedAt: '2026-11-01T00:00:00.000Z' },
+        { modelSlug: 'o3', rate: 0.7, basis: 'output' },
+      ] }],
+    };
+    expect(await runImport(store, withBasis)).toMatchObject({ status: 200, body: { changed: true, offers: 2 } });
+    const rows = store.db.prepare('SELECT modelSlug, rate, basis, quotedAt FROM offers WHERE stationSlug = ? ORDER BY modelSlug').all('sub-api-example-com');
+    expect(rows).toEqual([
+      { modelSlug: 'gpt-4-1', rate: 0.5, basis: 'input', quotedAt: '2026-11-01T00:00:00.000Z' },
+      { modelSlug: 'o3', rate: 0.7, basis: 'output', quotedAt: null },
+    ]);
+
+    // 非法口径不能靠「未知字段拒绝」蒙混过关——放开 strictObject 之后必须真的校验取值
+    const store2 = newStore();
+    const bad = { ...submission, stations: [{ ...submission.stations[0]!, offers: [{ modelSlug: 'gpt-4-1', rate: 0.5, basis: 'garbage' }] }] };
+    expect((await runImport(store2, bad)).status).toBe(400);
+    expect(store2.db.prepare('SELECT COUNT(*) AS count FROM offers WHERE stationSlug = ?').get('sub-api-example-com')).toEqual({ count: 0 });
+  });
+
   it('重复导入相同内容不产生重复', async () => {
     const store = newStore();
     await runImport(store, submission);

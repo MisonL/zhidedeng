@@ -8,7 +8,7 @@ import { bodyLimit } from 'hono/body-limit';
 import { z, ZodError } from 'zod';
 import { API_ROUTES, PROFILE_LIMITS } from '@zhidedeng/shared';
 import type { ApiContracts, ApiRouteName, ChangePasswordRequest, LoginRequest, RegisterRequest } from '@zhidedeng/shared';
-import { modelSchema } from '@zhidedeng/shared/submission';
+import { modelSchema, rateBasis } from '@zhidedeng/shared/submission';
 import { AttemptLimiter, burnPasswordCheck, clearedSessionCookie, createSession, deleteOtherSessions, deleteSession, hashPassword, INITIAL_TOKENS, isWeakPassword, sessionCookie, sessionHandle, USERNAME, verifyPassword } from './auth.ts';
 import { agentTokenSchema, createAgentToken, listAgentTokens, revokeAgentToken } from './agent-tokens.ts';
 import { agentHandle, agentTokenHash } from './agent-auth.ts';
@@ -756,9 +756,13 @@ export function buildApp(store: Store, now: () => Date, options: AppOptions = {}
     url: z.string().trim().min(1).max(300),
     description: z.string().trim().max(300).optional(),
     // 报价可以留空：推荐人未必知道倍率，管理员审核时补。
+    // basis 允许不给（沿用综合倍率），但给了就必须是四种口径之一——
+    // 让用户随手写个「输入」以外的自由文本，等于把口径变成没人能比的字符串。
     offers: z.array(z.strictObject({
       modelSlug: z.string().trim().min(1).max(200),
       rate: z.number(),
+      basis: rateBasis.optional(),
+      quotedAt: z.iso.datetime({ offset: true }).nullish(),
     })).max(100).optional(),
     rechargeThreshold: z.number().min(0).nullable().optional(),
     paymentMethods: z.array(z.string().trim().min(1).max(20)).max(10).optional(),
