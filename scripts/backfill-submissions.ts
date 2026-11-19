@@ -44,10 +44,18 @@ export function planBackfill(store: ReturnType<typeof openStore>): BackfillResul
     .all();
   const covered = new Set(approved.map(row => feishuHostnameKey(row.originKey as string)));
 
-  const offersByStation = new Map<string, { modelSlug: string; rate: number }[]>();
-  for (const offer of store.db.prepare('SELECT stationSlug, modelSlug, rate FROM offers ORDER BY stationSlug, modelSlug').all()) {
+  // 口径与报价时间必须一起抄过去。回填的 payload 会被物化回 offers，只抄
+  // modelSlug/rate 的话，来源里明确写了的「按输入、10 月 1 日报的价」在回填后
+  // 全部退化成「综合、时间未知」——回填反而成了信息丢失。
+  const offersByStation = new Map<string, { modelSlug: string; rate: number; basis?: string; quotedAt?: string | null }[]>();
+  for (const offer of store.db.prepare('SELECT stationSlug, modelSlug, rate, basis, quotedAt FROM offers ORDER BY stationSlug, modelSlug').all()) {
     const list = offersByStation.get(offer.stationSlug as string) ?? [];
-    list.push({ modelSlug: offer.modelSlug as string, rate: offer.rate as number });
+    list.push({
+      modelSlug: offer.modelSlug as string,
+      rate: offer.rate as number,
+      ...(offer.basis !== null && offer.basis !== undefined ? { basis: offer.basis as string } : {}),
+      quotedAt: (offer.quotedAt as string | null) ?? null,
+    });
     offersByStation.set(offer.stationSlug as string, list);
   }
 

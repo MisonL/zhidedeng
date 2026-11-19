@@ -44,6 +44,25 @@ describe('存量站点回填', () => {
     expect(() => removeStation(store, 'legacy-a', state.stations[0]!.submissionId, clock().toISOString())).not.toThrow();
   });
 
+  it('回填保留下报价的计价口径与来源时间', () => {
+    // 回填的 payload 会被写成一条 station upsert 投稿，审核时再物化回 offers。
+    // 原先把 offers 从库里读出来时只抄了 modelSlug/rate——口径和报价时间在这一步
+    // 蒸发，回填后所有报价都变回「综合、时间未知」，等于把来源给的信息抹掉。
+    putStation('legacy-basis', 'basis.example.com');
+    store.db.prepare('INSERT INTO offers (stationSlug, modelSlug, rate, basis, quotedAt) VALUES (?,?,?,?,?)')
+      .run('legacy-basis', 'gpt-4-1', 0.42, 'input', '2026-10-01T00:00:00.000Z');
+    store.db.prepare('INSERT INTO offers (stationSlug, modelSlug, rate, basis) VALUES (?,?,?,?)')
+      .run('legacy-basis', 'o3', 0.9, 'blended');
+
+    const plan = planBackfill(store);
+    expect(plan.planned).toHaveLength(1);
+    const offers = (plan.planned[0]!.payload as { offers: { modelSlug: string; rate: number; basis?: string; quotedAt?: string | null }[] }).offers;
+    expect(offers).toEqual([
+      { modelSlug: 'gpt-4-1', rate: 0.42, basis: 'input', quotedAt: '2026-10-01T00:00:00.000Z' },
+      { modelSlug: 'o3', rate: 0.9, basis: 'blended', quotedAt: null },
+    ]);
+  });
+
   it('www 与裸域归一到同一个 hostname，不会重复回填', () => {
     legacy('legacy-b', 'www.b.example.com');
     const plan = planBackfill(store);
@@ -81,6 +100,7 @@ describe('存量站点回填', () => {
     legacy('legacy-a', 'a.example.com');
     store.db.prepare('INSERT INTO offers (stationSlug, modelSlug, rate) VALUES (?, ?, ?)').run('legacy-a', 'gpt-4-1', 0.8);
     const plan = planBackfill(store);
-    expect(plan.planned[0]!.payload.offers).toEqual([{ modelSlug: 'gpt-4-1', rate: 0.8 }]);
+    // 老报价没有口径列，补列后读出来就是 blended；quote 时间则明确是「没说」。
+    expect(plan.planned[0]!.payload.offers).toEqual([{ modelSlug: 'gpt-4-1', rate: 0.8, basis: 'blended', quotedAt: null }]);
   });
 });
