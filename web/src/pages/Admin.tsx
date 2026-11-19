@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import type { FormEvent } from 'react';
 import type { Station, SubmissionRecord } from '@zhidedeng/shared';
 import { admin, adminToken, AdminError } from '../admin';
-import type { AdminPostRow, RemovedStation } from '../admin';
+import type { AdminPostRow, RemovedPost, RemovedStation } from '../admin';
 import { Skeleton } from '../components/AsyncView';
 import { useCatalog } from '../state';
 
@@ -61,7 +61,7 @@ function impact(submission: SubmissionRecord, current: Station | undefined): str
   return lines;
 }
 
-type Tab = 'submissions' | 'posts' | 'removed';
+type Tab = 'submissions' | 'posts' | 'published' | 'removed' | 'removedPosts';
 
 export default function Admin() {
   const [token, setToken] = useState(adminToken.get());
@@ -70,6 +70,8 @@ export default function Admin() {
   const [submissions, setSubmissions] = useState<SubmissionRecord[]>();
   const [posts, setPosts] = useState<AdminPostRow[]>();
   const [removed, setRemoved] = useState<RemovedStation[]>();
+  const [removedPosts, setRemovedPosts] = useState<RemovedPost[]>();
+  const [published, setPublished] = useState<AdminPostRow[]>();
   const [error, setError] = useState<string>();
   const [message, setMessage] = useState<string>();
   const [busy, setBusy] = useState(false);
@@ -93,6 +95,14 @@ export default function Admin() {
       if (active === 'removed') {
         const data = (await admin.listRemovedStations(signal)).items;
         if (!signal?.aborted) setRemoved(data);
+      }
+      if (active === 'published') {
+        const data = (await admin.listPosts('approved', signal)).items;
+        if (!signal?.aborted) setPublished(data);
+      }
+      if (active === 'removedPosts') {
+        const data = (await admin.listRemovedPosts(signal)).items;
+        if (!signal?.aborted) setRemovedPosts(data);
       }
     } catch (caught) {
       if (signal?.aborted) return;
@@ -282,6 +292,8 @@ export default function Admin() {
   };
   const pendingPosts = posts ?? [];
   const removedStations = removed ?? [];
+  const withdrawnPosts = removedPosts ?? [];
+  const publishedPosts = published ?? [];
 
   return (
     <section className="page">
@@ -293,8 +305,14 @@ export default function Admin() {
         <button className={`btn btn-small ${tab === 'posts' ? 'btn-red' : 'btn-ghost'}`} onClick={() => setTab('posts')}>
           待审文章 {posts ? `(${pendingPosts.length})` : ''}
         </button>
+        <button className={`btn btn-small ${tab === 'published' ? 'btn-red' : 'btn-ghost'}`} onClick={() => setTab('published')}>
+          已上线文章 {published ? `(${publishedPosts.length})` : ''}
+        </button>
         <button className={`btn btn-small ${tab === 'removed' ? 'btn-red' : 'btn-ghost'}`} onClick={() => setTab('removed')}>
           已下架站点 {removed ? `(${removedStations.length})` : ''}
+        </button>
+        <button className={`btn btn-small ${tab === 'removedPosts' ? 'btn-red' : 'btn-ghost'}`} onClick={() => setTab('removedPosts')}>
+          已下架文章 {removedPosts ? `(${withdrawnPosts.length})` : ''}
         </button>
         <button className="btn btn-small btn-ghost" onClick={() => { adminToken.clear(); reset(); }}>
           退出
@@ -434,6 +452,61 @@ export default function Admin() {
                       onClick={() => act(() => admin.reviewPost(post.id, 'rejected'), '已拒绝')}
                     >
                       拒绝
+                    </button>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )
+      )}
+
+      {tab === 'published' && (
+        // 已上线内容的撤回入口。待审列表里放「下架」是错位的——那些还没上线，
+        // 实体根本不存在，点下去只会 404，而作者那边会以为稿子没了。
+        published === undefined ? <Skeleton /> : publishedPosts.length === 0
+          ? <p className="state">没有已上线的文章</p>
+          : (
+            <ul className="card-list">
+              {publishedPosts.map(post => (
+                <li key={post.id}>
+                  <div className="tags">
+                    <span className="tag">{KIND_LABEL[post.kind] ?? post.kind}</span>
+                    <span className="tag">{post.authorHandle ?? '匿名'}</span>
+                    <span className="hint">{displayTime(post.publishedAt)}</span>
+                  </div>
+                  <p>{post.title}</p>
+                  <p className="hint">{post.summary}</p>
+                  <div className="tags">
+                    <button
+                      className="btn btn-small btn-red" disabled={busy}
+                      onClick={() => act(async () => { await admin.withdrawPost(post.id); setTab('removedPosts'); }, '已下架，可在「已下架文章」里恢复')}
+                    >
+                      下架
+                    </button>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )
+      )}
+
+      {tab === 'removedPosts' && (
+        // 已发布内容也要能撤回。群友来源的文章原先只有「去飞书撤销通过」
+        // 一条路，而那条路走不通（撤销后记录就不在批次里了，生成不了下架请求）。
+        removedPosts === undefined ? <Skeleton /> : withdrawnPosts.length === 0
+          ? <p className="state">没有已下架的文章</p>
+          : (
+            <ul className="card-list">
+              {withdrawnPosts.map(post => (
+                <li key={post.id}>
+                  <p>{post.id}</p>
+                  <p className="hint">下架于 {displayTime(post.removedAt)}</p>
+                  <div className="tags">
+                    <button
+                      className="btn btn-small btn-red" disabled={busy}
+                      onClick={() => act(() => admin.restorePost(post.id), '已恢复')}
+                    >
+                      恢复
                     </button>
                   </div>
                 </li>

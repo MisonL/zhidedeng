@@ -78,7 +78,16 @@ channel 是队列的来源渠道，source 是物化内容的展示来源，二�
 - 幂等分两种入口，不能混用。管理队列按 kind、规范化 originKey、action、batchId、payloadHash 和状态查重，不按 actorHandle 隔离；默认只对同批 pending 去重，自动通过时也检查仍为最新版本的 approved；新批次相同内容可以重新入队，新 pending 不会替代旧 pending。公开 Agent 入口不接受 batchId，查重键加上 channel 和 actorHandle，因此同一账号不同凭证提交相同 pending 内容也会命中原记录；审结过的内容再提交会产生新 pending（`server/src/submissions.ts` 的 `enqueueSubmission` 查重语句、`server/src/agent-api.ts` 的 `deduplicateByActor`）
 - 批次入口逐条校验业务 payload；单条管理入口在关闭自动通过时主要校验外层、站点 URL 和下架版本，完整业务校验在审核阶段完成。Agent 提交入口则在入队前就以 `stationSchema`/`postSchema` 的 strict 版本校验完整 payload，不接受多余字段（`server/src/submissions.ts` 的 `validatePayload`、`server/src/agent-api.ts` 的 schema 常量）
 
-普通站内文章仍由 `/api/admin/posts/:id/review` 调整 pending/approved/rejected，只有作者能读未公开文章。已物化的飞书文章走此接口仍返回 409 MANAGED_BY_SOURCE；当前没有队列文章删除动作，撤销飞书评价也不会移除已上线文章，错误提示里的「撤销后重新同步」已经不能表达新流程（`server/src/moderation.ts` 的 `reviewPost`、`server/src/submissions.ts` 的评价物化分支）。
+普通站内文章仍由 `/api/admin/posts/:id/review` 调整 pending/approved/rejected，只有作者能读未公开文章。
+
+已发布内容的撤回与恢复（`server/src/moderation.ts` 的 `withdrawPost`、`restorePost`）：
+
+- `POST /admin/posts/:id/withdraw` 软删除，`POST /admin/posts/:id/restore` 清标记，`GET /admin/posts/removed` 列出已下架文章（含下架时间）。三种来源一视同仁，因为「这篇该不该在线」是编辑判断，与它来自飞书、Agent 还是站内无关
+- 对已物化的飞书文章调 `review` 且 `status=rejected`，等同于下架。此前这里返回 409 MANAGED_BY_SOURCE，文案让管理员「去飞书撤销通过后重新同步」——那条路走不通：同步脚本只处理审核状态严格为「通过」的记录，撤销只会让这条记录**不再出现在批次里**，一个不存在的记录生成不了任何下架请求。实测撤销后重同步，文章原样在线
+- 物化路径（`submissions.ts` 的 `materialize` 与 `catalog.ts` 的运维导入）都要先查软删除标记，已下架的直接跳过。不加这个守卫，下架等于白做：两条路径每次同步都无条件写 `status: 'approved'`，而 `store.put` 会顺手把 `removedAt` 清成 NULL
+- 恢复就是把标记清掉，正文、报价一直是原样留着的；重复下架/恢复返回 409 而不是静默成功
+- 恢复不会回查飞书。「下架时正文是什么，恢复出来就是什么」——服务端没有回读表格的能力，若期间表格里改过内容，恢复出来的是旧版，需要再同步一次才会更新。提示语不宣称「已是最新」
+- 已知边界：同一飞书评价走队列（`sub-<投稿id>`）与走 `/api/admin/import`（`feishu-<recordId>`）会得到**不同的实体 id**。因此下架队列版本后，若运维再跑一次旧式导入，会新建一条 `feishu-<recordId>` 并公开——软删除标记防不住另一条 id。这是两条路径 id 方案不一致的既有问题，不是本次改动引入的；守卫只保证「同一条路径的同一 id 不被复活」。彻底解决要统一两边的 id 派生规则
 
 ## 页面
 

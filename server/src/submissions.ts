@@ -655,6 +655,15 @@ function materialize(store: Store, submission: SubmissionRecord, reviewedAt: str
     const legacyId = `feishu-${submission.originKey}`;
     const legacy = submission.channel === 'feishu' && submission.batchId !== null && store.get('post', legacyId)?.source === 'submission';
     const postId = legacy ? legacyId : `sub-${first?.id ?? submission.id}`;
+    // 管理员下架过的文章不能被下一次同步复活。软删除标记的含义是「人已经决定这篇
+    // 不该在线」，而这里每次同步都无条件写 status: 'approved'——实测：下架后重同步，
+    // 文章原样回来。站点靠 put 清标记来表达「重新上架」，那是有意的；文章这里没有
+    // 人再点一次「通过」，所以必须显式拦住，让人走恢复接口。
+    // 返回原因即表示「本条没有产生新版本」，调用方据此不清理旧的下架请求。
+    // removedAt 是独立列，不在 PostRecord 里（业务层不该看见它），所以单查一次。
+    const withdrawn = store.db.prepare("SELECT removedAt FROM entities WHERE kind = 'post' AND id = ?").get(postId) as
+      { removedAt: string | null } | undefined;
+    if (withdrawn?.removedAt != null) return '此前已被下架，本次同步跳过';
     store.put('post', postId, {
       id: postId, kind: 'review', title: payload.title, summary: payload.summary, body: payload.body,
       authorHandle: payload.authorHandle ?? 'anonymous-submission', authorNickname: payload.authorName,

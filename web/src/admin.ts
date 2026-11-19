@@ -94,6 +94,11 @@ export interface RemovedStation {
   slug: string;
   removedAt: string;
 }
+/** 已下架的文章。和站点不同，文章没有 slug，用 id 指代。 */
+export interface RemovedPost {
+  id: string;
+  removedAt: string;
+}
 
 export const admin = {
   getSubmissionState: (signal?: AbortSignal) => request<AdminSubmissionStateResponse>('/api/admin/submissions/state', { signal }),
@@ -131,6 +136,12 @@ export const admin = {
     request<{ items: AdminPostRow[] }>(`/api/admin/posts?status=${encodeURIComponent(status)}`, { signal }),
   reviewPost: (id: string, status: 'approved' | 'rejected') =>
     request<{ id: string; status: string }>(`/api/admin/posts/${encodeURIComponent(id)}/review`, { method: 'POST', body: { status } }),
+  // 已发布文章的撤回与恢复。撤回是软删除，正文一直留着，误操作能直接救回来。
+  withdrawPost: (id: string) =>
+    request<{ id: string; removed: true }>(`/api/admin/posts/${encodeURIComponent(id)}/withdraw`, { method: 'POST', body: {} }),
+  restorePost: (id: string) =>
+    request<{ id: string; restored: true }>(`/api/admin/posts/${encodeURIComponent(id)}/restore`, { method: 'POST', body: {} }),
+  listRemovedPosts: (signal?: AbortSignal) => request<{ items: RemovedPost[] }>('/api/admin/posts/removed', { signal }),
   listRemovedStations: (signal?: AbortSignal) => request<{ items: RemovedStation[] }>('/api/admin/stations/removed', { signal }),
   restoreStation: (slug: string) =>
     request<{ slug: string; restored: true }>(`/api/admin/stations/${encodeURIComponent(slug)}/restore`, { method: 'POST', body: {} }),

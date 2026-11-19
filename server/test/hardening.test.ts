@@ -6,7 +6,8 @@ import type { CurrentUser, Post } from '@zhidedeng/shared';
 import { normalizeIp } from '../src/app.ts';
 import { ConcurrencyGate } from '../src/auth.ts';
 import { Store } from '../src/database.ts';
-import { createApp } from '../src/node-app.ts';
+import { createApp, openStore } from '../src/node-app.ts';
+import { reviewSubmission } from '../src/submissions.ts';
 
 const json = { 'content-type': 'application/json' };
 const PASSWORD = 'correct-horse-battery';
@@ -249,16 +250,101 @@ describe('管理密钥', () => {
 });
 
 describe('审核群友提交', () => {
-  it('对 source=submission 的文章返回 409，状态不变', async () => {
+  it('拒绝群友文章等于下架它，而不是报 409 让管理员去飞书撤销', async () => {
+    // 原来这里返回 409 MANAGED_BY_SOURCE，文案是「请到飞书表格撤销通过后重新同步」。
+    // 那是条走不通的路：同步脚本只处理审核状态为「通过」的记录，撤销「通过」
+    // 只会让这条记录从批次里消失——一个不存在的记录生成不了下架请求。
+    // 实测撤销后重同步，文章原样在线。所以拒绝必须真的下架。
     const body = {
       stations: [{ slug: 'sub-a-com', name: '站', description: 'd', url: 'https://a.com/', rechargeThreshold: null, paymentMethods: [], offers: [] }],
       posts: [{ recordId: 'rec1', stationSlug: 'sub-a-com', title: 't', summary: 's', body: 'b', authorName: '群友', publishedAt: '2026-11-04T08:00:00.000Z' }],
     };
     expect((await server.app.request('/api/admin/import', { method: 'POST', headers: admin, body: JSON.stringify(body) })).status).toBe(200);
-    const response = await server.app.request('/api/admin/posts/feishu-rec1/review', { method: 'POST', headers: admin, body: '{"status":"rejected"}' });
-    expect(response.status).toBe(409);
-    expect(await response.json()).toMatchObject({ error: { code: 'MANAGED_BY_SOURCE', message: expect.stringContaining('飞书') } });
     expect((await server.app.request('/api/posts/feishu-rec1')).status).toBe(200);
+    const response = await server.app.request('/api/admin/posts/feishu-rec1/review', { method: 'POST', headers: admin, body: '{"status":"rejected"}' });
+    expect(response.status).toBe(200);
+    // 下架后前台立刻看不见
+    expect((await server.app.request('/api/posts/feishu-rec1')).status).toBe(404);
+  });
+
+  it('下架后重同步不会把文章复活，恢复接口能救回来', async () => {
+    // 这是撤稿功能的核心保证。materialize 每次同步都无条件写 status: 'approved'，
+    // 没有守卫的话下架等于白做——实测确实会原样回来。
+    const body = {
+      stations: [{ slug: 'sub-a-com', name: '站', description: 'd', url: 'https://a.com/', rechargeThreshold: null, paymentMethods: [], offers: [] }],
+      posts: [{ recordId: 'rec1', stationSlug: 'sub-a-com', title: 't', summary: 's', body: 'b', authorName: '群友', publishedAt: '2026-11-04T08:00:00.000Z' }],
+    };
+    const sync = async () => server.app.request('/api/admin/import', { method: 'POST', headers: admin, body: JSON.stringify(body) });
+    expect((await sync()).status).toBe(200);
+    expect((await server.app.request('/api/admin/posts/feishu-rec1/withdraw', { method: 'POST', headers: admin })).status).toBe(200);
+    expect((await server.app.request('/api/posts/feishu-rec1')).status).toBe(404);
+
+    // 同内容再同步：仍然不在线
+    expect((await sync()).status).toBe(200);
+    expect((await server.app.request('/api/posts/feishu-rec1')).status).toBe(404);
+
+    // 重复下架报「已下架」而不是「不存在」——否则管理员以为这篇没了
+    const again = await server.app.request('/api/admin/posts/feishu-rec1/withdraw', { method: 'POST', headers: admin });
+    expect(again.status).toBe(409);
+    expect(await again.json()).toMatchObject({ error: { code: 'ALREADY_REMOVED' } });
+
+    // 恢复后重新可见，正文一直是原样留着的
+    expect((await server.app.request('/api/admin/posts/feishu-rec1/restore', { method: 'POST', headers: admin })).status).toBe(200);
+    expect((await server.app.request('/api/posts/feishu-rec1')).status).toBe(200);
+    // 再恢复一次是 409，不是默默成功
+    expect((await server.app.request('/api/admin/posts/feishu-rec1/restore', { method: 'POST', headers: admin })).status).toBe(409);
+  });
+
+  it('已下架文章出现在管理端列表里，能查到下架时间', async () => {
+    const body = {
+      stations: [{ slug: 'sub-a-com', name: '站', description: 'd', url: 'https://a.com/', rechargeThreshold: null, paymentMethods: [], offers: [] }],
+      posts: [{ recordId: 'rec1', stationSlug: 'sub-a-com', title: 't', summary: 's', body: 'b', authorName: '群友', publishedAt: '2026-11-04T08:00:00.000Z' }],
+    };
+    expect((await server.app.request('/api/admin/import', { method: 'POST', headers: admin, body: JSON.stringify(body) })).status).toBe(200);
+    expect((await server.app.request('/api/admin/posts/feishu-rec1/withdraw', { method: 'POST', headers: admin })).status).toBe(200);
+    const listed = await (await server.app.request('/api/admin/posts/removed', { headers: admin })).json() as { items: { id: string; removedAt: string }[] };
+    expect(listed.items.map(item => item.id)).toContain('feishu-rec1');
+    expect(listed.items.find(item => item.id === 'feishu-rec1')!.removedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+  });
+
+  it('演示文章不能下架，和站点侧同一套规矩', async () => {
+    // removeStation 拒绝 source='demo'：那些是虚构样例，撤掉只会让站点看起来像坏了。
+    // 文章这条路径原来没这个守卫，一篇演示文章能被悄悄撤掉、首页出现空位。
+    const demo = server.db.prepare("SELECT id FROM entities WHERE kind = 'post' AND json_extract(data,'$.source')='demo' LIMIT 1").get() as { id: string } | undefined;
+    expect(demo).toBeDefined();
+    const response = await server.app.request(`/api/admin/posts/${demo!.id}/withdraw`, { method: 'POST', headers: admin });
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ error: { code: 'POST_SOURCE_CONFLICT' } });
+    // 状态没被改动
+    expect((await server.app.request(`/api/posts/${demo!.id}`)).status).toBe(200);
+  });
+
+  it('对还没物化的待审稿下架返回 404，不会悄悄藏掉', async () => {
+    // 待审稿只在 submissions 里，实体不存在。这里必须是 404：
+    // 若返回成功，作者会在自己的列表里看到稿子凭空消失，管理端也再无入口通过它。
+    const cookie = await register('pendingone');
+    const created = await (await post('/api/posts', { kind: 'review', title: '待审稿', summary: 's', body: 'b' }, '203.0.113.9', cookie)).json() as { id: string };
+    const response = await server.app.request(`/api/admin/posts/${created.id}/withdraw`, { method: 'POST', headers: admin });
+    expect(response.status).toBe(404);
+    // 作者仍然看得到自己的稿子，管理端也仍然能审核它
+    expect((await server.app.request(`/api/posts/${created.id}`, { headers: { cookie } })).status).toBe(200);
+    const pending = await (await server.app.request('/api/admin/posts?status=pending', { headers: admin })).json() as { items: { id: string }[] };
+    expect(pending.items.map(item => item.id)).toContain(created.id);
+  });
+
+  it('站内作者自己的文章也能被管理员下架，不必走投稿队列', async () => {
+    // source='user' 的文章原本只能改状态：前台确实看不见了，但管理端既没有
+    // 恢复入口，也查不到下架时间。统一走软删除后两者都有了。
+    const cookie = await register('authorone');
+    const created = await (await post('/api/posts', { kind: 'review', title: '我的评测', summary: 's', body: 'b' }, '203.0.113.9', cookie)).json() as { id: string };
+    // 走真实审核把它物化，而不是手工 put：只手工写实体的话投稿行还是 pending，
+    // readablePost 会从队列里把它兜回来，下架后作者仍看得到——那是另一条路径的问题。
+    reviewSubmission(openStore(server.db), clock, created.id, { status: 'approved' });
+    expect((await server.app.request(`/api/posts/${created.id}`, { headers: { cookie } })).status).toBe(200);
+    expect((await server.app.request(`/api/admin/posts/${created.id}/withdraw`, { method: 'POST', headers: admin })).status).toBe(200);
+    expect((await server.app.request(`/api/posts/${created.id}`, { headers: { cookie } })).status).toBe(404);
+    // 作者自己也看不到了：下架就是下架，不是「只对别人隐藏」
+    expect((await server.app.request('/api/me/posts', { headers: { cookie } })).status).toBe(200);
   });
 });
 
@@ -458,5 +544,7 @@ describe('仓库卫生', () => {
     };
     for (const root of roots) walk(join(process.cwd(), '..', root));
     expect(offenders).toEqual([]);
-  });
+    // 要遍历四个目录的全部源码，机器一忙就超过默认 5s。这是一次性扫描，
+    // 放长超时不会掩盖问题——真的出现字面量，断言照样会红。
+  }, 60_000);
 });

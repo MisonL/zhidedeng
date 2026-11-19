@@ -32,12 +32,46 @@ export function reviewPost(store: Store, now: () => Date, id: string, status: Po
     const reviewed = reviewSubmission(store, now(), id, { status: status === 'approved' ? 'approved' : 'rejected' });
     return { id, status: reviewed.status as PostStatus };
   }
-  // 群友提交的文章由飞书全量同步写入，这里改了下次同步又会恢复。
-  // agent 和用户自己的投稿不受此限：前者没有二次同步，后者本来就归站内管，
-  // 而且这里是它们唯一的下架路径（队列只处理待审记录）。
-  if (post.source === 'submission') throw new ApiError(409, 'MANAGED_BY_SOURCE', '这是群友提交的内容，请到飞书表格撤销「通过」后重新同步');
+  // 群友提交的文章由飞书全量同步写入，直接改状态下次同步就白改了。
+  // 但原来的报错把管理员指向了一条走不通的路：让去飞书撤销「通过」再同步——
+  // 撤销只会让这条记录从批次里消失，一个不存在的记录生成不了下架请求。
+  // 所以这里改成真的下架（软删除，同步不会再复活，见 materialize 里的守卫）。
+  if (post.source === 'submission' && status === 'rejected') {
+    withdrawPost(store, id, now().toISOString());
+    return { id, status };
+  }
   store.put('post', id, { ...post, status });
   return { id, status };
+}
+
+/**
+ * 下架一篇已发布的文章（管理员）。
+ *
+ * 和站点的下架一样是软删除：数据留着，随时能恢复，前台立刻看不见。
+ *
+ * 这里不区分来源。「请去飞书撤销后重新同步」曾经是唯一的撤回路径，但它对
+ * 群友来源根本走不通——同步脚本只处理审核状态为「通过」的记录，撤销「通过」
+ * 只会让这条记录**不再出现在批次里**，一个已经不存在的记录无法生成任何
+ * 下架请求。实测：撤销后重同步，文章原样在线。所以管理员必须有一个直接的
+ * 下架入口；materialize 那边也加了守卫，防止下一次同步把它复活。
+ */
+export function withdrawPost(store: Store, id: string, removedAt: string): { id: string; removed: true } {
+  // 用 getWithRemoved：已经下架的也要认出来，报「已下架」而不是「不存在」。
+  // 用 get 的话重复点一次会得到 404，管理员会以为这篇没了。
+  const post = store.getWithRemoved('post', id);
+  if (!post) throw new ApiError(404, 'NOT_FOUND', '文章不存在');
+  // 演示数据和站点侧是同一套规矩（removeStation 拒绝 source='demo'）：
+  // 那些是虚构样例，撤掉只会让站点看起来像坏了，而它们本来也不承载任何真实信息。
+  if (post.source === 'demo') throw new ApiError(409, 'POST_SOURCE_CONFLICT', '演示数据不能下架');
+  if (!store.markRemoved('post', id, removedAt)) throw new ApiError(409, 'ALREADY_REMOVED', '该文章已下架，不需要重复操作');
+  return { id, removed: true };
+}
+
+/** 恢复被下架的文章，只清软删除标记，正文一直是原样保留的。 */
+export function restorePost(store: Store, id: string): { id: string; restored: true } {
+  if (!store.getWithRemoved('post', id)) throw new ApiError(404, 'NOT_FOUND', '文章不存在');
+  if (!store.restore('post', id)) throw new ApiError(409, 'ALREADY_ONLINE', '该文章当前在线，不需要恢复');
+  return { id, restored: true };
 }
 
 /** 禁用后所有会话立即失效，公开内容保留；恢复后要重新登录。 */

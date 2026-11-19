@@ -18,7 +18,7 @@ import type { Store } from './database.ts';
 import { Service, isReservedNickname, normalizeNickname } from './service.ts';
 import { ApiError, isDatabaseBusyError } from './errors.ts';
 import { createInviteCode, listInviteCodes, revokeInviteCode } from './invite-codes.ts';
-import { listPosts, reviewPost, setAccountDisabled, setCommentHidden } from './moderation.ts';
+import { listPosts, restorePost, reviewPost, setAccountDisabled, setCommentHidden, withdrawPost } from './moderation.ts';
 import { autoApproveEnabled, enqueueBatch, enqueueSubmission, listSubmissions, reviewSubmission, setAutoApprove, submissionBatchReviewSchema, submissionBatchSchema, submissionQuerySchema, submissionReviewSchema, submissionState } from './submissions.ts';
 
 /**
@@ -455,6 +455,13 @@ export function buildApp(store: Store, now: () => Date, options: AppOptions = {}
     return c.json({ results });
   });
   app.get('/api/admin/posts', c => c.json(listPosts(store, postStatus.parse(c.req.query('status')))));
+  // 下架 / 恢复已发布的文章。下架是软删除，正文一直留着，误操作能直接撤回。
+  app.post('/api/admin/posts/:id/withdraw', c => c.json(withdrawPost(store, c.req.param('id'), now().toISOString())));
+  app.post('/api/admin/posts/:id/restore', c => c.json(restorePost(store, c.req.param('id'))));
+  app.get('/api/admin/posts/removed', c => {
+    const rows = store.db.prepare("SELECT id, removedAt FROM entities WHERE kind = 'post' AND removedAt IS NOT NULL ORDER BY removedAt DESC").all();
+    return c.json({ items: rows.map(row => ({ id: row.id as string, removedAt: row.removedAt as string })) });
+  });
   app.post('/api/admin/posts/:id/review', async c => {
     const { status } = z.strictObject({ status: postStatus }).parse(await c.req.json());
     return c.json(reviewPost(store, now, c.req.param('id'), status));

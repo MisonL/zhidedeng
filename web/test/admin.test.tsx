@@ -112,6 +112,58 @@ describe('审核台', () => {
     expect(callsTo(fetchMock, 'POST', '/api/admin/stations/gone-example-com/restore')).toHaveLength(1);
   });
 
+  it('已下架文章可以一键恢复', async () => {
+    // 已发布内容必须能撤回。群友来源的文章原先只能「去飞书撤销通过」，
+    // 而那条路走不通——撤销后记录直接不在批次里，生成不了下架请求。
+    const withdrawn = { id: 'feishu-rec1', removedAt: '2026-11-10T05:00:00.000Z' };
+    const fetchMock = stubApi({
+      'GET /api/admin/submissions': { items: [], total: 0 },
+      'GET /api/admin/posts/removed': { items: [withdrawn] },
+      'POST /api/admin/posts/feishu-rec1/restore': { id: withdrawn.id, restored: true },
+    });
+    await unlock();
+    fireEvent.click(await screen.findByRole('button', { name: /已下架文章/ }));
+    expect(await screen.findByText('feishu-rec1')).toBeInTheDocument();
+    // 下架时间是排障信息：要能判断是哪次误操作。
+    expect(screen.getByText(/下架于/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '恢复' }));
+    expect(await screen.findByText('已恢复')).toBeInTheDocument();
+    expect(callsTo(fetchMock, 'POST', '/api/admin/posts/feishu-rec1/restore')).toHaveLength(1);
+  });
+
+  it('已上线文章可以下架，下架后跳到「已下架文章」', async () => {
+    // 撤回入口只能放在已上线列表：待审的还没物化，实体不存在，
+    // 在那里放「下架」点下去只会 404，但作者会以为稿子没了。
+    const live = { ...post, id: 'post-1', status: 'approved' as const };
+    const fetchMock = stubApi({
+      'GET /api/admin/submissions': { items: [], total: 0 },
+      'GET /api/admin/posts': { items: [live] },
+      'GET /api/admin/posts/removed': { items: [] },
+      'POST /api/admin/posts/post-1/withdraw': { id: 'post-1', removed: true },
+    });
+    await unlock();
+    fireEvent.click(await screen.findByRole('button', { name: /已上线文章/ }));
+    expect(await screen.findByText('待审文章标题')).toBeInTheDocument();
+    fireEvent.click(await screen.findByRole('button', { name: '下架' }));
+    expect(await screen.findByText(/已下架，可在/)).toBeInTheDocument();
+    expect(callsTo(fetchMock, 'POST', '/api/admin/posts/post-1/withdraw')).toHaveLength(1);
+    // 操作完自动切到已下架列表，管理员能立刻确认结果
+    expect(await screen.findByText('没有已下架的文章')).toBeInTheDocument();
+  });
+
+  it('待审文章列表不提供下架按钮', async () => {
+    // 待审稿还没物化。这里给「下架」会渲染成一个必然 404 的按钮，
+    // 而作者会以为投稿被删了——撤回只对已上线内容有意义。
+    stubApi({
+      'GET /api/admin/submissions': { items: [], total: 0 },
+      'GET /api/admin/posts': { items: [post] },
+    });
+    await unlock();
+    fireEvent.click(await screen.findByRole('button', { name: /待审文章/ }));
+    expect(await screen.findByText('待审文章标题')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '下架' })).toBeNull();
+  });
+
   it('密钥被服务端拒绝时退回入口，不把无效密钥留在会话里', async () => {
     stubApi({ 'GET /api/admin/submissions': () => new Response(JSON.stringify({ error: { code: 'FORBIDDEN', message: '密钥无效' } }), { status: 403 }) });
     await unlock();
