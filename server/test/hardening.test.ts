@@ -521,10 +521,18 @@ describe('管理员重置密码', () => {
 describe('仓库卫生', () => {
   it('测试里不出现 username/password 相邻字面量（GitGuardian 会判成硬编码凭据）', () => {
     // 这类误报已经来过三次（ff32468 / dbb5ffd / 我加「推荐新站」测试那次）。
-    // 每次都是「拿一个本意无害的测试口令，但写成 { username: 'x', password: 'y' } 这种
-    // 相邻形态」。约定是提到常量（见本文件顶部 PASSWORD），这里把它钉死：
+    // 每次都是「拿一个本意无害的测试口令，但把两个键写成同一行里相邻的两个字面量」。
+    // 约定是提到常量（见本文件顶部 PASSWORD），这里把它钉死：
     // 以后谁再这么写，这条测试直接红，不用等邮件通知。
-    const roots = ['server/test', 'web/test', 'shared/test', 'scripts/test'];
+    //
+    // 注意这条注释本身也不能把那个形态原样写出来——GitGuardian 扫的是文本，
+    // 它分不清这是注释还是代码。3492e8b 的两个 incident 里就有一个是旧注释。
+    // 必须连 src 一起扫。3492e8b 的两个 incident 里，一个在 web/src/pages/Auth.tsx
+    // （注册表单的空初始值，值全是空串），只扫测试目录是盖不住的——扫描器不区分
+    // 「这是表单默认值」还是「这是真凭据」，它只认两个键相邻这个形态。
+    // scripts 没有 src 子目录，源码直接在包根下。
+    const roots = ['server/src', 'server/test', 'web/src', 'web/test', 'shared/src', 'shared/test', 'scripts', 'scripts/test'];
+    const seen = new Set<string>();
     const offenders: string[] = [];
     const walk = (dir: string) => {
       for (const entry of readdirSync(dir, { withFileTypes: true })) {
@@ -534,6 +542,9 @@ describe('仓库卫生', () => {
         // 跳过本测试自己：它的正则源码里就含 `password: '` 这样的字面量，
         // 不排除的话会自己报自己。
         if (path.endsWith('hardening.test.ts')) continue;
+        // scripts 与 scripts/test 有包含关系，同一文件别报两次。
+        if (seen.has(path)) continue;
+        seen.add(path);
         for (const [index, line] of readFileSync(path, 'utf8').split('\n').entries()) {
           // 只看同一行里 username 与 password（或 currentPassword/newPassword）都跟了字面量
           const pair = /username:\s*'[^']*'[\s\S]{0,80}?password:\s*'[^']*'|password:\s*'[^']*'[\s\S]{0,80}?username:\s*'[^']*'/;
