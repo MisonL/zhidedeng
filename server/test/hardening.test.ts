@@ -455,6 +455,9 @@ describe('审核群友提交', () => {
     approve(first, new Date('2026-11-06T00:00:00Z'));
     server.db.prepare("UPDATE entities SET data = json_set(data,'$.uptime',99.5) WHERE kind = 'station' AND json_extract(data,'$.source') = 'submission'").run();
     removeStation(openStore(server.db), submissionStations()[0]!.id, first, new Date('2026-11-06T01:00:00Z').toISOString());
+    // 中间态必须断言：下架没生效时，后面那次同步走的是「在线索引」路径，
+    // 根本没测到「已下架也参与认领」。把 markRemoved 改成空操作，这条用例照样绿。
+    expect(submissionStations()[0]!.removedAt).not.toBeNull();
 
     approve(mk('alias-review.example.com', 'alias-b2', new Date('2026-11-07T00:00:00Z')), new Date('2026-11-07T00:00:00Z'));
     const rows = submissionStations();
@@ -480,6 +483,7 @@ describe('审核群友提交', () => {
     approve(first, new Date('2026-11-06T00:00:00Z'));
     server.db.prepare("UPDATE entities SET data = json_set(data,'$.uptime',97.5) WHERE kind = 'station' AND json_extract(data,'$.source') = 'submission'").run();
     removeStation(openStore(server.db), rows()[0]!.id, first, new Date('2026-11-06T01:00:00Z').toISOString());
+    expect(rows()[0]!.removedAt).not.toBeNull();
 
     approve(mk('null-batch.example.com', new Date('2026-11-07T00:00:00Z')), new Date('2026-11-07T00:00:00Z'));
     const after = rows();

@@ -124,7 +124,10 @@ describe('全量导入', () => {
     const ids = () => store.db.prepare("SELECT id FROM entities WHERE kind = 'post' AND json_extract(data,'$.source') = 'submission'").all();
     expect(ids()).toEqual([{ id: `sub-${submissionId}` }]);
 
-    await runImport(store, { ...submission, posts: [{ recordId: 'recNull', stationSlug: 'sub-api-example-com', title: '空批次', summary: '摘要', body: '正文', authorName: '甲', publishedAt: '2026-11-04T08:00:00.000Z' }] });
+    const ok = await runImport(store, { ...submission, posts: [{ recordId: 'recNull', stationSlug: 'sub-api-example-com', title: '空批次', summary: '摘要', body: '正文', authorName: '甲', publishedAt: '2026-11-04T08:00:00.000Z' }] });
+    // 同样要断言导入真的成功：一个「遇到已通过投稿就 400」的实现能让 id 不变，
+    // 但那等于把功能关掉。
+    expect(ok.status).toBe(200);
     expect(ids()).toEqual([{ id: `sub-${submissionId}` }]);
 
     // 再来一条同样是「空批次」的同记录投稿。物化侧原先按 `batchId !== null` 分流，
