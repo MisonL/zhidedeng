@@ -472,7 +472,8 @@ export interface StationDetailView {
   url: string | null;
   rechargeThreshold: number | null;
   paymentMethods: string[];
-  offers: { modelSlug: string; rate: number }[];
+  /** 口径与报价时间要原样带回来：这个命令的用途是「读出来 → 改一条 → 整包提交」。 */
+  offers: { modelSlug: string; rate: number; basis?: string; quotedAt?: string | null }[];
 }
 
 /**
@@ -507,10 +508,19 @@ export async function stationDetail(
     paymentMethods: Array.isArray(station.paymentMethods)
       ? station.paymentMethods.filter((method): method is string => typeof method === 'string')
       : [],
+    // 口径与报价时间必须原样带回：站点投稿是整包替换，落下的字段会被
+    // 写成默认值——来源里写着的「按输入、10 月 1 日报的价」退化成
+    // 「综合、时间未知」，而提交人和审核台都看不出被改过。
     offers: offers
-      .filter((offer): offer is { modelSlug: string; rate: number } =>
+      .filter((offer): offer is { modelSlug: string; rate: number; basis?: unknown; quotedAt?: unknown } =>
         typeof (offer as { modelSlug?: unknown })?.modelSlug === 'string' && typeof (offer as { rate?: unknown })?.rate === 'number')
-      .map(offer => ({ modelSlug: offer.modelSlug, rate: offer.rate })),
+      .map((offer) => {
+        const mapped: { modelSlug: string; rate: number; basis?: string; quotedAt?: string | null } = { modelSlug: offer.modelSlug, rate: offer.rate };
+        if (typeof offer.basis === 'string') mapped.basis = offer.basis;
+        // quotedAt 的 null 是「来源没说」，是有意义的取值，不能顺手省略。
+        if (typeof offer.quotedAt === 'string' || offer.quotedAt === null) mapped.quotedAt = offer.quotedAt;
+        return mapped;
+      }),
   };
 }
 

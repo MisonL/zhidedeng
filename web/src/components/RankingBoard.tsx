@@ -35,7 +35,10 @@ function RankCards({ data }: { data: GetRankingsResponse }) {
     return data.items.map(({ rank, model, lowestRate, stationCount }) => (
       <RankCard
         key={model.slug} rank={rank} to={`/models/${model.slug}`} art={<ModelTile model={model} />} title={model.name}
-        highlight={lowestRate === null ? '暂无报价' : `低至 ${formatRate(lowestRate)} · ${stationCount} 站可选`}
+        // 「低至 0.4x · 5 站可选」读起来像「5 个站都能拿到 0.4x」，但 stationCount
+        // 数的是**所有口径**的报价站数，而 0.4x 只来自综合口径。5 站里可能只有 2 站
+        // 报的是综合价。改成「有报价」，只陈述「这些站在报这个模型」，不暗示都能拿到这个价。
+        highlight={lowestRate === null ? '暂无报价' : `低至 ${formatRate(lowestRate)} · ${stationCount} 站有报价`}
       />
     ));
   }

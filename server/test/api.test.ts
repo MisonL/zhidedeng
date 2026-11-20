@@ -3,6 +3,7 @@ import { API_ROUTES } from '@zhidedeng/shared';
 import type { ApiContracts, ApiRouteName, Post } from '@zhidedeng/shared';
 import { createApp, openStore } from '../src/node-app.ts';
 import { reviewSubmission } from '../src/submissions.ts';
+import { sortOffersForDisplay } from '../src/service.ts';
 
 let clock = new Date('2026-11-03T15:59:00Z');
 let server: ReturnType<typeof createApp>;
@@ -303,6 +304,21 @@ describe('writes and boundary validation', () => {
     // 详情页的报价表也得先按口径分组：只按 rate 排的话第一行是按输入的 0.3，
     // 读者第一眼看到的是个不可比的局部价。
     expect(detail.offers.map(offer => offer.basis)).toEqual(['blended', 'input', 'output']);
+  });
+
+  it('认不出的口径排在最后，不会占住第一行被标成最便宜', () => {
+    // 老库的 ALTER 补不上 basis 的 CHECK，手工 UPDATE 进去的脏值确实可能存在。
+    // `BASIS_ORDER.indexOf('garbage')` 返回 -1，用它排序会把这个谁也不认识的口径
+    // 排到第一行；而前端把第一行标成「最便宜」。等于拿脏数据给站点背书。
+    //
+    // 新库有 CHECK，脏值写不进库——这正好说明为什么在排序函数这一层测：
+    // 约束挡不住「已经是脏数据的库」，而排序逻辑要能扛住它。
+    const dirty = { rate: 0.2, basis: 'garbage' };
+    const blended = { rate: 0.9, basis: 'blended' };
+    expect(sortOffersForDisplay([dirty, blended])).toEqual([blended, dirty]);
+    // 也不能只排到 blended 后面却抢在其它合法口径前面
+    expect(sortOffersForDisplay([dirty, { rate: 0.5, basis: 'package' }, { rate: 0.7, basis: 'output' }, { rate: 0.6, basis: 'input' }])
+      .map(offer => offer.basis)).toEqual(['input', 'output', 'package', 'garbage']);
   });
 
   it('只有非综合口径报价时，最低倍率显示「暂无」而不是拿别的口径冒充', async () => {

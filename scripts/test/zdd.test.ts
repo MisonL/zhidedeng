@@ -733,12 +733,20 @@ describe('zdd station', () => {
         return new Response(JSON.stringify({
           slug: 'lantern-demo', name: '灯笼猫', description: '中转站描述',
           url: 'https://lantern.example.com/', rechargeThreshold: 50, paymentMethods: ['支付宝'],
-          offers: [{ modelSlug: 'claude-sonnet', rate: 0.8 }, { modelSlug: 'gpt-4-1', rate: 1.2 }],
+          offers: [
+            { modelSlug: 'claude-sonnet', rate: 0.8, basis: 'input', quotedAt: '2026-11-01T00:30:00Z' },
+            { modelSlug: 'gpt-4-1', rate: 1.2, basis: 'blended', quotedAt: null },
+          ],
         }), { status: 200, headers: { 'content-type': 'application/json' } });
       }) as unknown as typeof fetch,
     });
     expect(requested).toContain('/api/stations/lantern-demo');
-    expect(detail.offers).toEqual([{ modelSlug: 'claude-sonnet', rate: 0.8 }, { modelSlug: 'gpt-4-1', rate: 1.2 }]);
+    // 口径与报价时间也要带回来：这个命令的用途是「读出来 → 改一条 → 整包提交」，
+    // 站点投稿是整包替换，丢字段就是静默把它改成默认值。
+    expect(detail.offers).toEqual([
+      { modelSlug: 'claude-sonnet', rate: 0.8, basis: 'input', quotedAt: '2026-11-01T00:30:00Z' },
+      { modelSlug: 'gpt-4-1', rate: 1.2, basis: 'blended', quotedAt: null },
+    ]);
     // 这三项是站点投稿的必填字段：不返回的话，Agent 改一条报价就会把它们静默清空。
     expect(detail.description).toBe('中转站描述');
     expect(detail.rechargeThreshold).toBe(50);

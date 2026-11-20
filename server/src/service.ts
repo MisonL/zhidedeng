@@ -127,6 +127,26 @@ const RESERVED_NICKNAMES = new Set([
 
 /** 报价表的展示顺序：综合在前，其余按「谁更常被拿来比」排。 */
 const BASIS_ORDER = ['blended', 'input', 'output', 'package'];
+/**
+ * 口径的排序位次。认不出的口径排**最后**，不能靠 `indexOf` 返回的 -1 排到最前：
+ * 老库的 ALTER 补不上 CHECK，历史脏值确实可能存在；一旦它排到第一行，
+ * 前端会把第一行标成「最便宜」，等于拿一个没人认识的字符串给站点背书。
+ */
+const basisRank = (basis: string | undefined) => {
+  if (basis === undefined) return 0;
+  const index = BASIS_ORDER.indexOf(basis);
+  return index === -1 ? BASIS_ORDER.length : index;
+};
+
+/**
+ * 报价表的展示顺序：先按口径分组、组内按倍率升序。
+ *
+ * 只按 rate 排会把「按输入 0.3」排在「综合 0.5」前面，而这两个数字不可比——
+ * 第一行会被读者当成「最便宜」。综合口径排最前（它代表整站常态），
+ * 认不出的口径排最后（见 basisRank）。
+ */
+export const sortOffersForDisplay = <T extends { rate: number; basis?: string }>(offers: readonly T[]): T[] =>
+  [...offers].sort((a, b) => basisRank(a.basis) - basisRank(b.basis) || a.rate - b.rate);
 
 export class Service {
   readonly store: Store;
@@ -606,12 +626,7 @@ export class Service {
     // 实测报价条数达到阈值以上，预取才开始划算。
     const ratedStations = this.offers().reduce((count, offer) => count + Number(offer.modelSlug === slug), 0);
     const interactions = ratedStations >= PREFETCH_MIN_ROWS ? this.interactionMap('station') : null;
-    // 先按口径分组、组内再按倍率排。只按 rate 排会把「按输入 0.3」排在
-    // 「综合 0.5」前面，而这两个数字不可比——榜上第一行会被误读成「最便宜」。
-    // 综合口径排最前（它能代表整站常态），其余按固定顺序。
-    const basisRank = (basis: string | undefined) => BASIS_ORDER.indexOf(basis ?? 'blended');
-    const offers = this.offers().filter(o => o.modelSlug === slug)
-      .sort((a, b) => basisRank(a.basis) - basisRank(b.basis) || a.rate - b.rate)
+    const offers = sortOffersForDisplay(this.offers().filter(o => o.modelSlug === slug))
       // 站点已被下架时报价不该出现；用 filter 兜底而不是非空断言，
       // 一条孤儿报价不能把整个模型页变成 500。
       .flatMap(o => { const station = this.store.get('station', o.stationSlug); return station ? [{ ...o, station: this.station(station, interactions ?? undefined) }] : []; });
@@ -653,10 +668,8 @@ export class Service {
   getStation(slug: string): StationDetail {
     const station = this.store.get('station', slug);
     if (!station) throw new ApiError(404, 'NOT_FOUND', '中转站不存在');
-    // 和模型页同一套：先按口径分组再按倍率。只按 rate 排会把「按输入 0.3」
-    // 排在「综合 0.5」上面，读者看到的第一个数字就是个不可比的局部价。
-    return { ...this.station(station), offers: this.offers().filter(o => o.stationSlug === slug)
-      .sort((a, b) => BASIS_ORDER.indexOf(a.basis ?? 'blended') - BASIS_ORDER.indexOf(b.basis ?? 'blended') || a.rate - b.rate)
+    // 和模型页同一套顺序，见 sortOffersForDisplay。
+    return { ...this.station(station), offers: sortOffersForDisplay(this.offers().filter(o => o.stationSlug === slug))
       .flatMap(o => { const model = this.store.get('model', o.modelSlug); return model ? [{ ...o, model }] : []; }) };
   }
 

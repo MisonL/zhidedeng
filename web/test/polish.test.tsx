@@ -51,7 +51,7 @@ describe('排行榜卡片', () => {
     const link = await screen.findByRole('link', { name: /DeepSeek V4/ });
     expect(container.querySelector('.rank-ribbon')).toHaveClass('rank-top-1');
     expect(container.querySelector('.cover-model')).toHaveAttribute('data-mark', 'DeepSeek V4');
-    expect(link).toHaveAccessibleName(/^TOP 1\s*DeepSeek V4\s*低至 0.5x · 8 站可选$/);
+    expect(link).toHaveAccessibleName(/^TOP 1\s*DeepSeek V4\s*低至 0.5x · 8 站有报价$/);
   });
 });
 
