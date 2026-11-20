@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import type { FormEvent } from 'react';
+import { feishuHostnameKey } from '@zhidedeng/shared';
 import type { Station, SubmissionRecord } from '@zhidedeng/shared';
 import { admin, adminToken, AdminError } from '../admin';
 import type { AdminPostRow, RemovedPost, RemovedStation } from '../admin';
@@ -244,7 +245,9 @@ export default function Admin() {
     const map = new Map<string, (typeof stationBySlug extends Map<string, infer V> ? V : never)>();
     for (const station of stationBySlug.values()) {
       if (station.url === null) continue;
-      try { map.set(new URL(station.url).hostname.toLowerCase(), station); } catch { /* 非法 URL 忽略 */ }
+      // 必须和服务端同一套归一（去 FQDN 尾点、小写）。审核台原先直接用裸 hostname，
+      // 站点地址是尾点写法时，同一条站会被判成「新建站点」，也就不会提示将覆盖什么。
+      try { map.set(feishuHostnameKey(new URL(station.url).hostname), station); } catch { /* 非法 URL 忽略 */ }
     }
     return map;
   })();
@@ -287,7 +290,7 @@ export default function Admin() {
     const url = payload && typeof payload.url === 'string' ? payload.url : null;
     if (url === null) return impact(item, undefined);
     let hostname: string;
-    try { hostname = new URL(url).hostname.toLowerCase(); } catch { return impact(item, undefined); }
+    try { hostname = feishuHostnameKey(new URL(url).hostname); } catch { return impact(item, undefined); }
     return impact(item, stationByHost.get(hostname));
   };
   const pendingPosts = posts ?? [];

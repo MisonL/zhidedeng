@@ -926,6 +926,57 @@ describe('审核群友提交', () => {
     expect(row.slug).toBe('sub-dotlink-example-com');
   });
 
+  it('库里的地址带尾点、投稿地址不带且路径不同时，也要认回同一条而不是新建', async () => {
+    // 这条专门压 `hostnameOf` 的去尾点：Agent 通道不走飞书分组，只剩 hostname 兜底，
+    // 少这一层归一就会另建一条站（同 host 两条实体）。
+    const store = openStore(server.db);
+    store.put('station', 'agent-dotagent.example.com', {
+      slug: 'agent-dotagent.example.com', name: '尾点站', description: '描述',
+      url: 'https://dotagent.example.com./pricing', rechargeThreshold: null, paymentMethods: [],
+      status: null, uptime: null, firstTokenLatencyMs: null, foundedAt: null, source: 'agent' as const,
+    });
+    const id = enqueueSubmission(store, {
+      kind: 'station', channel: 'agent', originKey: 'dotagent.example.com', action: 'upsert',
+      payload: { slug: 'dotagent', name: 'Agent 投稿', description: '描述', url: 'https://dotagent.example.com/', rechargeThreshold: null, paymentMethods: [], offers: [] },
+      ip: '203.0.113.59', now: new Date('2026-11-06T00:00:00Z'),
+    }, { globalPendingBreaker: false }).submission.id;
+    reviewSubmission(store, new Date('2026-11-06T00:00:00Z'), id, { status: 'approved' });
+
+    const rows = server.db.prepare(
+      "SELECT id, json_extract(data,'$.url') url, json_extract(data,'$.name') name FROM entities WHERE kind = 'station' AND id LIKE '%dotagent%' ORDER BY rowid",
+    ).all() as { id: string; url: string; name: string }[];
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ id: 'agent-dotagent.example.com', name: 'Agent 投稿' });
+  });
+
+  it('在线 /b 与「已下架且地址带尾点」的 /a 并存时，投 /a 要复活 /a、不改写 /b', async () => {
+    // 这条专门压 `stationUrlKey` 的去尾点：两条路径不同，hostname 兜底会认错实体，
+    // 把在线 /b 的地址改写成 /a，而已下架的 /a 反而不复活。
+    const store = openStore(server.db);
+    const seed = (slug: string, url: string, removed = false) => {
+      store.put('station', slug, {
+        slug, name: slug, description: '描述', url, rechargeThreshold: null, paymentMethods: [],
+        status: null, uptime: null, firstTokenLatencyMs: null, foundedAt: null, source: 'submission' as const,
+      });
+      if (removed) server.db.prepare("UPDATE entities SET removedAt = '2026-11-01T00:00:00Z' WHERE kind = 'station' AND id = ?").run(slug);
+      store.invalidate();
+    };
+    seed('agent-dotpath-a.example.com', 'https://dotpath.example.com./a', true);
+    seed('agent-dotpath-b.example.com', 'https://dotpath.example.com/b');
+    const id = enqueueSubmission(store, {
+      kind: 'station', channel: 'feishu', originKey: 'dotpath.example.com', action: 'upsert',
+      payload: { slug: 'dotpath', name: 'A 复活', description: '描述', url: 'https://dotpath.example.com/a', rechargeThreshold: null, paymentMethods: [], offers: [] },
+      ip: '203.0.113.60', now: new Date('2026-11-06T00:00:00Z'),
+    }, { globalPendingBreaker: false }).submission.id;
+    reviewSubmission(store, new Date('2026-11-06T00:00:00Z'), id, { status: 'approved' });
+
+    const read = (slug: string) => server.db.prepare(
+      "SELECT json_extract(data,'$.url') url, json_extract(data,'$.name') name, removedAt FROM entities WHERE kind = 'station' AND id = ?",
+    ).get(slug) as { url: string; name: string; removedAt: string | null };
+    expect(read('agent-dotpath-a.example.com')).toMatchObject({ name: 'A 复活', removedAt: null });
+    expect(read('agent-dotpath-b.example.com')).toMatchObject({ url: 'https://dotpath.example.com/b', name: 'agent-dotpath-b.example.com' });
+  });
+
   it('站内作者自己的文章也能被管理员下架，不必走投稿队列', async () => {
     // source='user' 的文章原本只能改状态：前台确实看不见了，但管理端既没有
     // 恢复入口，也查不到下架时间。统一走软删除后两者都有了。

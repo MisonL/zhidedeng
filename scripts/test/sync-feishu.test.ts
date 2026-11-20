@@ -206,6 +206,17 @@ describe('planBatch', () => {
     expect(plan.removals.map(item => item.payload.slug)).toEqual(['sub-gone-original', 'sub-www-gone']);
   });
 
+  it('线上地址带 FQDN 尾点时，仍认作「表格里还有」，不生成下架', () => {
+    // 站点的 originKey 与表格行的 host 都要过同一套归一。归一不一致时，表里明明
+    // 还有这个站，计划却会把它算成「已删除」并生成下架条目——自动把在架站下掉。
+    const dotted: AdminSubmissionStateResponse = { stations: [
+      ...online.stations.filter(station => station.slug === 'actual-collision-slug'),
+      { slug: 'sub-dotted', submissionId: 'online-dotted', originKey: 'www.api.example.com.', url: 'https://www.api.example.com./', name: '尾点站' },
+    ] };
+    const plan = planBatch(buildBatch(fixtureRecords(), MODELS).payload, dotted);
+    expect(plan.removals).toEqual([]);
+  });
+
   it('规划只比较快照，空表保护由命令行执行；无状态无法区分新增和更新', () => {
     expect(planBatch(buildBatch([], MODELS).payload, online).removals).toHaveLength(2);
     const partial = planBatch(buildBatch(fixtureRecords(), MODELS).payload, null);
