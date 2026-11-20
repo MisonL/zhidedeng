@@ -376,7 +376,9 @@ export function listSubmissions(store: Store, input: {
 /** 从站点 url 取归一化 hostname，用于判断某个 slug 是不是同一个站点。 */
 export function hostnameOf(url: string | null): string | null {
   if (!url) return null;
-  try { return new URL(url).hostname.toLowerCase(); } catch { return null; }
+  // 去 FQDN 尾点：`example.com.` 与 `example.com` 必须落到同一条实体。
+  // 与 shared 的 feishuHostnameKey、同步脚本 normalizeUrl 保持同一归一。
+  try { return new URL(url).hostname.toLowerCase().replace(/\.+$/, ''); } catch { return null; }
 }
 
 /**
@@ -393,7 +395,8 @@ function stationUrlKey(url: string | null): string | null {
   try {
     const parsed = new URL(url);
     const path = parsed.pathname.replace(/\/+$/, '') || '/';
-    return `${parsed.hostname.toLowerCase()}${parsed.port ? `:${parsed.port}` : ''}${path}${parsed.search}`;
+    const host = parsed.hostname.toLowerCase().replace(/\.+$/, '');
+    return `${host}${parsed.port ? `:${parsed.port}` : ''}${path}${parsed.search}`;
   } catch { return null; }
 }
 
@@ -808,56 +811,61 @@ function supersedePending(store: Store, submission: SubmissionRecord, reviewedAt
   // 下架请求只替代待审的 upsert，不替代别的下架请求（两条下架都指向同一站时，
   // 后一条审核会拿到「站点已不存在」的说明，不是无意义待审）。
   const actionFilter = submission.action === 'remove' ? "AND action = 'upsert'" : '';
-  store.db.prepare(`UPDATE submissions SET status = 'superseded', reason = ?, reviewedAt = ? WHERE kind = ? AND originKey = ? AND status = 'pending' AND id <> ? ${actionFilter}`)
-    .run(SUPERSEDED_REASON, reviewedAt, submission.kind, submission.originKey, submission.id);  if (submission.kind !== 'station') return;
-  const key = feishuHostnameKey(submission.originKey);
-  const aliases = [key, `www.${key}`].filter(host => host !== submission.originKey && feishuHostnameKey(host) === key);
-  if (aliases.length === 0) return;
 
-  if (submission.action === 'remove') {
-    // 下架按分组覆盖 www 与裸域两种写法：组里另一条写法的待审上架已经没有意义。
-    // （这段原本和 upsert 共用一个循环，我把 upsert 改成逐条解析时漏掉了它——
-    // 结果下架不再替代别名的待审上架，审核台会留下一条「点了通过又把站建回来」的
-    // 记录。补回来，并且单独成段，免得下次再被合并掉。）
-    if (submission.channel !== 'feishu' || submission.batchId === null) return;
-    for (const alias of aliases) {
-      store.db.prepare("UPDATE submissions SET status = 'superseded', reason = ?, reviewedAt = ? WHERE kind = 'station' AND channel = 'feishu' AND batchId IS NOT NULL AND originKey = ? AND status = 'pending' AND id <> ? AND action = 'upsert'")
-        .run(SUPERSEDED_REASON, reviewedAt, alias, submission.id);
-    }
+  // 模型与文章的身份就是 originKey，直接按它替代。
+  if (submission.kind !== 'station') {
+    store.db.prepare(`UPDATE submissions SET status = 'superseded', reason = ?, reviewedAt = ? WHERE kind = ? AND originKey = ? AND status = 'pending' AND id <> ? ${actionFilter}`)
+      .run(SUPERSEDED_REASON, reviewedAt, submission.kind, submission.originKey, submission.id);
     return;
   }
 
-  {
-    const target = findStation(store, submission, parse(stationUrlSchema, submission.payload).url);
-    if (!target) return;
-    // 只替代「批准后确实会写到同一个实体」的别名待审。
-    //
-    // 原先拿 `allByGroupedHost.get(key)` 当替身代表去比 slug，问题有两层：
-    // 一是它只按 rowid 取第一条，与本次投稿实际认领到的实体不是一回事；
-    // 二是把「在线」和「已下架」混在一起比，同组里一条下架、一条在线时结论
-    // 随 rowid 顺序翻转（实测过 pending / superseded 两种结果）。
-    // 现在逐条按别名自己的 payload 走一遍 `findStation`——那正是批准它时会走的路，
-    // 结果相同才说明它已经没有再审的意义。Agent/web 可分别持有 www 与裸域实体，
-    // 分组键相同不等于会写到同一条记录，所以必须逐条算。
-    for (const alias of aliases) {
+  // 站点不能按 originKey 一刀切：originKey 只是 hostname，**同 hostname 不同路径**
+  // 可能是两条不同实体。曾经无条件按 originKey 替代，结果批准 /a 的更新把「复活
+  // /b」的待审清成 superseded——那条投稿凭空消失，已下架的站再也救不回来。
+  // 现在一律「逐条按它自己的 payload 走一遍 findStation」，只有批准后确实会写到
+  // **本次审核作用到的那个实体**，才替代。
+  const targetSlug = submission.action === 'remove'
+    ? parse(removalSchema, submission.payload).slug
+    : findStation(store, submission, parse(stationUrlSchema, submission.payload).url)?.slug;
+  if (targetSlug === undefined) return;
+
+  // 候选范围分两批，替代条件不同（沿用既有契约）：
+  //  - 同一 originKey：任何渠道、任何批次都算，它本来就是「同一个落点」的最强信号；
+  //  - 别名写法（www / 裸域）：只有**飞书批次**才替代。管理端单条（无 batchId）
+  //    与 agent/web 的待审是有意保留的，它们各自可能指向另一条实体，不该被顺手清掉。
+  const key = feishuHostnameKey(submission.originKey);
+  const aliasHosts = [key, `www.${key}`].filter(host => feishuHostnameKey(host) === key && host !== submission.originKey);
+  const groups: { origins: string[]; filter: string }[] = [
+    { origins: [submission.originKey], filter: '' },
+    { origins: aliasHosts, filter: "AND channel = 'feishu' AND batchId IS NOT NULL" },
+  ];
+
+  // 「这条待审批准后会写到哪个实体」——按它自己的 payload 算，就是批准它时走的路。
+  const slugOf = (candidate: SubmissionRecord): string | undefined => {
+    if (candidate.action === 'remove') return parse(removalSchema, candidate.payload).slug;
+    return findStation(store, { channel: candidate.channel, originKey: candidate.originKey }, parse(stationUrlSchema, candidate.payload).url)?.slug;
+  };
+
+  for (const group of groups) {
+    for (const origin of group.origins) {
       const rows = store.db.prepare(
-        "SELECT id, payload FROM submissions WHERE kind = 'station' AND channel = 'feishu' AND batchId IS NOT NULL AND originKey = ? AND status = 'pending' AND id <> ?" + actionFilter,
-      ).all(alias, submission.id) as unknown as { id: string; payload: string }[];
-      for (const row of rows) {
-        let payloadUrl: string;
+        `SELECT * FROM submissions WHERE kind = 'station' AND originKey = ? AND status = 'pending' AND id <> ? ${actionFilter} ${group.filter}`,
+      ).all(origin, submission.id);
+      for (const raw of rows) {
+        const candidate = submissionRecord(raw as Record<string, unknown>);
+        let candidateSlug: string | undefined;
         try {
-          payloadUrl = parse(stationUrlSchema, JSON.parse(row.payload)).url;
+          candidateSlug = slugOf(candidate);
         } catch (error) {
           // payload 是旧格式/坏数据：判断不了它会写到哪，宁可留着让人看见。
-          // 但它会一直 pending，而批次「还有 pending」就允许继续追加——等于这条坏行
+          // 但它会一直 pending，而「批次还有 pending」就允许继续追加——等于这条坏行
           // 把批次永远敞开。至少留个日志，别让它悄无声息地卡住。
-          console.warn(`投稿 ${row.id} 的 payload 解析失败，别名替代已跳过：${(error as Error).message}`);
+          console.warn(`投稿 ${candidate.id} 的 payload 解析失败，替代判定已跳过：${(error as Error).message}`);
           continue;
         }
-        const aliasTarget = findStation(store, { channel: 'feishu', originKey: alias }, payloadUrl);
-        if (aliasTarget?.slug !== target.slug) continue;
+        if (candidateSlug !== targetSlug) continue;
         store.db.prepare("UPDATE submissions SET status = 'superseded', reason = ?, reviewedAt = ? WHERE id = ? AND status = 'pending'")
-          .run(SUPERSEDED_REASON, reviewedAt, row.id);
+          .run(SUPERSEDED_REASON, reviewedAt, candidate.id);
       }
     }
   }

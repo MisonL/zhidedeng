@@ -36,6 +36,30 @@ describe('没有测量数据的站点', () => {
     }
   });
 
+  it.each(['score', 'uptime'] as const)('同值站按 slug 定序，不随插入顺序翻转（sort=%s）', async (sort) => {
+    // descendingNullsLast 在值相等时返回 0，剩下的顺序交给 SQLite rowid + V8 稳定排序。
+    // 全量导入重建后插入顺序一变，同样内容的两站就可能在分页间互换位置。
+    const make = (slug: string, key: string) => ({
+      slug, name: slug, description: 'd', url: `https://${slug}.example.com/`, source: 'submission',
+      rechargeThreshold: null, paymentMethods: [], status: 'running',
+      uptime: 90, firstTokenLatencyMs: 200, foundedAt: '2023-01-01',
+      ...(sort === 'uptime' ? { uptime: 90 } : {}),
+    });
+    const read = async () => {
+      const { items } = await stations(sort);
+      return items.filter(item => item.slug.startsWith('tie-')).map(item => item.slug);
+    };
+    server.db.prepare("INSERT INTO entities (kind,id,data) VALUES ('station','tie-b',?)").run(JSON.stringify(make('tie-b', sort)));
+    server.db.prepare("INSERT INTO entities (kind,id,data) VALUES ('station','tie-a',?)").run(JSON.stringify(make('tie-a', sort)));
+    const orderAB = await read();
+    server.db.prepare("DELETE FROM entities WHERE id IN ('tie-a','tie-b')").run();
+    server.db.prepare("INSERT INTO entities (kind,id,data) VALUES ('station','tie-a',?)").run(JSON.stringify(make('tie-a', sort)));
+    server.db.prepare("INSERT INTO entities (kind,id,data) VALUES ('station','tie-b',?)").run(JSON.stringify(make('tie-b', sort)));
+    const orderBA = await read();
+    expect(orderAB).toEqual(['tie-a', 'tie-b']);
+    expect(orderBA).toEqual(['tie-a', 'tie-b']);
+  });
+
   it('按倍率排序仍返回真实报价，但不足三个报价的站点排在最后', async () => {
     const { items } = await stations('rate');
     expect(items.at(-1)).toMatchObject({ slug: unmeasured.slug, lowestRate: 0.05 });

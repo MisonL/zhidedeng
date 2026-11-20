@@ -666,7 +666,12 @@ export class Service {
           || a.slug.localeCompare(b.slug);
       });
     } else {
-      items.sort((a, b) => query.sort === 'uptime' ? descendingNullsLast(a.uptime, b.uptime) : descendingNullsLast(a.score, b.score));
+      // 同值时必须按 slug 兜底：光靠 descendingNullsLast 返回 0，会让顺序依赖
+      // 插入顺序（SQLite rowid + V8 stable sort），全量导入重建后同一批站可能在
+      // 分页间换位置——第 1 页出现第 2 页的条目。
+      items.sort((a, b) => (query.sort === 'uptime'
+        ? descendingNullsLast(a.uptime, b.uptime)
+        : descendingNullsLast(a.score, b.score)) || a.slug.localeCompare(b.slug));
     }
     return paginate(items, query);
   }

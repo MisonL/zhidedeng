@@ -848,6 +848,65 @@ describe('审核群友提交', () => {
     expect(read('agent-path2-a.example.com')).toMatchObject({ url: 'https://pathy2.example.com/a', name: 'agent-path2-a.example.com', removedAt: null });
   });
 
+  it('普通写法与 FQDN 尾点写法是同一条站，且都进下架计划', async () => {
+    // `https://dot.example.com/` 与 `https://dot.example.com./` 是同一站（FQDN 合法形式）。
+    // 之前 shared 的 feishuHostnameKey 去尾点，但服务端 hostnameOf 不去，
+    // 于是两条写法落成两个实体；尾点那条既不在飞书下架计划里、人工下架也报
+    // STALE_REMOVAL（版本核对不上）。三处归一必须一致：只加这一条用例挡不住。
+    const store = openStore(server.db);
+    const queue = (host: string, url: string, batch: string) => enqueueSubmission(store, {
+      kind: 'station', channel: 'feishu', originKey: host, batchId: batch, action: 'upsert',
+      payload: { slug: 'dot', name: '尾点站', description: '描述', url, rechargeThreshold: null, paymentMethods: [], offers: [] },
+      ip: '203.0.113.56', now: new Date('2026-11-06T00:00:00Z'),
+    }, { globalPendingBreaker: false }).submission.id;
+    reviewSubmission(store, new Date('2026-11-06T00:00:00Z'), queue('dot.example.com', 'https://dot.example.com/', 'dot-a'), { status: 'approved' });
+    reviewSubmission(store, new Date('2026-11-06T00:00:00Z'), queue('dot.example.com.', 'https://dot.example.com./', 'dot-b'), { status: 'approved' });
+
+    const rows = server.db.prepare(
+      "SELECT id, json_extract(data,'$.url') url FROM entities WHERE kind = 'station' AND id LIKE '%dot-example-com%' ORDER BY rowid",
+    ).all() as { id: string; url: string }[];
+    expect(rows).toHaveLength(1);
+    expect(submissionState(store).stations.map(station => station.slug)).toContain(rows[0]!.id);
+  });
+
+  it('批准同 hostname 另一条路径的更新，不替代「复活其它路径站」的待审', async () => {
+    // supersedePending 旧逻辑首条按 originKey 一刀切：originKey 只是 hostname，
+    // 同 hostname 不同路径是两条不同实体。批准 /a 的更新会把「复活 /b」的待审
+    // 清成 superseded——那条投稿凭空消失，已下架的站再也救不回来。
+    const store = openStore(server.db);
+    const seed = (slug: string, url: string) => store.put('station', slug, {
+      slug, name: slug, description: '描述', url, rechargeThreshold: null, paymentMethods: [],
+      status: null, uptime: null, firstTokenLatencyMs: null, foundedAt: null, source: 'submission' as const,
+    });
+    seed('sub-sup-a', 'https://sup.example.com/a');
+    seed('sub-sup-b', 'https://sup.example.com/b');
+    const queue = (batch: string, url: string, name: string) => enqueueSubmission(store, {
+      kind: 'station', channel: 'feishu', originKey: 'sup.example.com', batchId: batch, action: 'upsert',
+      payload: { slug: 'sup', name, description: '描述', url, rechargeThreshold: null, paymentMethods: [], offers: [] },
+      ip: '203.0.113.57', now: new Date('2026-11-06T00:00:00Z'),
+    }, { globalPendingBreaker: false }).submission.id;
+    // 先给 /b 一个 approved 版本，拿它的 id 下架 /b（模拟正常同步顺序）
+    const main = queue('sup-main', 'https://sup.example.com/b', 'B 主版本');
+    reviewSubmission(store, new Date('2026-11-06T00:00:00Z'), main, { status: 'approved' });
+    const latest = server.db.prepare("SELECT id FROM submissions WHERE kind='station' AND status='approved' ORDER BY reviewedAt DESC, rowid DESC LIMIT 1").get() as { id: string };
+    const rem = enqueueSubmission(store, {
+      kind: 'station', channel: 'feishu', originKey: 'sup.example.com', batchId: 'sup-rem', action: 'remove',
+      payload: { slug: 'sub-sup-b', submissionId: latest.id }, ip: '203.0.113.57', now: new Date('2026-11-07T00:00:00Z'),
+    }, { globalPendingBreaker: false }).submission.id;
+    reviewSubmission(store, new Date('2026-11-07T00:00:00Z'), rem, { status: 'approved' });
+    expect(store.getWithRemoved('station', 'sub-sup-b')?.name).toBe('B 主版本');
+
+    const a2 = queue('sup-a2', 'https://sup.example.com/a', 'A v2');
+    const bRevive = queue('sup-b2', 'https://sup.example.com/b', 'B 复活');
+    reviewSubmission(store, new Date('2026-11-08T00:00:00Z'), a2, { status: 'approved' });
+
+    const status = (id: string) => (server.db.prepare('SELECT status FROM submissions WHERE id = ?').get(id) as { status: string }).status;
+    expect(status(a2)).toBe('approved');
+    // 这条绝不能被「另一条路径的更新」顺手替代掉
+    expect(status(bRevive)).toBe('pending');
+    expect(store.getWithRemoved('station', 'sub-sup-a')?.name).toBe('A v2');
+  });
+
   it('站内作者自己的文章也能被管理员下架，不必走投稿队列', async () => {
     // source='user' 的文章原本只能改状态：前台确实看不见了，但管理端既没有
     // 恢复入口，也查不到下架时间。统一走软删除后两者都有了。

@@ -7,7 +7,10 @@
 
 /** 飞书一直将 www 和裸域名归为同组；入队后沿用这个身份，避免重复建站。 */
 export function feishuHostnameKey(hostname: string): string {
-  return hostname.toLowerCase().replace(/^www\./, '');
+  // 绝对域名（FQDN）末尾的点合法且常见：`example.com.` 与 `example.com` 是同一站。
+  // 服务端 hostnameOf、同步脚本 normalizeUrl、这里必须一致，否则「两条写法」会
+  // 落成两条实体，且尾点那条不进飞书下架计划、人工下架也核对不上版本。
+  return hostname.toLowerCase().replace(/\.+$/, '').replace(/^www\./, '');
 }
 
 /** 把 hostname 归一成 slug 的正文部分：小写、非字母数字折成连字符、去首尾。 */
