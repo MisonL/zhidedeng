@@ -423,26 +423,42 @@ function findStation(store: Store, submission: Pick<SubmissionRecord, 'channel' 
  * 而「改了别的字段（名称、报价、描述）」不影响 hostname→slug 的映射，可以复用。
  * 代价是每次查找多一次 O(m) 的指纹计算，m 是站点数（当前几十个）。
  */
-function stationHostIndex(store: Store): { version: number; byHost: Map<string, StationRecord>; byGroupedHost: Map<string, StationRecord> } {
+function stationHostIndex(store: Store): Pick<StationHostIndex, 'version' | 'byHost' | 'byGroupedHost' | 'allByHost' | 'allByGroupedHost'> {
   const cached = stationIndexCache.get(store);
   if (cached && cached.version === store.entityVersion) return cached;
-  // 一次扫描同时建立索引与指纹：分开做就是每次重建都跑两遍全表。
+  // 一次查询同时算出指纹和四张表。分成「先算指纹再建索引」就是每次重建都跑两遍
+  // 全表；而站点被下架/恢复会改指纹（removedAt 进哈希），批量审核时几乎每次都重建。
+  const rows = store.db.prepare(
+    'SELECT id, data, removedAt FROM entities WHERE kind = ? ORDER BY rowid',
+  ).all('station') as unknown as { id: string; data: string; removedAt: string | null }[];
+  const hash = createHash('sha1');
   const byHost = new Map<string, StationRecord>();
   const byGroupedHost = new Map<string, StationRecord>();
-  const fingerprint = stationHostFingerprint(store);
+  const allByHost = new Map<string, StationRecord>();
+  const allByGroupedHost = new Map<string, StationRecord>();
+  for (const row of rows) {
+    const station = JSON.parse(row.data) as StationRecord;
+    const host = hostnameOf(station.url);
+    // 指纹只关心「哪些 id 对应哪个 hostname、是否下架」，其余字段变了不影响认领。
+    // 顺序必须是 rowid（见原注释：删除再插回会反转次序），这里已经是 rowid。
+    hash.update(row.id).update('\u0000').update(host ?? '').update('\u0001').update(row.removedAt ?? '').update('\u0002');
+    if (host === null) continue;
+    const grouped = feishuHostnameKey(host);
+    // 「先出现的赢」：与原先 `store.allWithRemoved(...).find(...)` 逐字一致。
+    if (!allByHost.has(host)) allByHost.set(host, station);
+    if (!allByGroupedHost.has(grouped)) allByGroupedHost.set(grouped, station);
+    if (row.removedAt !== null) continue;
+    if (!byHost.has(host)) byHost.set(host, station);
+    if (!byGroupedHost.has(grouped)) byGroupedHost.set(grouped, station);
+  }
+  const fingerprint = `${rows.length}:${hash.digest('hex')}`;
   if (cached && cached.fingerprint === fingerprint) {
     // 站点集合没变（只是别的字段被写过），沿用旧索引，只更新版本号。
     cached.version = store.entityVersion;
+    cached.allByHost = allByHost; cached.allByGroupedHost = allByGroupedHost;
     return cached;
   }
-  for (const station of store.all('station')) {
-    const host = hostnameOf(station.url);
-    if (host === null) continue;
-    if (!byHost.has(host)) byHost.set(host, station);
-    const grouped = feishuHostnameKey(host);
-    if (!byGroupedHost.has(grouped)) byGroupedHost.set(grouped, station);
-  }
-  const next = { version: store.entityVersion, fingerprint, byHost, byGroupedHost };
+  const next = { version: store.entityVersion, fingerprint, byHost, byGroupedHost, allByHost, allByGroupedHost };
   stationIndexCache.set(store, next);
   // 一次审核内复用：批内新建的站点不会让这条审核反复重建索引。
   return next;
@@ -450,29 +466,13 @@ function stationHostIndex(store: Store): { version: number; byHost: Map<string, 
 
 /** 用 WeakMap 挂在 Store 上，多个 Store（测试）互不干扰，Store 被回收时缓存一起走。 */
 type StationHostIndex = {
-  version: number; fingerprint: string; byHost: Map<string, StationRecord>; byGroupedHost: Map<string, StationRecord>;
+  version: number; fingerprint: string;
+  byHost: Map<string, StationRecord>; byGroupedHost: Map<string, StationRecord>;
+  /** 含已下架：认领 slug 时要连下架的站一起看（见 stationSlug）。 */
+  allByHost: Map<string, StationRecord>; allByGroupedHost: Map<string, StationRecord>;
 };
 
 const stationIndexCache = new WeakMap<Store, StationHostIndex>();
-
-/**
- * 站点集合的指纹：只关心「哪些 slug 对应哪个 hostname」，
- * 名称、描述、报价变了不影响索引，不必重建。
- */
-function stationHostFingerprint(store: Store): string {
-  // 顺序必须是 **rowid**，不能按 id 排：索引里的「同 hostname 取第一个」
-  // 依据的是 `store.all` 的 rowid 顺序。删除再插回（全量导入就是删了重建）
-  // 会改变 rowid 次序——按 id 排时指纹看不出变化，于是沿用旧索引，
-  // 结果指向的 slug 与重建后应当指向的不是同一个。
-  // 实测：a-slug/b-slug 共享 hostname，重插后 rowid 序反转，
-  // 按 id 的指纹不变（误判），按 rowid 的指纹会变（正确）。
-  const rows = store.db.prepare(
-    "SELECT id, json_extract(data,'$.url') AS url FROM entities WHERE kind = 'station' AND removedAt IS NULL ORDER BY rowid",
-  ).all() as unknown as { id: string; url: string | null }[];
-  const hash = createHash('sha1');
-  for (const row of rows) hash.update(row.id).update('\u0000').update(row.url ?? '').update('\u0001');
-  return `${rows.length}:${hash.digest('hex')}`;
-}
 
 /**
  * 站点 slug：`sub-` 加归一化 hostname 的可读形式。
@@ -500,14 +500,13 @@ function stationSlug(store: Store, url: string | null, originKey: string, groupe
   // 反过来的话，「已下架的 www.x」会抢在「在线的 x」前面被认领，同步就把那条
   // 已下架的站复活了，而在线的那条留着旧内容——既复活了不该复活的，又漏更新了
   // 该更新的。两个方向都错。
+  // 走索引而不是每次扫全表：这一句原先 `allWithRemoved` 全量 JSON 解析一遍，
+  // 批量审核是 n 条 × m 个站点——实测 1000 个站时 300 条站点投稿要 32 秒，
+  // 整段时间 Node 单线程被占住（stationHostIndex 当初就是为同一个原因加的）。
   const mine = hostname === null ? undefined : (() => {
-    const candidates = store.allWithRemoved('station')
-      .filter(station => hostnameOf(station.url) !== null);
-    const exact = candidates.find(station => hostnameOf(station.url) === hostname);
-    if (exact) return exact;
-    if (!grouped) return undefined;
-    const key = feishuHostnameKey(hostname);
-    return candidates.find(station => feishuHostnameKey(hostnameOf(station.url)!) === key);
+    const index = stationHostIndex(store);
+    return index.allByHost.get(hostname)
+      ?? (grouped ? index.allByGroupedHost.get(feishuHostnameKey(hostname)) : undefined);
   })();
   if (mine) return mine.slug;
 
