@@ -387,7 +387,7 @@ export function hostnameOf(url: string | null): string | null {
  * 时一个批次要十几秒。当前站点规模（几十个）下无感，若将来批量审核变慢，先从这里下手：
  * 为 entities 增加 hostname 列并建索引，或让批次审核复用一个可增量的索引。
  */
-function findStation(store: Store, submission: Pick<SubmissionRecord, 'channel' | 'batchId' | 'originKey'>, url: string): StationRecord | undefined {
+function findStation(store: Store, submission: Pick<SubmissionRecord, 'channel' | 'originKey'>, url: string): StationRecord | undefined {
   const hostname = hostnameOf(url);
   if (hostname === null) return undefined;
   // 只看 channel，不看 batchId：www/裸域 分组是**飞书渠道的语义**，跟这批记录
@@ -396,7 +396,12 @@ function findStation(store: Store, submission: Pick<SubmissionRecord, 'channel' 
   const grouped = submission.channel === 'feishu'
     && feishuHostnameKey(submission.originKey) === feishuHostnameKey(hostname);
   const index = stationHostIndex(store);
-  return grouped ? index.byGroupedHost.get(feishuHostnameKey(hostname)) : index.byHost.get(hostname);
+  // **精确写法的站点优先**，组内其它写法只做兜底。否则线上同时存在
+  // `x.com` 与 `www.x.com` 两条站时，投 `x.com` 会认领 rowid 更早的 `www.x.com`，
+  // 把它的 url 改写成 `x.com`——两条在线站从此同 url，前端显示两条一模一样的站，
+  // 另一条再也不会被同步更新，也进不了下架计划。实测过这个状态。
+  return index.byHost.get(hostname)
+    ?? (grouped ? index.byGroupedHost.get(feishuHostnameKey(hostname)) : undefined);
 }
 
 /**
@@ -477,7 +482,7 @@ function stationHostFingerprint(store: Store): string {
  * 同一站点的重复提交仍然落在同一条记录上。
  * 派生规则来自 shared/slug.ts，飞书只传 hostname，由这里统一分配 slug。
  */
-function stationSlug(store: Store, url: string | null, originKey: string, grouped = false): string {
+function stationSlug(store: Store, url: string | null, originKey: string, grouped: boolean): string {
   const hostname = hostnameOf(url);
   const identity = hostname ?? originKey.trim().toLowerCase();
   // 先认领：只要已有站点的 hostname 相同，就沿用它的 slug——不管当初落在可读形式
@@ -491,12 +496,19 @@ function stationSlug(store: Store, url: string | null, originKey: string, groupe
   // 而 findStation 的索引只扫在线站点。站点被下架后走这条路，若只做精确比较，
   // www.x.com 与 x.com 就会被认成两个站，另建一条 source 对、指标全 null 的
   // 新实体，而旧实体还带着指标躺在「已下架」里。
-  const sameSite = (station: StationRecord) => {
-    const other = hostnameOf(station.url);
-    if (other === null || hostname === null) return false;
-    return grouped ? feishuHostnameKey(other) === feishuHostnameKey(hostname) : other === hostname;
-  };
-  const mine = hostname === null ? undefined : store.allWithRemoved('station').find(sameSite);
+  // 与 findStation 同一套优先级：**精确 hostname 命中优先**，组内其它写法只兜底。
+  // 反过来的话，「已下架的 www.x」会抢在「在线的 x」前面被认领，同步就把那条
+  // 已下架的站复活了，而在线的那条留着旧内容——既复活了不该复活的，又漏更新了
+  // 该更新的。两个方向都错。
+  const mine = hostname === null ? undefined : (() => {
+    const candidates = store.allWithRemoved('station')
+      .filter(station => hostnameOf(station.url) !== null);
+    const exact = candidates.find(station => hostnameOf(station.url) === hostname);
+    if (exact) return exact;
+    if (!grouped) return undefined;
+    const key = feishuHostnameKey(hostname);
+    return candidates.find(station => feishuHostnameKey(hostnameOf(station.url)!) === key);
+  })();
   if (mine) return mine.slug;
 
   // 分配 slug 时必须把已下架的行也算作「已占用」（用 getWithRemoved）。
@@ -595,7 +607,12 @@ export function submissionState(store: Store): AdminSubmissionStateResponse {
 
   const stations: AdminSubmissionStateResponse['stations'] = [];
   for (const station of store.all('station')) {
-    if (station.source !== 'submission') continue;
+    // 只排除演示站。原来看 `source === 'submission'`，于是「本来是 agent 站、被飞书
+    // 同 hostname 认领后指标与 source 都保留」的站点永远进不了这张表——飞书里真删掉
+    // 它的时候，自动下架计划清不掉，只能人工去库里翻。
+    // 这里并不会把纯 agent 站卷进来：下面还要求 `feishuHosts.has(key)`，也就是
+    // 飞书确实同步过这个 hostname，那时它的快照就是权威。
+    if (station.source === 'demo') continue;
     const originKey = hostnameOf(station.url);
     if (originKey === null) continue;
     const key = feishuHostnameKey(originKey);

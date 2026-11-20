@@ -7,7 +7,7 @@ import { normalizeIp } from '../src/app.ts';
 import { ConcurrencyGate } from '../src/auth.ts';
 import { Store } from '../src/database.ts';
 import { createApp, openStore } from '../src/node-app.ts';
-import { enqueueSubmission, removeStation, reviewSubmission } from '../src/submissions.ts';
+import { enqueueSubmission, removeStation, reviewSubmission, submissionState } from '../src/submissions.ts';
 
 const json = { 'content-type': 'application/json' };
 const PASSWORD = 'correct-horse-battery';
@@ -489,6 +489,99 @@ describe('审核群友提交', () => {
     const after = rows();
     expect(after).toHaveLength(1);
     expect(after[0]).toMatchObject({ id: 'sub-www-null-batch-example-com', uptime: 97.5, removedAt: null });
+  });
+
+  it('同组里已有精确写法的在线站时，同步更新它，不改写别人的 url', async () => {
+    // 飞书把 www 与裸域当同一站，但组里可能已经并存两条在线站（agent 各自建的）。
+    // 若认领时「组内取 rowid 第一条」，投 x.com 会选中更早的 www.x.com 并把它的 url
+    // 改写成 x.com——两条在线站从此同 url，前端显示两条一模一样的站，另一条再也
+    // 不被同步更新、也进不了下架计划。所以精确写法必须优先。
+    const seed = (slug: string, name: string, url: string, uptime: number) => server.db.prepare(
+      "INSERT INTO entities (kind, id, data) VALUES ('station', ?, ?)",
+    ).run(slug, JSON.stringify({ slug, name, description: '描述', url, rechargeThreshold: null, paymentMethods: [], offers: [], status: 'running', uptime, firstTokenLatencyMs: 200, foundedAt: '2023-01-01', source: 'agent' }));
+    seed('agent-www-dup.example.com', 'agent www', 'https://www.dup.example.com/', 90.1);
+    seed('agent-dup.example.com', 'agent 裸域', 'https://dup.example.com/', 88.8);
+    const read = () => server.db.prepare(
+      "SELECT id, json_extract(data,'$.url') url, json_extract(data,'$.name') name, json_extract(data,'$.source') source FROM entities WHERE kind = 'station' AND id LIKE 'agent-%dup%' ORDER BY rowid",
+    ).all() as { id: string; url: string; name: string; source: string }[];
+
+    const id = enqueueSubmission(openStore(server.db), {
+      kind: 'station', channel: 'feishu', originKey: 'dup.example.com', action: 'upsert',
+      payload: { slug: 'dup', name: '飞书投稿', description: '飞书描述', url: 'https://dup.example.com/', rechargeThreshold: null, paymentMethods: [], offers: [] },
+      ip: '203.0.113.44', now: new Date('2026-11-06T00:00:00Z'),
+    }, { globalPendingBreaker: false }).submission.id;
+    reviewSubmission(openStore(server.db), new Date('2026-11-06T00:00:00Z'), id, { status: 'approved' });
+
+    const rows = read();
+    // 精确写法那条被更新，www 那条一个字都没动
+    expect(rows.find(row => row.id === 'agent-dup.example.com')).toMatchObject({ url: 'https://dup.example.com/', name: '飞书投稿', source: 'agent' });
+    expect(rows.find(row => row.id === 'agent-www-dup.example.com')).toMatchObject({ url: 'https://www.dup.example.com/', name: 'agent www' });
+    // 没有两条在线站同 url
+    expect(new Set(rows.map(row => row.url)).size).toBe(rows.length);
+  });
+
+  it('同组里早先下架的站不会抢在在线站前面被认领（只更新在线的那条）', async () => {
+    // 反过来的错法同样糟：认领按 rowid 取第一条，可能选中一条已下架的 www 站，
+    // 于是同步把它复活、却在线的裸域站留着旧内容。两个方向都错。
+    const seed = (slug: string, url: string) => server.db.prepare(
+      "INSERT INTO entities (kind, id, data) VALUES ('station', ?, ?)",
+    ).run(slug, JSON.stringify({ slug, name: '旧名', description: '描述', url, rechargeThreshold: null, paymentMethods: [], offers: [], status: null, uptime: null, firstTokenLatencyMs: null, foundedAt: null, source: 'agent' }));
+    seed('agent-www-m.example.com', 'https://www.m.example.com/');
+    server.db.prepare("UPDATE entities SET removedAt = '2026-11-05T00:00:00Z' WHERE kind = 'station' AND id = 'agent-www-m.example.com'").run();
+    seed('agent-m.example.com', 'https://m.example.com/');
+    const read = (slug: string) => server.db.prepare("SELECT json_extract(data,'$.name') name, removedAt FROM entities WHERE kind = 'station' AND id = ?").get(slug) as { name: string; removedAt: string | null };
+
+    const id = enqueueSubmission(openStore(server.db), {
+      kind: 'station', channel: 'feishu', originKey: 'm.example.com', action: 'upsert',
+      payload: { slug: 'm', name: '飞书投稿', description: '飞书描述', url: 'https://m.example.com/', rechargeThreshold: null, paymentMethods: [], offers: [] },
+      ip: '203.0.113.45', now: new Date('2026-11-06T00:00:00Z'),
+    }, { globalPendingBreaker: false }).submission.id;
+    reviewSubmission(openStore(server.db), new Date('2026-11-06T00:00:00Z'), id, { status: 'approved' });
+
+    expect(read('agent-m.example.com')).toMatchObject({ name: '飞书投稿', removedAt: null });
+    expect(read('agent-www-m.example.com')).toMatchObject({ name: '旧名', removedAt: '2026-11-05T00:00:00Z' });
+  });
+
+  it('组里两条都已下架时，同步复活精确写法那条，不复活另一条', async () => {
+    // 这条才真正打到 stationSlug 的认领（findStation 只扫在线站点，此时它返回
+    // undefined）。两条同组的站都在「已下架」里，投裸域就该复活裸域那条：
+    // 反过来的话，读者之前收藏的 www 站被复活、裸域站继续躺在已下架里，
+    // 两个方向的预期都落空。
+    const seedRemoved = (slug: string, url: string) => {
+      server.db.prepare("INSERT INTO entities (kind, id, data) VALUES ('station', ?, ?)")
+        .run(slug, JSON.stringify({ slug, name: '旧名', description: '描述', url, rechargeThreshold: null, paymentMethods: [], offers: [], status: null, uptime: null, firstTokenLatencyMs: null, foundedAt: null, source: 'submission' }));
+      server.db.prepare("UPDATE entities SET removedAt = '2026-11-05T00:00:00Z' WHERE kind = 'station' AND id = ?").run(slug);
+    };
+    seedRemoved('sub-www-k-example-com', 'https://www.k.example.com/');
+    seedRemoved('sub-k-example-com', 'https://k.example.com/');
+    const read = (slug: string) => server.db.prepare("SELECT json_extract(data,'$.name') name, removedAt FROM entities WHERE kind = 'station' AND id = ?").get(slug) as { name: string; removedAt: string | null };
+
+    const id = enqueueSubmission(openStore(server.db), {
+      kind: 'station', channel: 'feishu', originKey: 'k.example.com', action: 'upsert',
+      payload: { slug: 'k', name: '飞书复活', description: '飞书描述', url: 'https://k.example.com/', rechargeThreshold: null, paymentMethods: [], offers: [] },
+      ip: '203.0.113.47', now: new Date('2026-11-06T00:00:00Z'),
+    }, { globalPendingBreaker: false }).submission.id;
+    reviewSubmission(openStore(server.db), new Date('2026-11-06T00:00:00Z'), id, { status: 'approved' });
+
+    expect(read('sub-k-example-com')).toMatchObject({ name: '飞书复活', removedAt: null });
+    expect(read('sub-www-k-example-com')).toMatchObject({ name: '旧名', removedAt: '2026-11-05T00:00:00Z' });
+  });
+
+  it('被飞书认领过的 agent 站进入飞书下架计划，飞书删了它才能自动下架', async () => {
+    // 站点被认领后 source 仍是 agent（这是有意的：身份不因换渠道而改标）。
+    // 但下架计划原先只列 source === 'submission'，于是这类站飞书里删掉后，
+    // 自动下架清不掉，只能人工改库。
+    const seed = () => server.db.prepare("INSERT INTO entities (kind, id, data) VALUES ('station', ?, ?)")
+      .run('agent-plan.example.com', JSON.stringify({ slug: 'agent-plan.example.com', name: '计划站', description: '描述', url: 'https://plan.example.com/', rechargeThreshold: null, paymentMethods: [], offers: [], status: null, uptime: null, firstTokenLatencyMs: null, foundedAt: null, source: 'agent' }));
+    seed();
+    const id = enqueueSubmission(openStore(server.db), {
+      kind: 'station', channel: 'feishu', originKey: 'plan.example.com', action: 'upsert',
+      payload: { slug: 'plan', name: '计划站', description: '描述', url: 'https://plan.example.com/', rechargeThreshold: null, paymentMethods: [], offers: [] },
+      ip: '203.0.113.46', now: new Date('2026-11-06T00:00:00Z'),
+    }, { globalPendingBreaker: false }).submission.id;
+    reviewSubmission(openStore(server.db), new Date('2026-11-06T00:00:00Z'), id, { status: 'approved' });
+    expect(openStore(server.db).get('station', 'agent-plan.example.com')?.source).toBe('agent');
+    expect(submissionState(openStore(server.db)).stations.map(station => station.slug)).toContain('agent-plan.example.com');
   });
 
   it('站内作者自己的文章也能被管理员下架，不必走投稿队列', async () => {
