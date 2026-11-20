@@ -479,8 +479,15 @@ function stationHostIndex(store: Store): Pick<StationHostIndex, 'version' | 'byH
     // 顺序必须是 rowid（见原注释：删除再插回会反转次序），这里已经是 rowid。
     // 必须 String() 包装：历史脏数据里 url 可能是数字或布尔，`hash.update(123)`
     // 会抛 ERR_INVALID_ARG_TYPE，把整条审核拖成「非预期错误、停在 pending」。
-    hash.update(String(row.id)).update('\u0000').update(String(row.url ?? ''))
-      .update('\u0001').update(String(row.removedAt ?? '')).update('\u0002');
+    //
+    // 每个字段带长度前缀：只靠分隔符的话，`["a\u0001b", "c"]` 与
+    // `["a", "b\u0001c"]` 会拼出同一串。正常 url 里不可能出现控制字符，
+    // 但指纹错了就是「静默用错索引」，代价很高，加前缀几乎不要钱。
+    const field = (value: unknown) => {
+      const text = String(value ?? '');
+      return `${text.length}\u0000${text}`;
+    };
+    hash.update(field(row.id)).update(field(row.url)).update(field(row.removedAt));
   }
   const fingerprint = `${fingerprintRows.length}:${hash.digest('hex')}`;
   if (cached && cached.fingerprint === fingerprint) {

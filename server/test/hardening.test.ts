@@ -751,7 +751,7 @@ describe('审核群友提交', () => {
     const store = openStore(server.db);
     const seed = (slug: string) => store.put('station', slug, {
       slug, name: slug, description: '描述', url: 'https://cache.example.com/',
-      rechargeThreshold: null, paymentMethods: [], offers: [], status: null,
+      rechargeThreshold: null, paymentMethods: [], status: null,
       uptime: null, firstTokenLatencyMs: null, foundedAt: null, source: 'agent',
     });
     seed('agent-cache-a.example.com');
@@ -789,8 +789,8 @@ describe('审核群友提交', () => {
     const store = openStore(server.db);
     const record = (url: string) => ({
       slug: 'agent-moved.example.com', name: '迁移站', description: '描述', url,
-      rechargeThreshold: null, paymentMethods: [], offers: [], status: null,
-      uptime: null, firstTokenLatencyMs: null, foundedAt: null, source: 'agent',
+      rechargeThreshold: null, paymentMethods: [], status: null,
+      uptime: null, firstTokenLatencyMs: null, foundedAt: null, source: 'agent' as const,
     });
     store.put('station', 'agent-moved.example.com', record('https://moved-old.example.com/'));
     const send = (url: string, batchId: string) => {
