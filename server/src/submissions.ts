@@ -396,18 +396,28 @@ function findStation(store: Store, submission: Pick<SubmissionRecord, 'channel' 
   const grouped = submission.channel === 'feishu'
     && feishuHostnameKey(submission.originKey) === feishuHostnameKey(hostname);
   const index = stationHostIndex(store);
-  // **精确写法优先，组内其它写法只做兜底**，而且两张表都要含已下架站点。
+  // 认领优先级：**在线精确 > 已下架精确 > 在线分组 > 已下架分组**。
   //
-  // 为什么含已下架：站点身份看 hostname，已下架的站被同步带回来时必须还是同一个
-  // slug（否则挂在旧 slug 上的文章和互动全成孤儿）。这里只看在线的话，
-  // 「在线 www.n + 已下架 n，投 natives n」会先命中在线的 www.n，把它的 url 改写成
-  // n；而对 n 调用恢复接口后，两条在线站同 url。实测过这个状态。
+  // 为什么「在线」排在「已下架」前面：库里可能已经有两条同 url 的实体（历史遗留
+  // ——早先按分组认领会改写 url，全量导入也按给定 slug 直接写，都能造出来）。
+  // 只下架了其中一条时，若让已下架那条按 rowid 先到先得，同步会把它复活，
+  // 于是又变成「两条在线站同 url」——正是这几个提交要消灭的状态。在线那条才是
+  // 现在给人看的，必须先更新它。
   //
-  // 为什么精确优先：线上同时存在 `x.com` 与 `www.x.com` 两条站时，若按分组取
-  // rowid 第一条，投 `x.com` 会认领更早的 `www.x.com` 并改写它的 url——
-  // 同样是两条在线站同 url，前端显示两条一模一样的站，另一条再也不被同步更新。
-  return index.allByHost.get(hostname)
-    ?? (grouped ? index.allByGroupedHost.get(feishuHostnameKey(hostname)) : undefined);
+  // 为什么「精确」排在「分组」前面：线上同时有 `x.com` 与 `www.x.com` 两条站时，
+  // 按分组取 rowid 第一条会认领更早的 `www.x.com` 并改写它的 url，同样制造
+  // 「同 url 双在线」+「另一条再也不被同步」。
+  //
+  // 为什么已下架也要参与：站点身份看 hostname，已下架的站被同步带回来时必须还是
+  // 同一个 slug，否则挂在旧 slug 上的文章与互动全成孤儿。只看在线的实测后果是
+  // 「在线 www.n + 已下架 n，投裸域 n」会先命中在线的 www.n 并把它的 url 改写成
+  // n，此后恢复 n 就又是两条在线同 url。
+  return index.byHost.get(hostname)
+    ?? index.allByHost.get(hostname)
+    ?? (grouped
+      ? index.byGroupedHost.get(feishuHostnameKey(hostname))
+        ?? index.allByGroupedHost.get(feishuHostnameKey(hostname))
+      : undefined);
 }
 
 /**
@@ -432,42 +442,50 @@ function findStation(store: Store, submission: Pick<SubmissionRecord, 'channel' 
 function stationHostIndex(store: Store): Pick<StationHostIndex, 'version' | 'byHost' | 'byGroupedHost' | 'allByHost' | 'allByGroupedHost'> {
   const cached = stationIndexCache.get(store);
   if (cached && cached.version === store.entityVersion) return cached;
-  // 一次查询同时算出指纹和四张表。分成「先算指纹再建索引」就是每次重建都跑两遍
-  // 全表；而站点被下架/恢复会改指纹（removedAt 进哈希），批量审核时几乎每次都重建。
-  const rows = store.db.prepare(
-    'SELECT id, data, removedAt FROM entities WHERE kind = ? ORDER BY rowid',
-  ).all('station') as unknown as { id: string; data: string; removedAt: string | null }[];
+  // 先用一条**不做 JSON.parse** 的轻查询算指纹：绝大多数审核是在更新已有站点，
+  // 站点集合没变，指纹相同就直接沿用缓存，一条全表 JSON 解析都不该付。
+  // （早先版本在一次扫描里同时算指纹和建表，结果「更新」场景也要把整张站点表
+  // 解析一遍，1000 个站时反而比之前慢 2.4 倍。）
+  const fingerprintRows = store.db.prepare(
+    "SELECT id, json_extract(data,'$.url') AS url, removedAt FROM entities WHERE kind = 'station' ORDER BY rowid",
+  ).all() as unknown as { id: string; url: string | null; removedAt: string | null }[];
   const hash = createHash('sha1');
-  const byHost = new Map<string, StationRecord>();
-  const byGroupedHost = new Map<string, StationRecord>();
-  const allByHost = new Map<string, StationRecord>();
-  const allByGroupedHost = new Map<string, StationRecord>();
-  for (const row of rows) {
-    const station = JSON.parse(row.data) as StationRecord;
-    const host = hostnameOf(station.url);
-    // 指纹只关心「哪些 id 对应哪个 url、是否下架」，名称/描述/报价变了不影响认领。
+  for (const row of fingerprintRows) {
+    // 只关心「哪些 id 对应哪个 url、是否下架」，名称/描述/报价变了不影响认领。
     // 这里特意用**原始 url** 而不是归一化后的 hostname：索引里存的是整条站点记录，
     // `findStation(...)?.url` 这类调用方会读它（见 submissionOriginKey）。
-    // 只哈希 hostname 的话，「hostname 不变、路径变了」时指纹不变，索引里留着旧 url，
-    // 调用方读到的就是过期数据——归一化省不了多少，不值得留这个坑。
+    // 只哈希 hostname 的话，「hostname 不变、路径变了」时指纹不变，索引里留着旧 url。
     // 顺序必须是 rowid（见原注释：删除再插回会反转次序），这里已经是 rowid。
-    hash.update(row.id).update('\u0000').update(station.url ?? '').update('\u0001').update(row.removedAt ?? '').update('\u0002');
-    if (host === null) continue;
-    const grouped = feishuHostnameKey(host);
-    // 「先出现的赢」：与原先 `store.allWithRemoved(...).find(...)` 逐字一致。
-    if (!allByHost.has(host)) allByHost.set(host, station);
-    if (!allByGroupedHost.has(grouped)) allByGroupedHost.set(grouped, station);
-    if (row.removedAt !== null) continue;
-    if (!byHost.has(host)) byHost.set(host, station);
-    if (!byGroupedHost.has(grouped)) byGroupedHost.set(grouped, station);
+    hash.update(row.id).update('\u0000').update(row.url ?? '').update('\u0001').update(row.removedAt ?? '').update('\u0002');
   }
-  const fingerprint = `${rows.length}:${hash.digest('hex')}`;
+  const fingerprint = `${fingerprintRows.length}:${hash.digest('hex')}`;
   if (cached && cached.fingerprint === fingerprint) {
     // 指纹相同意味着「id / url / 是否下架」逐条一致，四张表必然等价——整份沿用，
     // 只更新版本号。不要只替换一部分表：那会造成「在线表是旧的、含下架表是新的」
     // 这种看起来无害、实际靠不住的状态。
     cached.version = store.entityVersion;
     return cached;
+  }
+
+  const byHost = new Map<string, StationRecord>();
+  const byGroupedHost = new Map<string, StationRecord>();
+  const allByHost = new Map<string, StationRecord>();
+  const allByGroupedHost = new Map<string, StationRecord>();
+  for (const station of store.allWithRemoved('station')) {
+    const host = hostnameOf(station.url);
+    if (host === null) continue;
+    const grouped = feishuHostnameKey(host);
+    // 「先出现的赢」：与原先 `store.allWithRemoved(...).find(...)` 逐字一致
+    // （顺序都是 rowid，所以组装索引时也必须按 rowid 遍历）。
+    if (!allByHost.has(host)) allByHost.set(host, station);
+    if (!allByGroupedHost.has(grouped)) allByGroupedHost.set(grouped, station);
+  }
+  for (const station of store.all('station')) {
+    const host = hostnameOf(station.url);
+    if (host === null) continue;
+    if (!byHost.has(host)) byHost.set(host, station);
+    const grouped = feishuHostnameKey(host);
+    if (!byGroupedHost.has(grouped)) byGroupedHost.set(grouped, station);
   }
   const next = { version: store.entityVersion, fingerprint, byHost, byGroupedHost, allByHost, allByGroupedHost };
   stationIndexCache.set(store, next);
@@ -507,19 +525,10 @@ function stationSlug(store: Store, url: string | null, originKey: string, groupe
   // 而 findStation 的索引只扫在线站点。站点被下架后走这条路，若只做精确比较，
   // www.x.com 与 x.com 就会被认成两个站，另建一条 source 对、指标全 null 的
   // 新实体，而旧实体还带着指标躺在「已下架」里。
-  // 与 findStation 同一套优先级：**精确 hostname 命中优先**，组内其它写法只兜底。
-  // 反过来的话，「已下架的 www.x」会抢在「在线的 x」前面被认领，同步就把那条
-  // 已下架的站复活了，而在线的那条留着旧内容——既复活了不该复活的，又漏更新了
-  // 该更新的。两个方向都错。
-  // 走索引而不是每次扫全表：这一句原先 `allWithRemoved` 全量 JSON 解析一遍，
-  // 批量审核是 n 条 × m 个站点——实测 1000 个站时 300 条站点投稿要 32 秒，
-  // 整段时间 Node 单线程被占住（stationHostIndex 当初就是为同一个原因加的）。
-  const mine = hostname === null ? undefined : (() => {
-    const index = stationHostIndex(store);
-    return index.allByHost.get(hostname)
-      ?? (grouped ? index.allByGroupedHost.get(feishuHostnameKey(hostname)) : undefined);
-  })();
-  if (mine) return mine.slug;
+  // 这里**不再**自己认领。认领（含已下架、精确优先、在线优先）统一由
+  // `findStation` 做，调用方写的是 `mine?.slug ?? stationSlug(...)`；两边各写一遍
+  // 只会在有人改了一边时静默分叉。走到这里就意味着「没有任何已有站点能认领」，
+  // 只剩分配新 slug 这一件事。
 
   // 分配 slug 时必须把已下架的行也算作「已占用」（用 getWithRemoved）。
   // 否则两个 hostname 清洗出同一个 base 时（a-b.example.com 与 a.b.example.com 都得到
@@ -763,16 +772,35 @@ function supersedePending(store: Store, submission: SubmissionRecord, reviewedAt
   if (aliases.length === 0) return;
   if (submission.action === 'upsert') {
     const target = findStation(store, submission, parse(stationUrlSchema, submission.payload).url);
-    // 用已缓存的 host 索引，不再全表扫描——这里是批量审核的热点：
-    // 每审一条站点都要走一次，配合上面的 findStation 就是每条约两次全表扫描。
-    const groupedTarget = stationHostIndex(store).byGroupedHost.get(key);
-    // Agent/web 可分别拥有 www 和裸域实体，只替代实际会更新当前实体的飞书批次。
-    if (!target || groupedTarget?.slug !== target.slug) return;
+    if (!target) return;
+    // 只替代「批准后确实会写到同一个实体」的别名待审。
+    //
+    // 原先拿 `allByGroupedHost.get(key)` 当替身代表去比 slug，问题有两层：
+    // 一是它只按 rowid 取第一条，与本次投稿实际认领到的实体不是一回事；
+    // 二是把「在线」和「已下架」混在一起比，同组里一条下架、一条在线时结论
+    // 随 rowid 顺序翻转（实测过 pending / superseded 两种结果）。
+    // 现在逐条按别名自己的 payload 走一遍 `findStation`——那正是批准它时会走的路，
+    // 结果相同才说明它已经没有再审的意义。Agent/web 可分别持有 www 与裸域实体，
+    // 分组键相同不等于会写到同一条记录，所以必须逐条算。
+    for (const alias of aliases) {
+      const rows = store.db.prepare(
+        "SELECT id, payload FROM submissions WHERE kind = 'station' AND channel = 'feishu' AND batchId IS NOT NULL AND originKey = ? AND status = 'pending' AND id <> ?" + actionFilter,
+      ).all(alias, submission.id) as unknown as { id: string; payload: string }[];
+      for (const row of rows) {
+        let payloadUrl: string;
+        try {
+          payloadUrl = parse(stationUrlSchema, JSON.parse(row.payload)).url;
+        } catch {
+          // payload 是旧格式/坏数据：判断不了它会写到哪，宁可留着让人看见。
+          continue;
+        }
+        const aliasTarget = findStation(store, { channel: 'feishu', originKey: alias }, payloadUrl);
+        if (aliasTarget?.slug !== target.slug) continue;
+        store.db.prepare("UPDATE submissions SET status = 'superseded', reason = ?, reviewedAt = ? WHERE id = ? AND status = 'pending'")
+          .run(SUPERSEDED_REASON, reviewedAt, row.id);
+      }
+    }
   } else if (submission.channel !== 'feishu' || submission.batchId === null) return;
-  for (const alias of aliases) {
-    store.db.prepare(`UPDATE submissions SET status = 'superseded', reason = ?, reviewedAt = ? WHERE kind = 'station' AND channel = 'feishu' AND batchId IS NOT NULL AND originKey = ? AND status = 'pending' AND id <> ? ${actionFilter}`)
-      .run(SUPERSEDED_REASON, reviewedAt, alias, submission.id);
-  }
 }
 
 export function reviewSubmission(store: Store, now: Date, id: string, decision: {

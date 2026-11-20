@@ -624,6 +624,65 @@ describe('审核群友提交', () => {
     expect(read('agent-www-n2.example.com')).toMatchObject({ url: 'https://www.n2.example.com/', name: '旧名', removedAt: null });
   });
 
+  it('同 url 两条实体里已下架那条 rowid 更小时，同步更新在线那条，不复活旧的', async () => {
+    // 库里存在同 url 两条实体是历史产物（早先按分组认领会改写 url、全量导入按给定
+    // slug 直接写，都能造出来）。只下架了其中一条时，若让「已下架」与「在线」按
+    // rowid 平级去抢，同步会复活已下架那条，于是又变成「两条在线站同 url」——
+    // 正是这一串改动要消灭的状态。在线那条才是现在给人看的，必须先更新它。
+    const seed = (slug: string, name: string, removed: boolean) => {
+      server.db.prepare("INSERT INTO entities (kind, id, data) VALUES ('station', ?, ?)")
+        .run(slug, JSON.stringify({ slug, name, description: '描述', url: 'https://dup2.example.com/', rechargeThreshold: null, paymentMethods: [], offers: [], status: null, uptime: null, firstTokenLatencyMs: null, foundedAt: null, source: 'agent' }));
+      if (removed) server.db.prepare("UPDATE entities SET removedAt = '2026-11-05T00:00:00Z' WHERE kind = 'station' AND id = ?").run(slug);
+    };
+    seed('agent-old-removed.example.com', '已下架那条', true);   // rowid 更小
+    seed('agent-new-online.example.com', '在线那条', false);
+    const read = () => server.db.prepare(
+      "SELECT id, json_extract(data,'$.name') name, removedAt FROM entities WHERE kind = 'station' AND id IN ('agent-old-removed.example.com','agent-new-online.example.com') ORDER BY rowid",
+    ).all() as { id: string; name: string; removedAt: string | null }[];
+
+    const id = enqueueSubmission(openStore(server.db), {
+      kind: 'station', channel: 'feishu', originKey: 'dup2.example.com', action: 'upsert',
+      payload: { slug: 'dup2', name: '飞书投稿', description: '飞书描述', url: 'https://dup2.example.com/', rechargeThreshold: null, paymentMethods: [], offers: [] },
+      ip: '203.0.113.49', now: new Date('2026-11-06T00:00:00Z'),
+    }, { globalPendingBreaker: false }).submission.id;
+    reviewSubmission(openStore(server.db), new Date('2026-11-06T00:00:00Z'), id, { status: 'approved' });
+
+    const rows = read();
+    expect(rows.filter(row => row.removedAt === null)).toHaveLength(1);
+    expect(rows.find(row => row.id === 'agent-new-online.example.com')).toMatchObject({ name: '飞书投稿', removedAt: null });
+    expect(rows.find(row => row.id === 'agent-old-removed.example.com')).toMatchObject({ name: '已下架那条', removedAt: '2026-11-05T00:00:00Z' });
+  });
+
+  it('同组里在线的是 www 写法、已下架的是裸域时，别名待审仍被替代', async () => {
+    // supersedePending 原先拿「含已下架认领到的 target」和「只看在线的
+    // groupedTarget」相比：已下架的裸域 rowid 更小时两者不等 → 提前 return，
+    // 同组的 www 别名永远留在待审里，审核台白多一条。两边必须用同一张表。
+    const seed = (slug: string, url: string, removed: boolean) => {
+      server.db.prepare("INSERT INTO entities (kind, id, data) VALUES ('station', ?, ?)")
+        .run(slug, JSON.stringify({ slug, name: '旧名', description: '描述', url, rechargeThreshold: null, paymentMethods: [], offers: [], status: null, uptime: null, firstTokenLatencyMs: null, foundedAt: null, source: 'agent' }));
+      if (removed) server.db.prepare("UPDATE entities SET removedAt = '2026-11-05T00:00:00Z' WHERE kind = 'station' AND id = ?").run(slug);
+    };
+    seed('agent-www-q.example.com', 'https://www.q.example.com/', false);   // 在线，rowid 小
+    seed('agent-q.example.com', 'https://q.example.com/', true);            // 已下架，rowid 大
+    const payload = { slug: 'q', name: '飞书', description: '描述', url: 'https://q.example.com/', rechargeThreshold: null, paymentMethods: [], offers: [] };
+    // 别名那条要用**历史行**的方式插：现在的入队接口会立刻把 originKey 规范成
+    // payload url 的 hostname，两条投稿就同 originKey，走的是最普通的那条 UPDATE，
+    // 根本到不了别名分支。别名分支专门处理「历史 originKey 还留着 www 写法」的行。
+    const alias = 'legacy-alias-www-q';
+    server.db.prepare(
+      "INSERT INTO submissions (id, kind, channel, originKey, batchId, action, payload, payloadHash, ip, status, createdAt) VALUES (?, 'station', 'feishu', 'www.q.example.com', 'qb-alias', 'upsert', ?, 'h', '203.0.113.50', 'pending', '2026-11-06T00:00:00Z')",
+    ).run(alias, JSON.stringify(payload));
+    const main = enqueueSubmission(openStore(server.db), {
+      kind: 'station', channel: 'feishu', originKey: 'q.example.com', batchId: 'qb-main', action: 'upsert', payload,
+      ip: '203.0.113.50', now: new Date('2026-11-06T01:00:00Z'),
+    }, { globalPendingBreaker: false }).submission.id;
+
+    reviewSubmission(openStore(server.db), new Date('2026-11-06T02:00:00Z'), main, { status: 'approved' });
+    const status = (id: string) => (server.db.prepare('SELECT status FROM submissions WHERE id = ?').get(id) as { status: string }).status;
+    expect(status(main)).toBe('approved');
+    expect(status(alias)).toBe('superseded');
+  });
+
   it('站内作者自己的文章也能被管理员下架，不必走投稿队列', async () => {
     // source='user' 的文章原本只能改状态：前台确实看不见了，但管理端既没有
     // 恢复入口，也查不到下架时间。统一走软删除后两者都有了。
