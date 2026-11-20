@@ -21,7 +21,7 @@ Slogan：我们的AI中转指南。
 - 已有站点更新保留最初 source，不能把飞书站点改标成 Agent。队列下架只允许 `source=submission`，demo、agent、user 来源返回 `409 STATION_SOURCE_CONFLICT`；版本不符返回 `409 STALE_REMOVAL`，站点和报价不变（`server/src/submissions.ts` 的 `removeStation` 与站点物化分支）
 - 全站页脚常驻声明，当前 `SITE_NOTICE` 文案仍只说明演示数据和群友提交；站点详情及内容标签已覆盖 agent。页脚缺少 Agent 来源说明是当前界面缺口（`web/src/format.ts` 的 `SITE_NOTICE`、`web/src/components/Layout.tsx`、`web/src/pages/Stations.tsx`）
 - 价格只用「相对官方价的倍率」（如 0.6x），不写任何官方绝对价格。新写入倍率校验为闭区间 `0.05~20`；数据库 CHECK 仍为 `rate > 0`，历史异常数据不会自动修正（`shared/src/domain.ts` 的 `MIN_RATE`/`MAX_RATE`、`server/src/catalog.ts` 的 `offerRate`、`server/src/database.ts` 的 offers 表）
-- 模型榜至少有 3 个站点报价才启用最低倍率加成，且达标模型优先；不足 3 个仍返回 lowestRate 供展示。站点按倍率排序也先排列总报价数至少 3 个的站点，详情仍展示现有报价（`server/src/service.ts` 的 `getRankings` 与 rate 排序分支）
+- 模型榜至少有 3 个站点报**综合口径**（`basis = blended`）才启用最低倍率加成，且达标模型优先；不足 3 个仍返回 lowestRate 供展示。站点按倍率排序也先排列综合口径至少 3 个的站点——门槛与最低倍率的统计口径必须一致，否则会出现「够格参与加成却算不出可比最低价」的自相矛盾。没有综合口径报价的站 `lowestRate` 为 `null`，在 `?sort=rate` 里无条件排在最后，两站都为 `null` 时按 slug 兜底（严格全序，避免分页重复）。详情仍展示现有报价，先按口径分组、组内按倍率升序，认不出的口径排最后（`server/src/service.ts` 的 `getRankings`、`hasEnoughOffersForRate`、`sortOffersForDisplay`）
 - 厂商名和模型名可用真实名称，只作分类用途
 
 ## 领域模型

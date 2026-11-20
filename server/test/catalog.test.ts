@@ -3,7 +3,7 @@ import type { CatalogImportRequest, Post, StationDetail } from '@zhidedeng/share
 import { buildApp } from '../src/app.ts';
 import { authorizeAdmin, deleteModel, importResponse } from '../src/catalog.ts';
 import { openDatabase, openStore } from '../src/node-app.ts';
-import { enqueueSubmission } from '../src/submissions.ts';
+import { enqueueSubmission, reviewSubmission } from '../src/submissions.ts';
 import { seed } from '../src/seed.ts';
 
 const now = () => new Date('2026-11-06T01:00:00Z');
@@ -67,6 +67,39 @@ describe('全量导入', () => {
     const bad = { ...submission, stations: [{ ...submission.stations[0]!, offers: [{ modelSlug: 'gpt-4-1', rate: 0.5, basis: 'garbage' }] }] };
     expect((await runImport(store2, bad)).status).toBe(400);
     expect(store2.db.prepare('SELECT COUNT(*) AS count FROM offers WHERE stationSlug = ?').get('sub-api-example-com')).toEqual({ count: 0 });
+  });
+
+  it('队列同步过之后再导入，文章 id 不变、投票和收藏不丢', async () => {
+    // 回归：导入先把在线的 submission 实体全删掉，然后才在文章循环里问
+    // 「feishu-<recordId> 还在吗」。删都删了，`getWithRemoved` 当然查不到，
+    // 于是永远走 `sub-<投稿id>` 分支。id 一换，读者投过的票、收过的藏
+    // 就全挂在旧 id 上成了孤儿，旧链接也 404。
+    // 这不是一次性事件：只要队列里存在已通过的飞书文章投稿，每次导入都会翻转。
+    const store = newStore();
+    const post = { recordId: 'recDrift', stationSlug: 'sub-api-example-com', title: '导入版标题', summary: '摘要', body: '正文', authorName: '群友甲', publishedAt: '2026-11-04T08:00:00.000Z' };
+    const body = { ...submission, posts: [post] };
+    await runImport(store, body);
+    expect(store.db.prepare("SELECT id FROM entities WHERE kind = 'post' AND json_extract(data,'$.source') = 'submission'").all()).toEqual([{ id: 'feishu-recDrift' }]);
+
+    // 读者投票 + 收藏
+    store.db.prepare("INSERT INTO votes (userHandle, targetType, targetId, value) VALUES ('reader1','post','feishu-recDrift','up')").run();
+    store.db.prepare("INSERT INTO favorites (userHandle, targetType, targetId, createdAt) VALUES ('reader1','post','feishu-recDrift','2026-11-05T00:00:00Z')").run();
+
+    // 队列同步同一条飞书记录并批准
+    enqueueSubmission(store, {
+      channel: 'feishu', batchId: 'batch-drift', kind: 'post', action: 'upsert', originKey: 'recDrift',
+      payload: { recordId: 'recDrift', title: '导入版标题', summary: '摘要', body: '正文', authorName: '群友甲', publishedAt: '2026-11-04T08:00:00.000Z', hostname: 'api.example.com' },
+      ip: '203.0.113.9', now: new Date('2026-11-06T01:00:00Z'),
+    }, { globalPendingBreaker: false });
+    const pending = store.db.prepare("SELECT id FROM submissions WHERE kind = 'post' AND status = 'pending' AND batchId = 'batch-drift'").get() as { id: string };
+    reviewSubmission(store, new Date('2026-11-06T02:00:00Z'), pending.id, { status: 'approved' });
+
+    // 内容完全相同的第二次导入
+    await runImport(store, body);
+    const after = store.db.prepare("SELECT id FROM entities WHERE kind = 'post' AND json_extract(data,'$.source') = 'submission'").all();
+    expect(after).toEqual([{ id: 'feishu-recDrift' }]);
+    const detail = await (await buildApp(store, now).request('/api/posts/feishu-recDrift')).json() as Post;
+    expect(detail.votes).toMatchObject({ up: 1, total: 1 });
   });
 
   it('重复导入相同内容不产生重复', async () => {

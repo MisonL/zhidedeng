@@ -2,12 +2,12 @@ import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from 'node:f
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { CurrentUser, Post } from '@zhidedeng/shared';
+import type { CurrentUser, Post, StationDetail } from '@zhidedeng/shared';
 import { normalizeIp } from '../src/app.ts';
 import { ConcurrencyGate } from '../src/auth.ts';
 import { Store } from '../src/database.ts';
 import { createApp, openStore } from '../src/node-app.ts';
-import { reviewSubmission } from '../src/submissions.ts';
+import { enqueueSubmission, removeStation, reviewSubmission } from '../src/submissions.ts';
 
 const json = { 'content-type': 'application/json' };
 const PASSWORD = 'correct-horse-battery';
@@ -400,6 +400,40 @@ describe('审核群友提交', () => {
     expect(after[0]!.removedAt).not.toBeNull();
     const visible = await (await server.app.request('/api/posts?pageSize=100')).json() as { items: { title: string }[] };
     expect(visible.items.map(item => item.title)).not.toContain('先队列后导入');
+  });
+
+  it('下架站点后重新同步，可用率等指标不会被清成 null', async () => {
+    // 回归：物化站点时用 `store.get` 取 previous，而它看不见已下架的行。
+    // 站点被下架后再同步一次，previous 变成 undefined → 四个指标字段全写 null。
+    // 这四项全站没有别的写入入口，写没了就永远补不回来；而「下架后同步会
+    // 自动恢复」听起来是好事，实际是拿指标换回来的。
+    // catalog.ts 已经踩过同一个坑并专门加了 metrics 快照，submissions.ts 没跟上。
+    const station = { slug: 'sub-metrics-example-com', name: '指标站', description: '描述', url: 'https://metrics.example.com/', rechargeThreshold: null, paymentMethods: [], offers: [] };
+    const payload = { ...station };
+    const enqueue = (batchId: string, now: Date) => enqueueSubmission(openStore(server.db), {
+      kind: 'station', channel: 'feishu', originKey: 'metrics.example.com', batchId, action: 'upsert',
+      payload, ip: '203.0.113.40', now,
+    }, { globalPendingBreaker: false }).submission.id;
+    const approve = (id: string, now: Date) => reviewSubmission(openStore(server.db), now, id, { status: 'approved' });
+    const seedMetrics = () => server.db.prepare(
+      "UPDATE entities SET data = json_set(data,'$.uptime',99.5,'$.firstTokenLatencyMs',320,'$.foundedAt','2024-03-08','$.status','running') WHERE kind = 'station' AND id = ?",
+    ).run(station.slug);
+    const metrics = () => server.db.prepare(
+      "SELECT json_extract(data,'$.uptime') uptime, json_extract(data,'$.firstTokenLatencyMs') latency, json_extract(data,'$.foundedAt') foundedAt, json_extract(data,'$.status') status FROM entities WHERE kind = 'station' AND id = ?",
+    ).get(station.slug);
+
+    const firstId = enqueue('metrics-b1', new Date('2026-11-06T00:00:00Z'));
+    approve(firstId, new Date('2026-11-06T00:00:00Z'));
+    seedMetrics();
+    // 下架要带上当初物化它的那条投稿版本（同一次同步不能追加条目，用同一个 id）
+    removeStation(openStore(server.db), station.slug, firstId, new Date('2026-11-06T01:00:00Z').toISOString());
+    expect((await server.app.request(`/api/stations/${station.slug}`)).status).toBe(404);
+
+    // 飞书里这条还在，下一次同步把它带回来
+    approve(enqueue('metrics-b2', new Date('2026-11-07T00:00:00Z')), new Date('2026-11-07T00:00:00Z'));
+    expect(await metrics()).toEqual({ uptime: 99.5, latency: 320, foundedAt: '2024-03-08', status: 'running' });
+    const detail = await (await server.app.request(`/api/stations/${station.slug}`)).json() as StationDetail;
+    expect(detail).toMatchObject({ uptime: 99.5, firstTokenLatencyMs: 320, foundedAt: '2024-03-08', status: 'running' });
   });
 
   it('站内作者自己的文章也能被管理员下架，不必走投稿队列', async () => {

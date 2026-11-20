@@ -112,6 +112,20 @@ function importCatalog(store: Store, input: CatalogImportRequest): CatalogImport
     // 全量导入再干净也不该把「可恢复」变成「永久没了」。
     // 先把旧指标抄下来再删。删完再 store.get() 只会拿到 undefined，
     // 注释里说的「沿用旧值」就变成了把可用率、首字延迟、建站时间全部清零。
+    // 文章的既有 id 也要在删之前算好，理由同上：下面那句 DELETE 会把在线的
+    // submission 实体全删掉，循环里再问「feishu-<recordId> 还在吗」永远查不到，
+    // 于是每次都切到 `sub-<投稿id>`——文章 id 翻转一次，读者的投票、收藏、
+    // 站外链接就全挂在旧 id 上成了孤儿。只要队列里存着一条已通过的飞书文章投稿，
+    // 这个翻转就是**常态**，不是一次性事件。
+    const postIds = new Map<string, string>();
+    for (const { recordId } of input.posts) {
+      const legacyId = `feishu-${recordId}`;
+      const legacyExists = store.getWithRemoved('post', legacyId) !== undefined;
+      const approved = store.db.prepare(
+        "SELECT id FROM submissions WHERE kind = 'post' AND channel = 'feishu' AND originKey = ? AND status = 'approved' ORDER BY rowid LIMIT 1",
+      ).get(recordId) as { id: string } | undefined;
+      postIds.set(recordId, approved && !legacyExists ? `sub-${approved.id}` : legacyId);
+    }
     const metrics = new Map<string, { status: StationRecord['status']; uptime: number | null; firstTokenLatencyMs: number | null; foundedAt: string | null }>();
     for (const { offers: _offers, ...station } of stations) {
       const previous = store.get('station', station.slug);
@@ -138,16 +152,9 @@ function importCatalog(store: Store, input: CatalogImportRequest): CatalogImport
         .run(offer.stationSlug, offer.modelSlug, offer.rate, offer.basis ?? 'blended', offer.quotedAt ?? null);
     }
     for (const { recordId, authorName, ...post } of input.posts) {
-      // id 必须和队列物化那条路径算得一样，否则同一个飞书记录会对应两个实体。
-      // 队列物化优先沿用 `feishu-<recordId>`，那条不在了才用 `sub-<投稿id>`；
-      // 这里反过来：有已通过的投稿就用它的 id，没有才退回 `feishu-<recordId>`。
-      // 两边都收敛到同一个 id，软删除才挡得住——实测先队列后导入时，
-      // 下架的那篇会以另一个 id 重新出现。
-      const approved = store.db.prepare(
-        "SELECT id FROM submissions WHERE kind = 'post' AND channel = 'feishu' AND originKey = ? AND status = 'approved' ORDER BY rowid LIMIT 1",
-      ).get(recordId) as { id: string } | undefined;
-      const legacyId = `feishu-${recordId}`;
-      const id = approved && !store.getWithRemoved('post', legacyId) ? `sub-${approved.id}` : legacyId;
+      // id 必须和队列物化那条路径算得一样（见上面 postIds 的注释）：
+      // 两边一致，软删除才挡得住，读者的互动也才挂在同一个 id 上。
+      const id = postIds.get(recordId)!;
       // 管理员下架过的文章不能被下一次导入复活。上面那句 DELETE 带 `removedAt IS NULL`，
       // 已下架的行走不到，于是这份 put 会把标记清掉、文章原样回来——下架等于白做。
       // 走 submissions 队列的那条物化路径有同样的守卫（见 submissions.ts 的 materialize），

@@ -655,10 +655,15 @@ export class Service {
         const bOffers = offersByStation.get(b.slug) ?? [];
         // 没有综合口径报价的站（lowestRate === null）无条件排在最后：
         // 它没有能和别人比较的价格，放在前面等于替读者主张「这站最便宜」。
+        // 最后用 slug 兜底，让比较器成为**严格全序**：两个站既没有可比价格、
+        // 门槛分组又相同时，返回 0 就把顺序交给了插入顺序（依赖 SQLite rowid 与
+        // V8 stable sort 的实现细节）。分页时这种隐式顺序最容易变成「第 2 页
+        // 出现第 1 页的条目」，而这里偏偏是会让人看价格的页面。
         const aRate = a.lowestRate, bRate = b.lowestRate;
-        if (aRate === null || bRate === null) return Number(bRate !== null) - Number(aRate !== null);
+        if (aRate === null || bRate === null) return Number(bRate !== null) - Number(aRate !== null) || a.slug.localeCompare(b.slug);
         return Number(this.hasEnoughOffersForRate(bOffers)) - Number(this.hasEnoughOffersForRate(aOffers))
-          || aRate - bRate;
+          || aRate - bRate
+          || a.slug.localeCompare(b.slug);
       });
     } else {
       items.sort((a, b) => query.sort === 'uptime' ? descendingNullsLast(a.uptime, b.uptime) : descendingNullsLast(a.score, b.score));

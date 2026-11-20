@@ -615,7 +615,11 @@ function materialize(store: Store, submission: SubmissionRecord, reviewedAt: str
     // 飞书批次沿用旧同步的 www 分组，认领原站点；新 slug 仍统一由 stationSlug 分配。
     const mine = findStation(store, submission, payload.url);
     const slug = mine?.slug ?? stationSlug(store, payload.url, submission.originKey);
-    const previous = store.get('station', slug);
+    // 必须用 getWithRemoved：store.get 看不见已下架的行，站点下架后再同步一次
+    // 会把它当成新站，四个指标字段（可用率/首字延迟/建站时间/状态）全写 null。
+    // 这四项全站没有别的写入入口，写没了就补不回来——「下架后同步会自动恢复」
+    // 听起来是好事，实际是拿指标换的。catalog.ts 已经踩过同一个坑并加了快照。
+    const previous = store.getWithRemoved('station', slug);
     // 更新已有 slug 时保留最初来源，不能把飞书站点改标成 AI 采集。
     // 指标字段（可用率、首字延迟、成立时间、运行状态）投稿 payload 里根本没有，
     // 全站也没有别的写入入口。这里必须沿用旧值：写 null 等于「每次同步都把

@@ -131,6 +131,36 @@ describe('计价口径对最低倍率的影响', () => {
     expect(regularIndex).toBeLessThan(punished);
   });
 
+  it('两个站都没有综合报价时也有确定顺序，不靠插入顺序', async () => {
+    // 比较器在这条分支上曾经返回 0（两个 lowestRate 都是 null）。
+    // 返回 0 意味着「并列」，顺序就交给了插入顺序和 V8 的 stable sort——
+    // 分页时这种隐式顺序会让第 2 页重复出现第 1 页的条目，而这是个看价格的页面。
+    // 这条用例同时说明那句 null 短路不是死代码：它决定两个「没有可比价格」的站怎么排。
+    const stations = stationSlugs();
+    const models = modelSlugs();
+    // 两个站都只有非综合口径报价 → 两个 lowestRate 都是 null。
+    // 报价主键是 (stationSlug, modelSlug)，同一站同一模型只能挂一种口径，
+    // 所以第二个站的「多条但都不达标」要落在不同模型上。
+    // 用第 2、3 个站：种子顺序是 dengdeng / whale / lime，而 whale > lime，
+    // 所以「插入顺序」和「slug 升序」在这两个站上是相反的——只有真的按 slug 兜底
+    // 才会得到 lime 在前。用相邻且 slug 单调的两站会让变异测不出来。
+    insertOffer(stations[1], models[0], 0.50, 'output');
+    insertOffer(stations[2], models[0], 0.30, 'input');
+    insertOffer(stations[2], models[1], 0.60, 'package');
+    insertOffer(stations[2], models[2], 0.70, 'input');
+
+    const order = async () => {
+      const response = await server.app.request('/api/stations?sort=rate&pageSize=100');
+      const body = await response.json() as GetStationsResponse;
+      return body.items.filter(item => item.slug === stations[1] || item.slug === stations[2]).map(item => item.slug);
+    };
+    const first = await order();
+    expect(first).toHaveLength(2);
+    // 两个都不可比，顺序必须只看站本身（slug），不能随查询/插入顺序漂移
+    expect(first).toEqual([...first].sort((a, b) => a.localeCompare(b)));
+    expect(await order()).toEqual(first);
+  });
+
   it('只有非综合口径报价时，模型榜最低倍率为 null 而不是 Infinity', async () => {
     const stations = stationSlugs();
     const model = modelSlugs()[0];
