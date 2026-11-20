@@ -304,6 +304,78 @@ describe('管理密钥被拒时的反馈', () => {
 });
 
 describe('待审卡片的变更提示', () => {
+  const stationItem = (slug: string, url: string, lowestRate: number) => ({
+    slug, name: slug, url, description: '现在的描述', lowestRate,
+  });
+  const pendingStation = (url: string, channel = 'feishu') => ({
+    ...submission, channel,
+    payload: {
+      name: '示例站', url, description: '被换掉的描述',
+      rechargeThreshold: null, paymentMethods: [], offers: [{ modelSlug: 'claude-sonnet', rate: 0.3 }],
+    },
+  });
+
+  it('站点地址是 FQDN 尾点写法时，也认出「已有站点」而不是「新建」', async () => {
+    // 归一不一致时，尾点站会被当成新站，审核员看不到「这一通过会覆盖什么」。
+    stubApi({
+      'GET /api/admin/submissions': { items: [pendingStation('https://dotui.example.com/')], total: 1 },
+      'GET /api/stations': { items: [stationItem('sub-dotui-example-com', 'https://dotui.example.com./', 0.9)], total: 1 },
+    });
+    await unlock();
+    expect(await screen.findByText(/更新已有站点/)).toBeInTheDocument();
+    expect(screen.queryByText(/新建站点/)).not.toBeInTheDocument();
+  });
+
+  it('agent 渠道且站点地址带尾点时，仍认作更新（这一层没有分组兜底）', async () => {
+    // 非飞书渠道不分组，不存在「分组兜底」替它兜住尾点差异，所以这条专门钉精确层：
+    // 少一次去尾点，审核员就会看到「新建站点」，而实际是覆盖已有站。
+    stubApi({
+      'GET /api/admin/submissions': { items: [pendingStation('https://dotagent2.example.com/', 'agent')], total: 1 },
+      'GET /api/stations': { items: [stationItem('sub-dotagent2', 'https://dotagent2.example.com./', 0.9)], total: 1 },
+    });
+    await unlock();
+    expect(await screen.findByText(/更新已有站点/)).toBeInTheDocument();
+    expect(screen.queryByText(/新建站点/)).not.toBeInTheDocument();
+  });
+
+  it('www 与裸域各有一条站时，按精确 hostname 命中，不取错的那条', async () => {
+    // 服务端认领是「精确优先」。只按飞书分组键找会取到另一条，倍率提示就指错了站。
+    stubApi({
+      'GET /api/admin/submissions': { items: [pendingStation('https://twin.example.com/')], total: 1 },
+      'GET /api/stations': {
+        items: [
+          stationItem('sub-twin', 'https://twin.example.com/', 0.9),
+          stationItem('sub-www-twin', 'https://www.twin.example.com/', 0.5),
+        ],
+        total: 2,
+      },
+    });
+    await unlock();
+    // 投稿是裸域 → 必须拿裸域那条的 0.9x
+    expect(await screen.findByText(/最低倍率 0\.9x → 0\.3x/)).toBeInTheDocument();
+  });
+
+  it('web/agent 渠道不套用飞书分组：只会新建站时如实提示「新建站点」', async () => {
+    // 服务端只对 channel==='feishu' 分组；web/agent 投 www 写法会另建一条站。
+    // 审核台若照飞书口径分组，会误报「更新已有站点」，审核员以为在覆盖。
+    stubApi({
+      'GET /api/admin/submissions': { items: [pendingStation('https://www.solo.example.com/', 'agent')], total: 1 },
+      'GET /api/stations': { items: [stationItem('sub-solo', 'https://solo.example.com/', 0.9)], total: 1 },
+    });
+    await unlock();
+    expect(await screen.findByText(/新建站点/)).toBeInTheDocument();
+    expect(screen.queryByText(/更新已有站点/)).not.toBeInTheDocument();
+  });
+
+  it('飞书渠道仍然按分组兜底：www 写法更新裸域那条站', async () => {
+    stubApi({
+      'GET /api/admin/submissions': { items: [pendingStation('https://www.solo.example.com/', 'feishu')], total: 1 },
+      'GET /api/stations': { items: [stationItem('sub-solo', 'https://solo.example.com/', 0.9)], total: 1 },
+    });
+    await unlock();
+    expect(await screen.findByText(/更新已有站点/)).toBeInTheDocument();
+  });
+
   it('站点更新时提示报价将被整包替换，并给出最低倍率变化', async () => {
     // 线上已有该站点（catalog 带 lowestRate），投稿会把报价整包替换掉
     stubApi({

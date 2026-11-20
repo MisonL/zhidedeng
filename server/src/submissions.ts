@@ -754,13 +754,20 @@ function materialize(store: Store, submission: SubmissionRecord, reviewedAt: str
     const payload = parse(postSchema, submission.payload);
     // 两边都要过同一套归一：payload 里的 hostname 可能来自历史行（带尾点、大小写），
     // 站点 url 也可能是尾点写法。直接拿 `new URL(...).hostname` 比会把同一站判成两条。
-    const hostname = payload.hostname == null ? null : feishuHostnameKey(payload.hostname);
-    const stationSlug = hostname
-      ? store.all('station').find(station => {
+    //
+    // 但**先精确、再分组**：www 与裸域各自一条实体时（认领优先级就是为这种情形设计的），
+    // 只按分组键找会取 rowid 第一条，把 `www.x` 的文章挂到裸域 `x` 上。
+    const exactHost = payload.hostname == null ? null : hostnameOf(`https://${payload.hostname}`);
+    const groupedHost = exactHost === null ? null : feishuHostnameKey(exactHost);
+    const stations = store.all('station');
+    const exactHit = exactHost === null ? undefined
+      : stations.find(station => hostnameOf(station.url) === exactHost);
+    const groupedHit = exactHit ?? (groupedHost === null ? undefined
+      : stations.find(station => {
         const other = hostnameOf(station.url);
-        return other !== null && feishuHostnameKey(other) === hostname;
-      })?.slug ?? null
-      : null;
+        return other !== null && feishuHostnameKey(other) === groupedHost;
+      }));
+    const stationSlug = groupedHit?.slug ?? null;
     // 飞书每次同步都会生成新批次，评价按原记录更新，不能每同步一次就多发一篇文章。
     //
     // 这里**不再按 batchId 是否为空分流**。batchId 为空只可能来自管理端单条投稿

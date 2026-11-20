@@ -241,15 +241,27 @@ export default function Admin() {
    * 所以不能按 slug 找当前站点——那样永远找不到，所有卡片都会显示「新建站点」，
    * 而审核员最需要被告警的恰恰是「这条在覆盖已有站点」。按 URL 的 hostname 反查。
    */
-  const stationByHost = (() => {
-    const map = new Map<string, (typeof stationBySlug extends Map<string, infer V> ? V : never)>();
+  /**
+   * 两张索引：**精确 hostname** 与**飞书分组键**。
+   *
+   * 必须区分开。服务端认领是「精确优先、分组兜底」，而且只有 `channel === 'feishu'`
+   * 才分组（agent/web 可以各自持有 www 与裸域两条实体）。审核台只压成一张分组表时：
+   *  - www 与裸域各有一条站时，后写覆盖先写，impact 提示指向错的那条；
+   *  - web/agent 投稿明明会**新建**一条站，却提示「更新已有站点」。
+   */
+  type StationEntry = typeof stationBySlug extends Map<string, infer V> ? V : never;
+  const stationIndex = (() => {
+    const exact = new Map<string, StationEntry>();
+    const grouped = new Map<string, StationEntry>();
     for (const station of stationBySlug.values()) {
       if (station.url === null) continue;
-      // 必须和服务端同一套归一（去 FQDN 尾点、小写）。审核台原先直接用裸 hostname，
-      // 站点地址是尾点写法时，同一条站会被判成「新建站点」，也就不会提示将覆盖什么。
-      try { map.set(feishuHostnameKey(new URL(station.url).hostname), station); } catch { /* 非法 URL 忽略 */ }
+      let host: string;
+      try { host = new URL(station.url).hostname.toLowerCase().replace(/\.+$/, ''); } catch { continue; }
+      if (!exact.has(host)) exact.set(host, station);
+      const key = feishuHostnameKey(host);
+      if (!grouped.has(key)) grouped.set(key, station);
     }
-    return map;
+    return { exact, grouped };
   })();
   /**
    * 投稿正文摘要。审核台原来只显示「名称 · URL」，管理员看不到描述、支付方式、
@@ -289,9 +301,12 @@ export default function Admin() {
     const payload = item.payload as Record<string, unknown> | null;
     const url = payload && typeof payload.url === 'string' ? payload.url : null;
     if (url === null) return impact(item, undefined);
-    let hostname: string;
-    try { hostname = feishuHostnameKey(new URL(url).hostname); } catch { return impact(item, undefined); }
-    return impact(item, stationByHost.get(hostname));
+    let host: string;
+    try { host = new URL(url).hostname.toLowerCase().replace(/\.+$/, ''); } catch { return impact(item, undefined); }
+    // 精确命中优先；分组只在飞书渠道兜底——与服务端认领口径一致。
+    const target = stationIndex.exact.get(host)
+      ?? (item.channel === 'feishu' ? stationIndex.grouped.get(feishuHostnameKey(host)) : undefined);
+    return impact(item, target);
   };
   const pendingPosts = posts ?? [];
   const removedStations = removed ?? [];

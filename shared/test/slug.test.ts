@@ -50,11 +50,26 @@ describe('httpUrl 入库归一', () => {
   // 同一个站算成两条。schema 出口一次性覆盖投稿、同步、导入、Agent 四条入口。
   it.each([
     ['https://example.com./', 'https://example.com/'],
-    ['https://Example.COM./', 'https://example.com/'],
+    // 只删尾点，不改写其它字符（大小写、编码都保留原样）；身份判定另由 hostnameOf 兜底
+    ['https://Example.COM./', 'https://Example.COM/'],
     ['https://example.com./pricing', 'https://example.com/pricing'],
     ['https://www.example.com./', 'https://www.example.com/'],
   ])('%s → %s', (input, expected) => {
     expect(httpUrl.parse(input)).toBe(expected);
+  });
+
+  it('归一不重写整条地址：非 ASCII 路径不会被百分号编码撑长', async () => {
+    // `url.toString()` 会把一个汉字展开成 9 个字符。一条输入 201 字符、带尾点且路径含
+    // 中文的地址曾被展开成 680 字符写进库，此后所有对**库内 url** 再走 httpUrl 的地方
+    // （下架、认领）都因超过 max(300) 直接 400——一条站就能打断整批审核与整条同步。
+    const path = '路'.repeat(60);
+    const input = `https://example.com./${path}`;
+    expect(input.length).toBeLessThanOrEqual(300);
+    const parsed = httpUrl.parse(input);
+    expect(parsed.length).toBe(input.length - 1);
+    expect(parsed).toBe(`https://example.com/${path}`);
+    // 归一后的值本身必须仍然合法（长度、内网判定、协议都过）
+    expect(httpUrl.safeParse(parsed).success).toBe(true);
   });
 
   it('不带尾点的地址原样保留', () => {

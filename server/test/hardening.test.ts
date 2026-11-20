@@ -977,6 +977,33 @@ describe('审核群友提交', () => {
     expect(read('agent-dotpath-b.example.com')).toMatchObject({ url: 'https://dotpath.example.com/b', name: 'agent-dotpath-b.example.com' });
   });
 
+  it('www 与裸域各有一条站时，文章按精确 hostname 挂到对的那条', async () => {
+    // 只按飞书分组键（www 与裸域同组）找会取 rowid 第一条，`www.x` 的文章会挂到裸域 `x`。
+    const store = openStore(server.db);
+    const seed = (slug: string, url: string) => store.put('station', slug, {
+      slug, name: slug, description: '描述', url, rechargeThreshold: null, paymentMethods: [],
+      status: null, uptime: null, firstTokenLatencyMs: null, foundedAt: null, source: 'agent' as const,
+    });
+    seed('sub-twinl', 'https://twinl.example.com/');
+    seed('sub-www-twinl', 'https://www.twinl.example.com/');
+    const publish = (recordId: string, hostname: string) => {
+      const id = enqueueSubmission(store, {
+        kind: 'post', channel: 'feishu', originKey: recordId, batchId: `twinl-${recordId}`, action: 'upsert',
+        payload: { recordId, title: `标题 ${recordId}`, summary: '摘要', body: '正文', authorName: '甲', publishedAt: '2026-11-04T08:00:00.000Z', hostname },
+        ip: '203.0.113.61', now: new Date('2026-11-06T00:00:00Z'),
+      }, { globalPendingBreaker: false }).submission.id;
+      reviewSubmission(store, new Date('2026-11-06T00:00:00Z'), id, { status: 'approved' });
+    };
+    publish('recTwinWww', 'www.twinl.example.com');
+    publish('recTwinBare', 'twinl.example.com');
+
+    const slugOf = (recordId: string) => (server.db.prepare(
+      "SELECT json_extract(data,'$.stationSlug') slug FROM entities WHERE kind = 'post' AND json_extract(data,'$.title') = ?",
+    ).get(`标题 ${recordId}`) as { slug: string | null }).slug;
+    expect(slugOf('recTwinWww')).toBe('sub-www-twinl');
+    expect(slugOf('recTwinBare')).toBe('sub-twinl');
+  });
+
   it('站内作者自己的文章也能被管理员下架，不必走投稿队列', async () => {
     // source='user' 的文章原本只能改状态：前台确实看不见了，但管理端既没有
     // 恢复入口，也查不到下架时间。统一走软删除后两者都有了。

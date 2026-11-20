@@ -65,13 +65,28 @@ export const httpUrl = z.string().max(300).refine(value => {
  */
 function normalizeFqdnDots(value: string): string {
   try {
-    const url = new URL(value);
-    if (!url.hostname.endsWith('.')) return value;
-    url.hostname = url.hostname.replace(/\.+$/, '');
-    return url.toString();
+    if (!new URL(value).hostname.endsWith('.')) return value;
   } catch {
     return value;
   }
+  // 只做**字符级**的定点删除，绝不 `url.toString()` 重写整条地址。
+  // 重写会把非 ASCII 路径百分号编码（一个汉字 → 9 个字符），一条输入 201 字符、
+  // 带尾点且路径含中文的地址会被展开成 680 字符并写进库；此后所有对**库内 url**
+  // 再走 `httpUrl` 的地方（下架、认领）都会因超过 max(300) 直接 400，
+  // 一条站就能把整批审核、整条同步链路打断。
+  const schemeEnd = value.indexOf('://') + 3;
+  const rest = value.slice(schemeEnd);
+  const pathStart = rest.search(/[/?#]/);
+  const authorityEnd = pathStart === -1 ? value.length : schemeEnd + pathStart;
+  const authority = value.slice(schemeEnd, authorityEnd);
+  // refine 已拒绝 userinfo 与 ?#，这里只剩 host[:port]；IPv6 字面量带尾点会被 new URL 直接拒。
+  const colon = authority.lastIndexOf(':');
+  const hasPort = colon !== -1 && /^\d+$/.test(authority.slice(colon + 1));
+  const host = hasPort ? authority.slice(0, colon) : authority;
+  const port = hasPort ? authority.slice(colon) : '';
+  const stripped = host.replace(/\.+$/, '');
+  if (stripped === host) return value;
+  return `${value.slice(0, schemeEnd)}${stripped}${port}${value.slice(authorityEnd)}`;
 }
 
 /** 模型和厂商的 slug 共用同一套规则：小写字母、数字和连字符，最长 64。 */
