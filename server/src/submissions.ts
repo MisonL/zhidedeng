@@ -752,9 +752,14 @@ function materialize(store: Store, submission: SubmissionRecord, reviewedAt: str
     });
   } else {
     const payload = parse(postSchema, submission.payload);
-    const hostname = payload.hostname?.toLowerCase();
+    // 两边都要过同一套归一：payload 里的 hostname 可能来自历史行（带尾点、大小写），
+    // 站点 url 也可能是尾点写法。直接拿 `new URL(...).hostname` 比会把同一站判成两条。
+    const hostname = payload.hostname == null ? null : feishuHostnameKey(payload.hostname);
     const stationSlug = hostname
-      ? store.all('station').find(station => station.url !== null && new URL(station.url).hostname === hostname)?.slug ?? null
+      ? store.all('station').find(station => {
+        const other = hostnameOf(station.url);
+        return other !== null && feishuHostnameKey(other) === hostname;
+      })?.slug ?? null
       : null;
     // 飞书每次同步都会生成新批次，评价按原记录更新，不能每同步一次就多发一篇文章。
     //

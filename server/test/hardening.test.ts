@@ -907,6 +907,25 @@ describe('审核群友提交', () => {
     expect(store.getWithRemoved('station', 'sub-sup-a')?.name).toBe('A v2');
   });
 
+  it('文章关联站点时，尾点与大小写写法归一到同一个站', async () => {
+    // 文章与站点的关联只看 hostname。两边写法不一致（站点用尾点、文章不带，或反过来）
+    // 会让文章卡片缺站名。两边都必须过同一套归一。
+    const store = openStore(server.db);
+    store.put('station', 'sub-dotlink-example-com', {
+      slug: 'sub-dotlink-example-com', name: '尾点站', description: '描述', url: 'https://DotLink.example.com./',
+      rechargeThreshold: null, paymentMethods: [], status: null, uptime: null,
+      firstTokenLatencyMs: null, foundedAt: null, source: 'submission' as const,
+    });
+    const id = enqueueSubmission(store, {
+      kind: 'post', channel: 'feishu', originKey: 'recDotLink', batchId: 'dotlink-b1', action: 'upsert',
+      payload: { recordId: 'recDotLink', title: '尾点文章', summary: '摘要', body: '正文', authorName: '甲', publishedAt: '2026-11-04T08:00:00.000Z', hostname: 'dotlink.example.com' },
+      ip: '203.0.113.58', now: new Date('2026-11-06T00:00:00Z'),
+    }, { globalPendingBreaker: false }).submission.id;
+    reviewSubmission(store, new Date('2026-11-06T00:00:00Z'), id, { status: 'approved' });
+    const row = server.db.prepare("SELECT json_extract(data,'$.stationSlug') slug FROM entities WHERE kind = 'post' AND json_extract(data,'$.title') = '尾点文章'").get() as { slug: string | null };
+    expect(row.slug).toBe('sub-dotlink-example-com');
+  });
+
   it('站内作者自己的文章也能被管理员下架，不必走投稿队列', async () => {
     // source='user' 的文章原本只能改状态：前台确实看不见了，但管理端既没有
     // 恢复入口，也查不到下架时间。统一走软删除后两者都有了。
