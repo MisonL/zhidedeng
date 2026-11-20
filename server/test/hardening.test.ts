@@ -462,6 +462,31 @@ describe('审核群友提交', () => {
     expect(rows[0]).toMatchObject({ id: 'sub-www-alias-review-example-com', uptime: 99.5, removedAt: null });
   });
 
+  it('空批次的单条飞书投稿，换 www/裸域再同步也认回同一个站', async () => {
+    // 站点侧的 grouped 认领若仍带 `batchId !== null`，管理端单条（空批次）投稿
+    // 就会绕过分组：站点下架后换成 www/裸域写法再同步，被当成新站另建一条，
+    // 而旧实体带着指标留在「已下架」里。文章侧早已完全不看 batchId，站点侧同理。
+    const mk = (host: string, now: Date) => enqueueSubmission(openStore(server.db), {
+      kind: 'station', channel: 'feishu', originKey: host, action: 'upsert',
+      payload: { slug: 'alias', name: '空批次站', description: '描述', url: `https://${host}/`, rechargeThreshold: null, paymentMethods: [], offers: [] },
+      ip: '203.0.113.42', now,
+    }, { globalPendingBreaker: false }).submission.id;   // 故意不给 batchId
+    const approve = (id: string, now: Date) => reviewSubmission(openStore(server.db), now, id, { status: 'approved' });
+    const rows = () => server.db.prepare(
+      "SELECT id, json_extract(data,'$.uptime') uptime, removedAt FROM entities WHERE kind = 'station' AND json_extract(data,'$.source') = 'submission' ORDER BY rowid",
+    ).all() as { id: string; uptime: number | null; removedAt: string | null }[];
+
+    const first = mk('www.null-batch.example.com', new Date('2026-11-06T00:00:00Z'));
+    approve(first, new Date('2026-11-06T00:00:00Z'));
+    server.db.prepare("UPDATE entities SET data = json_set(data,'$.uptime',97.5) WHERE kind = 'station' AND json_extract(data,'$.source') = 'submission'").run();
+    removeStation(openStore(server.db), rows()[0]!.id, first, new Date('2026-11-06T01:00:00Z').toISOString());
+
+    approve(mk('null-batch.example.com', new Date('2026-11-07T00:00:00Z')), new Date('2026-11-07T00:00:00Z'));
+    const after = rows();
+    expect(after).toHaveLength(1);
+    expect(after[0]).toMatchObject({ id: 'sub-www-null-batch-example-com', uptime: 97.5, removedAt: null });
+  });
+
   it('站内作者自己的文章也能被管理员下架，不必走投稿队列', async () => {
     // source='user' 的文章原本只能改状态：前台确实看不见了，但管理端既没有
     // 恢复入口，也查不到下架时间。统一走软删除后两者都有了。

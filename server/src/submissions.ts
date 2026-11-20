@@ -390,7 +390,10 @@ export function hostnameOf(url: string | null): string | null {
 function findStation(store: Store, submission: Pick<SubmissionRecord, 'channel' | 'batchId' | 'originKey'>, url: string): StationRecord | undefined {
   const hostname = hostnameOf(url);
   if (hostname === null) return undefined;
-  const grouped = submission.channel === 'feishu' && submission.batchId !== null
+  // 只看 channel，不看 batchId：www/裸域 分组是**飞书渠道的语义**，跟这批记录
+  // 有没有批次号无关。带上 batchId 会让「管理端单条空批次投稿」绕过分组，
+  // 于是同一站点的 www 与裸域写法被判成两个站。文章侧已经完全不看 batchId 了。
+  const grouped = submission.channel === 'feishu'
     && feishuHostnameKey(submission.originKey) === feishuHostnameKey(hostname);
   const index = stationHostIndex(store);
   return grouped ? index.byGroupedHost.get(feishuHostnameKey(hostname)) : index.byHost.get(hostname);
@@ -625,7 +628,7 @@ function materialize(store: Store, submission: SubmissionRecord, reviewedAt: str
     const { offers, ...payload } = parseStationPayload(store, submission.payload);
     // 飞书批次沿用旧同步的 www 分组，认领原站点；新 slug 仍统一由 stationSlug 分配。
     const mine = findStation(store, submission, payload.url);
-    const grouped = submission.channel === 'feishu' && submission.batchId !== null
+    const grouped = submission.channel === 'feishu'
       && feishuHostnameKey(submission.originKey) === feishuHostnameKey(hostnameOf(payload.url) ?? '');
     const slug = mine?.slug ?? stationSlug(store, payload.url, submission.originKey, grouped);
     // 必须用 getWithRemoved：store.get 看不见已下架的行，站点下架后再同步一次
