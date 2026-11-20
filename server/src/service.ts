@@ -559,7 +559,8 @@ export class Service {
     // 物化后的 slug 要按各自的规则查，不能从 payload 里猜：
     // 文章 id 是 `sub-<投稿id>`（见 submissions.ts 的 materialize），
     // 站点 slug 由 hostname 决定而不是 originKey，模型 slug 就是 payload.slug。
-    const items = rows.map((row) => {      const payload = JSON.parse(row.payload) as { title?: string; name?: string; slug?: string };
+    const items = rows.map((row) => {
+      const payload = JSON.parse(row.payload) as { title?: string; name?: string; slug?: string };
       return {
         id: row.id, kind: row.kind, status: row.status, reason: row.reason ?? null,
         title: payload.title ?? payload.name ?? payload.slug ?? row.id,
