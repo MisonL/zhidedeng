@@ -445,9 +445,13 @@ function stationHostIndex(store: Store): Pick<StationHostIndex, 'version' | 'byH
   for (const row of rows) {
     const station = JSON.parse(row.data) as StationRecord;
     const host = hostnameOf(station.url);
-    // 指纹只关心「哪些 id 对应哪个 hostname、是否下架」，其余字段变了不影响认领。
+    // 指纹只关心「哪些 id 对应哪个 url、是否下架」，名称/描述/报价变了不影响认领。
+    // 这里特意用**原始 url** 而不是归一化后的 hostname：索引里存的是整条站点记录，
+    // `findStation(...)?.url` 这类调用方会读它（见 submissionOriginKey）。
+    // 只哈希 hostname 的话，「hostname 不变、路径变了」时指纹不变，索引里留着旧 url，
+    // 调用方读到的就是过期数据——归一化省不了多少，不值得留这个坑。
     // 顺序必须是 rowid（见原注释：删除再插回会反转次序），这里已经是 rowid。
-    hash.update(row.id).update('\u0000').update(host ?? '').update('\u0001').update(row.removedAt ?? '').update('\u0002');
+    hash.update(row.id).update('\u0000').update(station.url ?? '').update('\u0001').update(row.removedAt ?? '').update('\u0002');
     if (host === null) continue;
     const grouped = feishuHostnameKey(host);
     // 「先出现的赢」：与原先 `store.allWithRemoved(...).find(...)` 逐字一致。
@@ -459,9 +463,10 @@ function stationHostIndex(store: Store): Pick<StationHostIndex, 'version' | 'byH
   }
   const fingerprint = `${rows.length}:${hash.digest('hex')}`;
   if (cached && cached.fingerprint === fingerprint) {
-    // 站点集合没变（只是别的字段被写过），沿用旧索引，只更新版本号。
+    // 指纹相同意味着「id / url / 是否下架」逐条一致，四张表必然等价——整份沿用，
+    // 只更新版本号。不要只替换一部分表：那会造成「在线表是旧的、含下架表是新的」
+    // 这种看起来无害、实际靠不住的状态。
     cached.version = store.entityVersion;
-    cached.allByHost = allByHost; cached.allByGroupedHost = allByGroupedHost;
     return cached;
   }
   const next = { version: store.entityVersion, fingerprint, byHost, byGroupedHost, allByHost, allByGroupedHost };
