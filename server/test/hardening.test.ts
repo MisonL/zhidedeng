@@ -552,8 +552,13 @@ describe('审核群友提交', () => {
         .run(slug, JSON.stringify({ slug, name: '旧名', description: '描述', url, rechargeThreshold: null, paymentMethods: [], offers: [], status: null, uptime: null, firstTokenLatencyMs: null, foundedAt: null, source: 'submission' }));
       server.db.prepare("UPDATE entities SET removedAt = '2026-11-05T00:00:00Z' WHERE kind = 'station' AND id = ?").run(slug);
     };
+    const storeRemoved = (slug: string) => server.db.prepare("SELECT removedAt FROM entities WHERE kind = 'station' AND id = ?").get(slug) as { removedAt: string | null } | undefined;
     seedRemoved('sub-www-k-example-com', 'https://www.k.example.com/');
     seedRemoved('sub-k-example-com', 'https://k.example.com/');
+    // 前置状态也要断言：这两条必须真的处于「已下架」，否则下面的终态断言
+    // 可能在一个根本没造出前提交件的环境里碰巧通过。
+    expect(storeRemoved('sub-www-k-example-com')?.removedAt).not.toBeNull();
+    expect(storeRemoved('sub-k-example-com')?.removedAt).not.toBeNull();
     const read = (slug: string) => server.db.prepare("SELECT json_extract(data,'$.name') name, removedAt FROM entities WHERE kind = 'station' AND id = ?").get(slug) as { name: string; removedAt: string | null };
 
     const id = enqueueSubmission(openStore(server.db), {
@@ -581,7 +586,42 @@ describe('审核群友提交', () => {
     }, { globalPendingBreaker: false }).submission.id;
     reviewSubmission(openStore(server.db), new Date('2026-11-06T00:00:00Z'), id, { status: 'approved' });
     expect(openStore(server.db).get('station', 'agent-plan.example.com')?.source).toBe('agent');
-    expect(submissionState(openStore(server.db)).stations.map(station => station.slug)).toContain('agent-plan.example.com');
+    const planned = submissionState(openStore(server.db)).stations.find(station => station.slug === 'agent-plan.example.com');
+    expect(planned).toBeDefined();
+
+    // 光出现在表里还不够：拿表里的 submissionId 真的下一次架，证明自动下架能落地。
+    // 版本号取自「最新一条 approved upsert」，与同步脚本拿到的完全一致。
+    const removed = removeStation(openStore(server.db), planned!.slug, planned!.submissionId, new Date('2026-11-08T00:00:00Z').toISOString());
+    expect(removed).toBe('agent-plan.example.com');
+    expect(openStore(server.db).get('station', 'agent-plan.example.com')).toBeUndefined();
+    expect(submissionState(openStore(server.db)).stations.map(station => station.slug)).not.toContain('agent-plan.example.com');
+  });
+
+  it('只有已下架的是精确写法时，复活它，不去改写在线 www 站的 url', async () => {
+    // 反方向同样会制造「同 url」：在线 www.n + 已下架 n，投 n 时若只看在线站，
+    // 会命中 www.n 并把它的 url 改写成 n；此后对 n 调用恢复接口，两条在线站同 url。
+    // 精确写法优先且**含已下架**，才能复活 n 而让 www.n 原样不动。
+    const seed = (slug: string, url: string, removed: boolean) => {
+      server.db.prepare("INSERT INTO entities (kind, id, data) VALUES ('station', ?, ?)")
+        .run(slug, JSON.stringify({ slug, name: '旧名', description: '描述', url, rechargeThreshold: null, paymentMethods: [], offers: [], status: 'running', uptime: 91.2, firstTokenLatencyMs: 200, foundedAt: '2023-01-01', source: 'agent' }));
+      if (removed) server.db.prepare("UPDATE entities SET removedAt = '2026-11-05T00:00:00Z' WHERE kind = 'station' AND id = ?").run(slug);
+    };
+    seed('agent-www-n2.example.com', 'https://www.n2.example.com/', false);
+    seed('agent-n2.example.com', 'https://n2.example.com/', true);
+    const read = (slug: string) => server.db.prepare(
+      "SELECT json_extract(data,'$.url') url, json_extract(data,'$.name') name, removedAt FROM entities WHERE kind = 'station' AND id = ?",
+    ).get(slug) as { url: string; name: string; removedAt: string | null };
+
+    const id = enqueueSubmission(openStore(server.db), {
+      kind: 'station', channel: 'feishu', originKey: 'n2.example.com', action: 'upsert',
+      payload: { slug: 'n2', name: '飞书复活', description: '飞书描述', url: 'https://n2.example.com/', rechargeThreshold: null, paymentMethods: [], offers: [] },
+      ip: '203.0.113.48', now: new Date('2026-11-06T00:00:00Z'),
+    }, { globalPendingBreaker: false }).submission.id;
+    reviewSubmission(openStore(server.db), new Date('2026-11-06T00:00:00Z'), id, { status: 'approved' });
+
+    expect(read('agent-n2.example.com')).toMatchObject({ url: 'https://n2.example.com/', name: '飞书复活', removedAt: null });
+    // 在线那条一个字都不该动，尤其 url 不能被改写成裸域
+    expect(read('agent-www-n2.example.com')).toMatchObject({ url: 'https://www.n2.example.com/', name: '旧名', removedAt: null });
   });
 
   it('站内作者自己的文章也能被管理员下架，不必走投稿队列', async () => {

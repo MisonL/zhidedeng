@@ -396,12 +396,18 @@ function findStation(store: Store, submission: Pick<SubmissionRecord, 'channel' 
   const grouped = submission.channel === 'feishu'
     && feishuHostnameKey(submission.originKey) === feishuHostnameKey(hostname);
   const index = stationHostIndex(store);
-  // **精确写法的站点优先**，组内其它写法只做兜底。否则线上同时存在
-  // `x.com` 与 `www.x.com` 两条站时，投 `x.com` 会认领 rowid 更早的 `www.x.com`，
-  // 把它的 url 改写成 `x.com`——两条在线站从此同 url，前端显示两条一模一样的站，
-  // 另一条再也不会被同步更新，也进不了下架计划。实测过这个状态。
-  return index.byHost.get(hostname)
-    ?? (grouped ? index.byGroupedHost.get(feishuHostnameKey(hostname)) : undefined);
+  // **精确写法优先，组内其它写法只做兜底**，而且两张表都要含已下架站点。
+  //
+  // 为什么含已下架：站点身份看 hostname，已下架的站被同步带回来时必须还是同一个
+  // slug（否则挂在旧 slug 上的文章和互动全成孤儿）。这里只看在线的话，
+  // 「在线 www.n + 已下架 n，投 natives n」会先命中在线的 www.n，把它的 url 改写成
+  // n；而对 n 调用恢复接口后，两条在线站同 url。实测过这个状态。
+  //
+  // 为什么精确优先：线上同时存在 `x.com` 与 `www.x.com` 两条站时，若按分组取
+  // rowid 第一条，投 `x.com` 会认领更早的 `www.x.com` 并改写它的 url——
+  // 同样是两条在线站同 url，前端显示两条一模一样的站，另一条再也不被同步更新。
+  return index.allByHost.get(hostname)
+    ?? (grouped ? index.allByGroupedHost.get(feishuHostnameKey(hostname)) : undefined);
 }
 
 /**
