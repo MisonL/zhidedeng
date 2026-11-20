@@ -591,6 +591,23 @@ describe('下架请求', () => {
     expect(listSubmissions(store, { status: 'pending' }).items.map(item => item.id)).toContain(newer.id);
   });
 
+  it('下架批准后，同组另一种写法的待审上架被替代，不会被点回来', async () => {
+    // 下架也按分组覆盖 www 与裸域：组里另一条写法的待审 upsert 已经没有意义，
+    // 留着它审核台就会多一条「点了通过又把站建回来」的记录。
+    // 这段逻辑我第一次重构时漏掉了（只保住 upsert 侧的逐条解析），这条用例是补的。
+    const station = approveStation('remove-alias.example.com', 'agent');
+    const pendingWww = await submit([stationItem('www.remove-alias.example.com')], 'remove-alias-www');
+    // 另一个渠道、完全不同的 hostname：不该被牵连
+    const other = enqueueSubmission(store, {
+      ...stationItem('untouched.example.com'), channel: 'agent', ip: '127.0.0.1', now: clock(),
+    });
+    const removal = await submit([removalItem(station)]);
+    await batchReview(removal.batchId);
+    expect(store.get('station', station.slug)).toBeUndefined();
+    expect(listSubmissions(store, { batchId: pendingWww.batchId }).items[0].status).toBe('superseded');
+    expect(listSubmissions(store, { status: 'pending' }).items.map(item => item.id)).toContain(other.submission.id);
+  });
+
   it('拒绝下架只更新审核状态，站点和报价保留', async () => {
     const station = approveStation();
     const batch = await submit([removalItem(station)]);

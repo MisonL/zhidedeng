@@ -764,13 +764,29 @@ const SUPERSEDED_REASON = '已被同一站点的更新版本替代，无需处�
  * 管理员从上往下点「通过」时先过的是旧版本。那一层在审核台修（默认最新的在前）。
  */
 function supersedePending(store: Store, submission: SubmissionRecord, reviewedAt: string): void {
+  // 下架请求只替代待审的 upsert，不替代别的下架请求（两条下架都指向同一站时，
+  // 后一条审核会拿到「站点已不存在」的说明，不是无意义待审）。
   const actionFilter = submission.action === 'remove' ? "AND action = 'upsert'" : '';
   store.db.prepare(`UPDATE submissions SET status = 'superseded', reason = ?, reviewedAt = ? WHERE kind = ? AND originKey = ? AND status = 'pending' AND id <> ? ${actionFilter}`)
     .run(SUPERSEDED_REASON, reviewedAt, submission.kind, submission.originKey, submission.id);  if (submission.kind !== 'station') return;
   const key = feishuHostnameKey(submission.originKey);
   const aliases = [key, `www.${key}`].filter(host => host !== submission.originKey && feishuHostnameKey(host) === key);
   if (aliases.length === 0) return;
-  if (submission.action === 'upsert') {
+
+  if (submission.action === 'remove') {
+    // 下架按分组覆盖 www 与裸域两种写法：组里另一条写法的待审上架已经没有意义。
+    // （这段原本和 upsert 共用一个循环，我把 upsert 改成逐条解析时漏掉了它——
+    // 结果下架不再替代别名的待审上架，审核台会留下一条「点了通过又把站建回来」的
+    // 记录。补回来，并且单独成段，免得下次再被合并掉。）
+    if (submission.channel !== 'feishu' || submission.batchId === null) return;
+    for (const alias of aliases) {
+      store.db.prepare("UPDATE submissions SET status = 'superseded', reason = ?, reviewedAt = ? WHERE kind = 'station' AND channel = 'feishu' AND batchId IS NOT NULL AND originKey = ? AND status = 'pending' AND id <> ? AND action = 'upsert'")
+        .run(SUPERSEDED_REASON, reviewedAt, alias, submission.id);
+    }
+    return;
+  }
+
+  {
     const target = findStation(store, submission, parse(stationUrlSchema, submission.payload).url);
     if (!target) return;
     // 只替代「批准后确实会写到同一个实体」的别名待审。
@@ -800,7 +816,7 @@ function supersedePending(store: Store, submission: SubmissionRecord, reviewedAt
           .run(SUPERSEDED_REASON, reviewedAt, row.id);
       }
     }
-  } else if (submission.channel !== 'feishu' || submission.batchId === null) return;
+  }
 }
 
 export function reviewSubmission(store: Store, now: Date, id: string, decision: {
