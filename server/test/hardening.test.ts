@@ -436,6 +436,32 @@ describe('审核群友提交', () => {
     expect(detail).toMatchObject({ uptime: 99.5, firstTokenLatencyMs: 320, foundedAt: '2024-03-08', status: 'running' });
   });
 
+  it('站点下架后换 www/裸域 再同步，仍认回同一个站，不另建一条', async () => {
+    // 飞书把 www.x.com 与 x.com 当同一个站点（feishuHostnameKey 分组），
+    // 但 stationHostIndex 只扫在线站点。站点被下架后，stationSlug 的认领若只做
+    // 精确 hostname 比较，换个写法就会被当成全新站点：新建一条指标全 null 的实体，
+    // 而旧实体带着可用率躺在「已下架」里——数据没丢，但读者再也看不到。
+    const mk = (host: string, batchId: string, now: Date) => enqueueSubmission(openStore(server.db), {
+      kind: 'station', channel: 'feishu', originKey: host, batchId, action: 'upsert',
+      payload: { slug: 'alias', name: '别名站', description: '描述', url: `https://${host}/`, rechargeThreshold: null, paymentMethods: [], offers: [] },
+      ip: '203.0.113.41', now,
+    }, { globalPendingBreaker: false }).submission.id;
+    const approve = (id: string, now: Date) => reviewSubmission(openStore(server.db), now, id, { status: 'approved' });
+    const submissionStations = () => server.db.prepare(
+      "SELECT id, json_extract(data,'$.url') url, json_extract(data,'$.uptime') uptime, removedAt FROM entities WHERE kind = 'station' AND json_extract(data,'$.source') = 'submission' ORDER BY rowid",
+    ).all() as { id: string; url: string; uptime: number | null; removedAt: string | null }[];
+
+    const first = mk('www.alias-review.example.com', 'alias-b1', new Date('2026-11-06T00:00:00Z'));
+    approve(first, new Date('2026-11-06T00:00:00Z'));
+    server.db.prepare("UPDATE entities SET data = json_set(data,'$.uptime',99.5) WHERE kind = 'station' AND json_extract(data,'$.source') = 'submission'").run();
+    removeStation(openStore(server.db), submissionStations()[0]!.id, first, new Date('2026-11-06T01:00:00Z').toISOString());
+
+    approve(mk('alias-review.example.com', 'alias-b2', new Date('2026-11-07T00:00:00Z')), new Date('2026-11-07T00:00:00Z'));
+    const rows = submissionStations();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ id: 'sub-www-alias-review-example-com', uptime: 99.5, removedAt: null });
+  });
+
   it('站内作者自己的文章也能被管理员下架，不必走投稿队列', async () => {
     // source='user' 的文章原本只能改状态：前台确实看不见了，但管理端既没有
     // 恢复入口，也查不到下架时间。统一走软删除后两者都有了。

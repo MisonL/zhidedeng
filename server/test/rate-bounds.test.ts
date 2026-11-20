@@ -161,6 +161,24 @@ describe('计价口径对最低倍率的影响', () => {
     expect(await order()).toEqual(first);
   });
 
+  it('两站综合最低倍率相同时按 slug 定，不靠插入顺序', async () => {
+    // 同率并列同样会落到「返回 0 → 顺序交给插入顺序」。非空倍率分支也要有兜底，
+    // 否则分页时同一页会出现两次同样的站点。
+    const stations = stationSlugs();
+    // 先插 whale（序号 1），再插 lime（序号 2）；whale > lime，所以按 slug 排时
+    // lime 必须在前，而插入顺序给的是 whale 在前——两者相反才测得出兜底。
+    for (const station of [stations[1]!, stations[2]!]) {
+      const stationModels = modelSlugs();
+      insertOffer(station, stationModels[0]!, 0.66);
+      insertOffer(station, stationModels[1]!, 0.66);
+      insertOffer(station, stationModels[2]!, 0.66);
+    }
+    const response = await server.app.request('/api/stations?sort=rate&pageSize=100');
+    const body = await response.json() as GetStationsResponse;
+    const tied = body.items.filter(item => item.slug === stations[1] || item.slug === stations[2]).map(item => item.slug);
+    expect(tied).toEqual([stations[2], stations[1]]);
+  });
+
   it('只有非综合口径报价时，模型榜最低倍率为 null 而不是 Infinity', async () => {
     const stations = stationSlugs();
     const model = modelSlugs()[0];

@@ -95,11 +95,50 @@ describe('全量导入', () => {
     reviewSubmission(store, new Date('2026-11-06T02:00:00Z'), pending.id, { status: 'approved' });
 
     // 内容完全相同的第二次导入
-    await runImport(store, body);
+    const again = await runImport(store, body);
+    // 状态也要断言：一个「让导入直接 400」的实现同样能让 id 保持不变，
+    // 但那等于把功能关掉，不是修好 bug。
+    expect(again.status).toBe(200);
     const after = store.db.prepare("SELECT id FROM entities WHERE kind = 'post' AND json_extract(data,'$.source') = 'submission'").all();
     expect(after).toEqual([{ id: 'feishu-recDrift' }]);
     const detail = await (await buildApp(store, now).request('/api/posts/feishu-recDrift')).json() as Post;
     expect(detail.votes).toMatchObject({ up: 1, total: 1 });
+    // 收藏也要断言：只断言投票的话，「导入顺手清空收藏」这种实现照样能过。
+    expect(store.db.prepare("SELECT targetId FROM favorites WHERE userHandle = 'reader1'").all()).toEqual([{ targetId: 'feishu-recDrift' }]);
+  });
+
+  it('batchId 为空的单条飞书投稿，物化成 sub-<投稿id> 后导入不会翻成 feishu-<recordId>', async () => {
+    // batchId 为空只可能来自管理端单条投稿（同步与批次审核都会补 UUID）。
+    // 早先导入侧的「找最早已通过投稿」多加了 `batchId IS NOT NULL`，
+    // 于是对这条投稿查不到 → 退回 `feishu-<recordId>`；而物化侧按
+    // `sub-<投稿id>` 建。两条路径分叉，id 翻一次，读者的投票和收藏再成孤儿。
+    // 现在两侧都只认 channel、不认 batchId。
+    const store = newStore();
+    const now = new Date('2026-11-05T00:00:00Z');
+    const submissionId = enqueueSubmission(store, {
+      kind: 'post', channel: 'feishu', originKey: 'recNull', action: 'upsert',
+      payload: { recordId: 'recNull', title: '空批次', summary: '摘要', body: '正文', authorName: '甲', publishedAt: '2026-11-04T08:00:00.000Z', hostname: 'api.example.com' },
+      ip: '203.0.113.11', now,
+    }, { globalPendingBreaker: false }).submission.id;
+    reviewSubmission(store, now, submissionId, { status: 'approved' });
+    const ids = () => store.db.prepare("SELECT id FROM entities WHERE kind = 'post' AND json_extract(data,'$.source') = 'submission'").all();
+    expect(ids()).toEqual([{ id: `sub-${submissionId}` }]);
+
+    await runImport(store, { ...submission, posts: [{ recordId: 'recNull', stationSlug: 'sub-api-example-com', title: '空批次', summary: '摘要', body: '正文', authorName: '甲', publishedAt: '2026-11-04T08:00:00.000Z' }] });
+    expect(ids()).toEqual([{ id: `sub-${submissionId}` }]);
+
+    // 再来一条同样是「空批次」的同记录投稿。物化侧原先按 `batchId !== null` 分流，
+    // 空批次时直接跳过「找最早已通过投稿」，于是第二条算出自己的 `sub-<新id>`，
+    // 同一篇内容就有了两个实体（实测确实变成两条）。去掉门槛后两次都落到最早那条。
+    const later = enqueueSubmission(store, {
+      kind: 'post', channel: 'feishu', originKey: 'recNull', action: 'upsert',
+      payload: { recordId: 'recNull', title: '空批次', summary: '摘要', body: '正文', authorName: '甲', publishedAt: '2026-11-04T08:00:00.000Z', hostname: 'api.example.com' },
+      ip: '203.0.113.12', now: new Date('2026-11-06T00:00:00Z'),
+    }, { globalPendingBreaker: false }).submission.id;
+    reviewSubmission(store, new Date('2026-11-06T00:00:00Z'), later, { status: 'approved' });
+    expect(ids()).toEqual([{ id: `sub-${submissionId}` }]);
+    await runImport(store, { ...submission, posts: [{ recordId: 'recNull', stationSlug: 'sub-api-example-com', title: '空批次', summary: '摘要', body: '正文', authorName: '甲', publishedAt: '2026-11-04T08:00:00.000Z' }] });
+    expect(ids()).toEqual([{ id: `sub-${submissionId}` }]);
   });
 
   it('重复导入相同内容不产生重复', async () => {

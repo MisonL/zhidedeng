@@ -474,15 +474,26 @@ function stationHostFingerprint(store: Store): string {
  * 同一站点的重复提交仍然落在同一条记录上。
  * 派生规则来自 shared/slug.ts，飞书只传 hostname，由这里统一分配 slug。
  */
-function stationSlug(store: Store, url: string | null, originKey: string): string {
+function stationSlug(store: Store, url: string | null, originKey: string, grouped = false): string {
   const hostname = hostnameOf(url);
   const identity = hostname ?? originKey.trim().toLowerCase();
   // 先认领：只要已有站点的 hostname 相同，就沿用它的 slug——不管当初落在可读形式
   // 还是哈希后缀上。否则 base 被别的站占走又释放时，同一站点会在两种 slug 间横跳。
+  //
   // 已下架的行也要认：软删除保留了实体，就是为了恢复后还是同一个站点。
   // 只看在线的话，重新上架会被当成全新站点而分配带哈希的 slug，原来挂在
   // 旧 slug 上的文章与互动记录全部变成孤儿——数据没丢，但再也显示不出来。
-  const mine = hostname === null ? undefined : store.allWithRemoved('station').find(station => hostnameOf(station.url) === hostname);
+  //
+  // `grouped` 必须和 findStation 用同一套判据：飞书把 www 与裸域当同一个站点，
+  // 而 findStation 的索引只扫在线站点。站点被下架后走这条路，若只做精确比较，
+  // www.x.com 与 x.com 就会被认成两个站，另建一条 source 对、指标全 null 的
+  // 新实体，而旧实体还带着指标躺在「已下架」里。
+  const sameSite = (station: StationRecord) => {
+    const other = hostnameOf(station.url);
+    if (other === null || hostname === null) return false;
+    return grouped ? feishuHostnameKey(other) === feishuHostnameKey(hostname) : other === hostname;
+  };
+  const mine = hostname === null ? undefined : store.allWithRemoved('station').find(sameSite);
   if (mine) return mine.slug;
 
   // 分配 slug 时必须把已下架的行也算作「已占用」（用 getWithRemoved）。
@@ -614,7 +625,9 @@ function materialize(store: Store, submission: SubmissionRecord, reviewedAt: str
     const { offers, ...payload } = parseStationPayload(store, submission.payload);
     // 飞书批次沿用旧同步的 www 分组，认领原站点；新 slug 仍统一由 stationSlug 分配。
     const mine = findStation(store, submission, payload.url);
-    const slug = mine?.slug ?? stationSlug(store, payload.url, submission.originKey);
+    const grouped = submission.channel === 'feishu' && submission.batchId !== null
+      && feishuHostnameKey(submission.originKey) === feishuHostnameKey(hostnameOf(payload.url) ?? '');
+    const slug = mine?.slug ?? stationSlug(store, payload.url, submission.originKey, grouped);
     // 必须用 getWithRemoved：store.get 看不见已下架的行，站点下架后再同步一次
     // 会把它当成新站，四个指标字段（可用率/首字延迟/建站时间/状态）全写 null。
     // 这四项全站没有别的写入入口，写没了就补不回来——「下架后同步会自动恢复」
@@ -656,7 +669,13 @@ function materialize(store: Store, submission: SubmissionRecord, reviewedAt: str
       ? store.all('station').find(station => station.url !== null && new URL(station.url).hostname === hostname)?.slug ?? null
       : null;
     // 飞书每次同步都会生成新批次，评价按原记录更新，不能每同步一次就多发一篇文章。
-    const first = submission.channel === 'feishu' && submission.batchId !== null
+    //
+    // 这里**不再按 batchId 是否为空分流**。batchId 为空只可能来自管理端单条投稿
+    // （同步与批次审核都会补一个 UUID），此前把它排除在外，导致同一条投稿在
+    // 「单条通道物化成 `sub-<投稿id>`」与「导入通道算成 `feishu-<recordId>`」之间
+    // 来回翻转——id 一变，读者投票和收藏就又成了孤儿。判据必须和 catalog.ts
+    // 的 `postIds` 逐字一致：只认 channel，不认 batchId。
+    const first = submission.channel === 'feishu'
       ? store.db.prepare("SELECT id FROM submissions WHERE kind = 'post' AND channel = 'feishu' AND originKey = ? AND status = 'approved' ORDER BY rowid LIMIT 1").get(submission.originKey)
       : undefined;
     const legacyId = `feishu-${submission.originKey}`;
@@ -664,8 +683,7 @@ function materialize(store: Store, submission: SubmissionRecord, reviewedAt: str
     // 这个判断会把已下架的老文章当成不存在，改用 `sub-<投稿id>` 建出一篇新的。
     // 软删除只认 id，换个 id 就是复活——实测下架旧式导入的文章后同步一次，
     // 前台立刻又多出一篇内容相同的新文章。
-    const legacy = submission.channel === 'feishu' && submission.batchId !== null
-      && store.getWithRemoved('post', legacyId)?.source === 'submission';
+    const legacy = submission.channel === 'feishu' && store.getWithRemoved('post', legacyId)?.source === 'submission';
     const postId = legacy ? legacyId : `sub-${first?.id ?? submission.id}`;
     // 管理员下架过的文章不能被下一次同步复活。软删除标记的含义是「人已经决定这篇
     // 不该在线」，而这里每次同步都无条件写 status: 'approved'——实测：下架后重同步，
