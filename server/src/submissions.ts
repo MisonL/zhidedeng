@@ -635,6 +635,11 @@ function materialize(store: Store, submission: SubmissionRecord, reviewedAt: str
     // 会把它当成新站，四个指标字段（可用率/首字延迟/建站时间/状态）全写 null。
     // 这四项全站没有别的写入入口，写没了就补不回来——「下架后同步会自动恢复」
     // 听起来是好事，实际是拿指标换的。catalog.ts 已经踩过同一个坑并加了快照。
+    // 注意：演示站是**可以被同步改内容的**——既有用例
+    // 「slug 已存在时更新内容和全部报价，保留原 source=demo 与指标」就是这条契约：
+    // 内容（名称/描述/报价）跟着投稿走，只有 source 和四项指标沿用旧值。
+    // 种子演示站的 url 都是 null，正常同步认不到它们，所以现实中碰不到；
+    // 真发生了也是「改内容、不改身份」，不是数据丢失。
     const previous = store.getWithRemoved('station', slug);
     // 更新已有 slug 时保留最初来源，不能把飞书站点改标成 AI 采集。
     // 指标字段（可用率、首字延迟、成立时间、运行状态）投稿 payload 里根本没有，
