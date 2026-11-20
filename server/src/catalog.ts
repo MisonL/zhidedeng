@@ -120,9 +120,13 @@ function importCatalog(store: Store, input: CatalogImportRequest): CatalogImport
     const postIds = new Map<string, string>();
     for (const { recordId } of input.posts) {
       const legacyId = `feishu-${recordId}`;
-      const legacyExists = store.getWithRemoved('post', legacyId) !== undefined;
+      // 判据必须和 submissions.ts 的 materialize 逐字对齐，否则两条路径会给
+      // 同一个飞书记录算出不同的 id，同一篇内容就有了两个实体。
+      // materialize 那边：legacy 要求 source === 'submission' 且 batchId 非空；
+      // 否则用「最早那条已通过的飞书投稿」的 id（同样限定 batchId 非空）。
+      const legacyExists = store.getWithRemoved('post', legacyId)?.source === 'submission';
       const approved = store.db.prepare(
-        "SELECT id FROM submissions WHERE kind = 'post' AND channel = 'feishu' AND originKey = ? AND status = 'approved' ORDER BY rowid LIMIT 1",
+        "SELECT id FROM submissions WHERE kind = 'post' AND channel = 'feishu' AND batchId IS NOT NULL AND originKey = ? AND status = 'approved' ORDER BY rowid LIMIT 1",
       ).get(recordId) as { id: string } | undefined;
       postIds.set(recordId, approved && !legacyExists ? `sub-${approved.id}` : legacyId);
     }
