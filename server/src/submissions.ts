@@ -484,14 +484,18 @@ function stationHostIndex(store: Store): Pick<StationHostIndex, 'version' | 'byH
     // `["a", "b\u0001c"]` 会拼出同一串。正常 url 里不可能出现控制字符，
     // 但指纹错了就是「静默用错索引」，代价很高，加前缀几乎不要钱。
     const field = (value: unknown) => {
+      // null 与 '' 必须分开：两者 String() 后一样，但 `removedAt=''` 是历史脏数据
+      // 里「没下架」的另一种写法还是「已下架」要看 store 的判定，混在一处会让
+      // 指纹把一次下架吞掉，复用旧索引、把本该下架的重复实体又认领回来。
+      const mark = value == null ? 'N' : 'V';
       const text = String(value ?? '');
-      return `${text.length}\u0000${text}`;
+      return `${mark}${text.length}\u0000${text}`;
     };
     hash.update(field(row.id)).update(field(row.url)).update(field(row.removedAt));
   }
   const fingerprint = `${fingerprintRows.length}:${hash.digest('hex')}`;
   if (cached && cached.fingerprint === fingerprint) {
-    // 指纹相同意味着「id / url / 是否下架」逐条一致，四张表必然等价——整份沿用，
+    // 指纹相同意味着「id / url / 是否下架」逐条一致，六张表必然等价——整份沿用，
     // 只更新版本号。不要只替换一部分表：那会造成「在线表是旧的、含下架表是新的」
     // 这种看起来无害、实际靠不住的状态。
     cached.version = store.entityVersion;
@@ -560,10 +564,8 @@ function stationSlug(store: Store, url: string | null, originKey: string): strin
   // 只看在线的话，重新上架会被当成全新站点而分配带哈希的 slug，原来挂在
   // 旧 slug 上的文章与互动记录全部变成孤儿——数据没丢，但再也显示不出来。
   //
-  // `grouped` 必须和 findStation 用同一套判据：飞书把 www 与裸域当同一个站点，
-  // 而 findStation 的索引只扫在线站点。站点被下架后走这条路，若只做精确比较，
-  // www.x.com 与 x.com 就会被认成两个站，另建一条 source 对、指标全 null 的
-  // 新实体，而旧实体还带着指标躺在「已下架」里。
+  // 认领统一由 findStation 做（含已下架、精确优先、在线优先），这里只在
+  // 「没有任何已有站点能认领」时才被调用，负责分配一个新的唯一 slug。
   // 这里**不再**自己认领。认领（含已下架、精确优先、在线优先）统一由
   // `findStation` 做，调用方写的是 `mine?.slug ?? stationSlug(...)`；两边各写一遍
   // 只会在有人改了一边时静默分叉。走到这里就意味着「没有任何已有站点能认领」，

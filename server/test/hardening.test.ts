@@ -772,7 +772,6 @@ describe('审核群友提交', () => {
       "SELECT id FROM submissions WHERE kind = 'station' AND action = 'upsert' AND status = 'approved' ORDER BY reviewedAt DESC, rowid DESC LIMIT 1",
     ).get() as { id: string };
     expect(removeStation(store, online.id, latest.id, '2026-11-07T00:00:00Z')).toBe(online.id);
-    expect(store.getWithRemoved('station', online.id)?.slug).toBe(online.id);
 
     sync('cache-b2');   // 再同步：不能把刚下架那条复活
     const rows = server.db.prepare(
@@ -780,6 +779,12 @@ describe('审核群友提交', () => {
     ).all() as { id: string; removedAt: string | null }[];
     expect(rows.filter(row => row.removedAt === null)).toHaveLength(1);
     expect(rows.find(row => row.id === online.id)?.removedAt).toBe('2026-11-07T00:00:00Z');
+    // 上面两条断言还挡不住「认领整体失效、每次同步都新建一条站」：
+    // 新站叫 sub-cache-*，不在 agent-cache-% 的过滤里，前两条照样绿。
+    // 必须断言同步确实更新了仍在线那条，并且没有多建站。
+    const survivor = rows.find(row => row.id !== online.id)!;
+    expect(server.db.prepare("SELECT json_extract(data,'$.name') name FROM entities WHERE kind = 'station' AND id = ?").get(survivor.id)).toEqual({ name: '飞书投稿' });
+    expect(server.db.prepare("SELECT count(*) count FROM entities WHERE kind = 'station' AND id LIKE 'sub-cache-%'").get()).toEqual({ count: 0 });
   });
 
   it('站点原地换了地址（同一 slug）后，按新地址同步仍认回同一条，不新建', async () => {
@@ -811,6 +816,36 @@ describe('审核群友提交', () => {
     ).all() as { id: string; url: string }[];
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ id: 'agent-moved.example.com', url: 'https://moved-new.example.com/' });
+  });
+
+  it('在线 /a 与已下架 /b 并存时，按 /b 同步认回已下架那条，不改写 /a 的地址', async () => {
+    // 第 2 级「下架整条地址」原来零覆盖：去掉它，75 条用例全绿，但行为确实变坏——
+    // 会退到第 3 级按 hostname 认领在线的 /a，把它的 url 改写成 /b，而已下架的 /b
+    // 不复活。此后对 /b 调用恢复接口，又是两条在线站同 url。
+    const store = openStore(server.db);
+    const seed = (slug: string, url: string, removed = false) => {
+      store.put('station', slug, {
+        slug, name: slug, description: '描述', url, rechargeThreshold: null, paymentMethods: [],
+        status: null, uptime: null, firstTokenLatencyMs: null, foundedAt: null, source: 'agent',
+      });
+      if (removed) store.db.prepare("UPDATE entities SET removedAt = '2026-11-05T00:00:00Z' WHERE kind = 'station' AND id = ?").run(slug);
+      store.invalidate();
+    };
+    seed('agent-path2-a.example.com', 'https://pathy2.example.com/a');
+    seed('agent-path2-b.example.com', 'https://pathy2.example.com/b', true);
+    const read = (slug: string) => server.db.prepare(
+      "SELECT json_extract(data,'$.url') url, json_extract(data,'$.name') name, removedAt FROM entities WHERE kind = 'station' AND id = ?",
+    ).get(slug) as { url: string; name: string; removedAt: string | null };
+
+    const id = enqueueSubmission(store, {
+      kind: 'station', channel: 'feishu', originKey: 'pathy2.example.com', action: 'upsert',
+      payload: { slug: 'py2', name: '飞书投稿', description: '飞书描述', url: 'https://pathy2.example.com/b', rechargeThreshold: null, paymentMethods: [], offers: [] },
+      ip: '203.0.113.55', now: new Date('2026-11-06T00:00:00Z'),
+    }, { globalPendingBreaker: false }).submission.id;
+    reviewSubmission(store, new Date('2026-11-06T00:00:00Z'), id, { status: 'approved' });
+
+    expect(read('agent-path2-b.example.com')).toMatchObject({ url: 'https://pathy2.example.com/b', name: '飞书投稿', removedAt: null });
+    expect(read('agent-path2-a.example.com')).toMatchObject({ url: 'https://pathy2.example.com/a', name: 'agent-path2-a.example.com', removedAt: null });
   });
 
   it('站内作者自己的文章也能被管理员下架，不必走投稿队列', async () => {
