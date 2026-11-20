@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { httpUrl } from '../src/submission.ts';
 import { feishuHostnameKey, slugifyHost, stationSlugBase, stationSlugSuffix } from '../src/slug.ts';
 
 describe('feishuHostnameKey', () => {
@@ -40,5 +41,29 @@ describe('slug 派生', () => {
     // 所以这里验证的是两处归一对齐，而不是派生函数自己会去尾点。
     expect(stationSlugBase(feishuHostnameKey('example.com.'))).toBe(stationSlugBase(feishuHostnameKey('example.com')));
     expect(stationSlugSuffix(feishuHostnameKey('example.com.'))).toBe(stationSlugSuffix(feishuHostnameKey('example.com')));
+  });
+});
+
+describe('httpUrl 入库归一', () => {
+  // 归一必须发生在写库之前，否则库里会同时存在 `x.com` 与 `x.com.` 两种写法，
+  // 任何一处忘记去尾点的比较（服务端认领、同步脚本、审核台、将来新代码）都会把
+  // 同一个站算成两条。schema 出口一次性覆盖投稿、同步、导入、Agent 四条入口。
+  it.each([
+    ['https://example.com./', 'https://example.com/'],
+    ['https://Example.COM./', 'https://example.com/'],
+    ['https://example.com./pricing', 'https://example.com/pricing'],
+    ['https://www.example.com./', 'https://www.example.com/'],
+  ])('%s → %s', (input, expected) => {
+    expect(httpUrl.parse(input)).toBe(expected);
+  });
+
+  it('不带尾点的地址原样保留', () => {
+    expect(httpUrl.parse('https://example.com/pricing')).toBe('https://example.com/pricing');
+  });
+
+  it('仍然拒绝查询串、账号与内网地址', () => {
+    for (const bad of ['https://example.com/?x=1', 'https://u:p@example.com/', 'http://127.0.0.1/', 'ftp://example.com/']) {
+      expect(httpUrl.safeParse(bad).success).toBe(false);
+    }
   });
 });

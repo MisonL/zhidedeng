@@ -53,7 +53,26 @@ export const httpUrl = z.string().max(300).refine(value => {
   } catch {
     return false;
   }
-});
+}).transform(value => normalizeFqdnDots(value));
+
+/**
+ * 去掉 URL 里 hostname 末尾的 FQDN 点：`https://example.com./` → `https://example.com/`。
+ *
+ * 绝对域名末尾带点是合法写法，和同一个站不带点完全等价。归一必须发生在**写库之前**，
+ * 否则库里会同时存在两种写法，而任何一处忘记做「去尾点」的比较（服务端认领、同步脚本、
+ * 审核台、将来的新代码）都会把同一站算成两条。放在 schema 出口就一次性覆盖投稿、
+ * 同步、导入与 Agent 四条入口。
+ */
+function normalizeFqdnDots(value: string): string {
+  try {
+    const url = new URL(value);
+    if (!url.hostname.endsWith('.')) return value;
+    url.hostname = url.hostname.replace(/\.+$/, '');
+    return url.toString();
+  } catch {
+    return value;
+  }
+}
 
 /** 模型和厂商的 slug 共用同一套规则：小写字母、数字和连字符，最长 64。 */
 const slugPattern = /^[a-z0-9][a-z0-9-]{0,63}$/;
