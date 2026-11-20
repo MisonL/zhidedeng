@@ -379,6 +379,24 @@ export function hostnameOf(url: string | null): string | null {
   try { return new URL(url).hostname.toLowerCase(); } catch { return null; }
 }
 
+/**
+ * hostname + 路径 + 查询串，用作「整条地址」的认领键。
+ *
+ * 只按 hostname 认领在正常数据下够了，但历史上可能存在**同 hostname 不同路径**的
+ * 两条站（早先分组认领会改写 url、全量导入按给定 slug 直接写，都能造出来）。
+ * 那时按 hostname 取 rowid 第一条会把 url 改写成投稿里的路径，而另一条本来就是这个
+ * url——又变成两条在线站同 url。先比整条地址能把这种情况区分开。
+ * 末尾斜杠与大小写不参与比较，避免 `/a` 与 `/a/` 被当成两条。
+ */
+function stationUrlKey(url: string | null): string | null {
+  if (!url) return null;
+  try {
+    const parsed = new URL(url);
+    const path = parsed.pathname.replace(/\/+$/, '') || '/';
+    return `${parsed.hostname.toLowerCase()}${parsed.port ? `:${parsed.port}` : ''}${path}${parsed.search}`;
+  } catch { return null; }
+}
+
 /** 物化和版本查重沿用同一首次认领规则，只有飞书批次归并 www。 */
 /**
  * 按 hostname 找站点。
@@ -412,7 +430,10 @@ function findStation(store: Store, submission: Pick<SubmissionRecord, 'channel' 
   // 同一个 slug，否则挂在旧 slug 上的文章与互动全成孤儿。只看在线的实测后果是
   // 「在线 www.n + 已下架 n，投裸域 n」会先命中在线的 www.n 并把它的 url 改写成
   // n，此后恢复 n 就又是两条在线同 url。
-  return index.byHost.get(hostname)
+  const urlKey = stationUrlKey(url);
+  return (urlKey === null ? undefined : index.byUrl.get(urlKey))
+    ?? (urlKey === null ? undefined : index.allByUrl.get(urlKey))
+    ?? index.byHost.get(hostname)
     ?? index.allByHost.get(hostname)
     ?? (grouped
       ? index.byGroupedHost.get(feishuHostnameKey(hostname))
@@ -439,7 +460,7 @@ function findStation(store: Store, submission: Pick<SubmissionRecord, 'channel' 
  * 而「改了别的字段（名称、报价、描述）」不影响 hostname→slug 的映射，可以复用。
  * 代价是每次查找多一次 O(m) 的指纹计算，m 是站点数（当前几十个）。
  */
-function stationHostIndex(store: Store): Pick<StationHostIndex, 'version' | 'byHost' | 'byGroupedHost' | 'allByHost' | 'allByGroupedHost'> {
+function stationHostIndex(store: Store): Pick<StationHostIndex, 'version' | 'byHost' | 'byGroupedHost' | 'byUrl' | 'allByUrl' | 'allByHost' | 'allByGroupedHost'> {
   const cached = stationIndexCache.get(store);
   if (cached && cached.version === store.entityVersion) return cached;
   // 先用一条**不做 JSON.parse** 的轻查询算指纹：绝大多数审核是在更新已有站点，
@@ -456,7 +477,10 @@ function stationHostIndex(store: Store): Pick<StationHostIndex, 'version' | 'byH
     // `findStation(...)?.url` 这类调用方会读它（见 submissionOriginKey）。
     // 只哈希 hostname 的话，「hostname 不变、路径变了」时指纹不变，索引里留着旧 url。
     // 顺序必须是 rowid（见原注释：删除再插回会反转次序），这里已经是 rowid。
-    hash.update(row.id).update('\u0000').update(row.url ?? '').update('\u0001').update(row.removedAt ?? '').update('\u0002');
+    // 必须 String() 包装：历史脏数据里 url 可能是数字或布尔，`hash.update(123)`
+    // 会抛 ERR_INVALID_ARG_TYPE，把整条审核拖成「非预期错误、停在 pending」。
+    hash.update(String(row.id)).update('\u0000').update(String(row.url ?? ''))
+      .update('\u0001').update(String(row.removedAt ?? '')).update('\u0002');
   }
   const fingerprint = `${fingerprintRows.length}:${hash.digest('hex')}`;
   if (cached && cached.fingerprint === fingerprint) {
@@ -469,16 +493,20 @@ function stationHostIndex(store: Store): Pick<StationHostIndex, 'version' | 'byH
 
   const byHost = new Map<string, StationRecord>();
   const byGroupedHost = new Map<string, StationRecord>();
+  const byUrl = new Map<string, StationRecord>();
   const allByHost = new Map<string, StationRecord>();
   const allByGroupedHost = new Map<string, StationRecord>();
+  const allByUrl = new Map<string, StationRecord>();
   for (const station of store.allWithRemoved('station')) {
     const host = hostnameOf(station.url);
     if (host === null) continue;
     const grouped = feishuHostnameKey(host);
+    const urlKey = stationUrlKey(station.url);
     // 「先出现的赢」：与原先 `store.allWithRemoved(...).find(...)` 逐字一致
     // （顺序都是 rowid，所以组装索引时也必须按 rowid 遍历）。
     if (!allByHost.has(host)) allByHost.set(host, station);
     if (!allByGroupedHost.has(grouped)) allByGroupedHost.set(grouped, station);
+    if (urlKey !== null && !allByUrl.has(urlKey)) allByUrl.set(urlKey, station);
   }
   for (const station of store.all('station')) {
     const host = hostnameOf(station.url);
@@ -486,8 +514,10 @@ function stationHostIndex(store: Store): Pick<StationHostIndex, 'version' | 'byH
     if (!byHost.has(host)) byHost.set(host, station);
     const grouped = feishuHostnameKey(host);
     if (!byGroupedHost.has(grouped)) byGroupedHost.set(grouped, station);
+    const urlKey = stationUrlKey(station.url);
+    if (urlKey !== null && !byUrl.has(urlKey)) byUrl.set(urlKey, station);
   }
-  const next = { version: store.entityVersion, fingerprint, byHost, byGroupedHost, allByHost, allByGroupedHost };
+  const next = { version: store.entityVersion, fingerprint, byHost, byGroupedHost, byUrl, allByUrl, allByHost, allByGroupedHost };
   stationIndexCache.set(store, next);
   // 一次审核内复用：批内新建的站点不会让这条审核反复重建索引。
   return next;
@@ -497,7 +527,9 @@ function stationHostIndex(store: Store): Pick<StationHostIndex, 'version' | 'byH
 type StationHostIndex = {
   version: number; fingerprint: string;
   byHost: Map<string, StationRecord>; byGroupedHost: Map<string, StationRecord>;
-  /** 含已下架：认领 slug 时要连下架的站一起看（见 stationSlug）。 */
+  /** 整条地址（hostname+路径+查询串）→ 站点，用于区分同 hostname 不同路径的历史数据。 */
+  byUrl: Map<string, StationRecord>; allByUrl: Map<string, StationRecord>;
+  /** 含已下架：认领 slug 时要连下架的站一起看（见 findStation）。 */
   allByHost: Map<string, StationRecord>; allByGroupedHost: Map<string, StationRecord>;
 };
 
@@ -511,7 +543,7 @@ const stationIndexCache = new WeakMap<Store, StationHostIndex>();
  * 同一站点的重复提交仍然落在同一条记录上。
  * 派生规则来自 shared/slug.ts，飞书只传 hostname，由这里统一分配 slug。
  */
-function stationSlug(store: Store, url: string | null, originKey: string, grouped: boolean): string {
+function stationSlug(store: Store, url: string | null, originKey: string): string {
   const hostname = hostnameOf(url);
   const identity = hostname ?? originKey.trim().toLowerCase();
   // 先认领：只要已有站点的 hostname 相同，就沿用它的 slug——不管当初落在可读形式
@@ -666,7 +698,7 @@ function materialize(store: Store, submission: SubmissionRecord, reviewedAt: str
     const mine = findStation(store, submission, payload.url);
     const grouped = submission.channel === 'feishu'
       && feishuHostnameKey(submission.originKey) === feishuHostnameKey(hostnameOf(payload.url) ?? '');
-    const slug = mine?.slug ?? stationSlug(store, payload.url, submission.originKey, grouped);
+    const slug = mine?.slug ?? stationSlug(store, payload.url, submission.originKey);
     // 必须用 getWithRemoved：store.get 看不见已下架的行，站点下架后再同步一次
     // 会把它当成新站，四个指标字段（可用率/首字延迟/建站时间/状态）全写 null。
     // 这四项全站没有别的写入入口，写没了就补不回来——「下架后同步会自动恢复」
@@ -806,8 +838,11 @@ function supersedePending(store: Store, submission: SubmissionRecord, reviewedAt
         let payloadUrl: string;
         try {
           payloadUrl = parse(stationUrlSchema, JSON.parse(row.payload)).url;
-        } catch {
+        } catch (error) {
           // payload 是旧格式/坏数据：判断不了它会写到哪，宁可留着让人看见。
+          // 但它会一直 pending，而批次「还有 pending」就允许继续追加——等于这条坏行
+          // 把批次永远敞开。至少留个日志，别让它悄无声息地卡住。
+          console.warn(`投稿 ${row.id} 的 payload 解析失败，别名替代已跳过：${(error as Error).message}`);
           continue;
         }
         const aliasTarget = findStation(store, { channel: 'feishu', originKey: alias }, payloadUrl);

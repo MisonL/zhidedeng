@@ -683,6 +683,136 @@ describe('审核群友提交', () => {
     expect(status(alias)).toBe('superseded');
   });
 
+  it('同 hostname 不同路径的两条站在线时，同步按整条地址认领，不把 url 改写成另一条', async () => {
+    // 只按 hostname 认领时，取 rowid 第一条会把它的 url 改写成投稿里的路径，
+    // 而另一条本来就是这个 url——又变成两条在线站同 url。
+    const seed = (slug: string, url: string, removed = false) => {
+      server.db.prepare("INSERT INTO entities (kind, id, data) VALUES ('station', ?, ?)")
+        .run(slug, JSON.stringify({ slug, name: slug, description: '描述', url, rechargeThreshold: null, paymentMethods: [], offers: [], status: null, uptime: null, firstTokenLatencyMs: null, foundedAt: null, source: 'agent' }));
+      if (removed) server.db.prepare("UPDATE entities SET removedAt = '2026-11-05T00:00:00Z' WHERE kind = 'station' AND id = ?").run(slug);
+    };
+    seed('agent-path-a.example.com', 'https://pathx.example.com/a');
+    seed('agent-path-b.example.com', 'https://pathx.example.com/b');
+    const read = () => server.db.prepare(
+      "SELECT id, json_extract(data,'$.url') url, json_extract(data,'$.name') name, removedAt FROM entities WHERE kind = 'station' AND id IN ('agent-path-a.example.com','agent-path-b.example.com') ORDER BY rowid",
+    ).all() as { id: string; url: string; name: string; removedAt: string | null }[];
+
+    const send = (payloadUrl: string) => {
+      const id = enqueueSubmission(openStore(server.db), {
+        kind: 'station', channel: 'feishu', originKey: 'pathx.example.com', action: 'upsert',
+        payload: { slug: 'px', name: '飞书投稿', description: '飞书描述', url: payloadUrl, rechargeThreshold: null, paymentMethods: [], offers: [] },
+        ip: '203.0.113.51', now: new Date('2026-11-06T00:00:00Z'),
+      }, { globalPendingBreaker: false }).submission.id;
+      reviewSubmission(openStore(server.db), new Date('2026-11-06T00:00:00Z'), id, { status: 'approved' });
+    };
+    send('https://pathx.example.com/b');
+
+    const rows = read();
+    // 两条 url 仍然各自不同，没有变成同一个
+    expect(rows.map(row => row.url).sort()).toEqual(['https://pathx.example.com/a', 'https://pathx.example.com/b']);
+    // 命中的是整条地址相同的那条
+    expect(rows.find(row => row.id === 'agent-path-b.example.com')).toMatchObject({ url: 'https://pathx.example.com/b', name: '飞书投稿' });
+    expect(rows.find(row => row.id === 'agent-path-a.example.com')).toMatchObject({ url: 'https://pathx.example.com/a', name: 'agent-path-a.example.com' });
+  });
+
+  it('同组里在线的是 www 写法、下架的是另一条同 hostname 重复实体时，认领在线的', async () => {
+    // 第 3/4 级（在线分组 vs 下架分组）只有「同 hostname 的重复实体」才区分得开：
+    // 已下架那条 rowid 更小时，按 rowid 取第一条会复活它，而在线那条才是现在给人看的。
+    const seed = (slug: string, url: string, removed: boolean) => {
+      server.db.prepare("INSERT INTO entities (kind, id, data) VALUES ('station', ?, ?)")
+        .run(slug, JSON.stringify({ slug, name: slug, description: '描述', url, rechargeThreshold: null, paymentMethods: [], offers: [], status: null, uptime: null, firstTokenLatencyMs: null, foundedAt: null, source: 'agent' }));
+      if (removed) server.db.prepare("UPDATE entities SET removedAt = '2026-11-05T00:00:00Z' WHERE kind = 'station' AND id = ?").run(slug);
+    };
+    // 两条同 hostname（只能在脏数据里出现），已下架的 rowid 更小
+    seed('agent-first-removed.example.com', 'https://www.dupg.example.com/', true);
+    seed('agent-second-online.example.com', 'https://www.dupg.example.com/', false);
+    const read = (slug: string) => server.db.prepare(
+      "SELECT json_extract(data,'$.name') name, removedAt FROM entities WHERE kind = 'station' AND id = ?",
+    ).get(slug) as { name: string; removedAt: string | null };
+
+    const id = enqueueSubmission(openStore(server.db), {
+      kind: 'station', channel: 'feishu', originKey: 'dupg.example.com', action: 'upsert',
+      payload: { slug: 'dg', name: '飞书投稿', description: '飞书描述', url: 'https://dupg.example.com/', rechargeThreshold: null, paymentMethods: [], offers: [] },
+      ip: '203.0.113.52', now: new Date('2026-11-06T00:00:00Z'),
+    }, { globalPendingBreaker: false }).submission.id;
+    reviewSubmission(openStore(server.db), new Date('2026-11-06T00:00:00Z'), id, { status: 'approved' });
+
+    expect(read('agent-second-online.example.com')).toMatchObject({ name: '飞书投稿', removedAt: null });
+    expect(read('agent-first-removed.example.com')).toMatchObject({ name: 'agent-first-removed.example.com', removedAt: '2026-11-05T00:00:00Z' });
+  });
+
+  it('同一个 Store 里先建过索引、再下架站点，下次同步不会把下架那条复活', async () => {
+    // 站点认领走「按 Store 版本号 + 内容指纹」缓存的索引。下架一个站**不改它的
+    // id 和 url**，所以指纹里必须带 removedAt，否则指纹不变 → 整份沿用旧的在线表
+    // → 已下架那条仍在 byHost 里 → 下一次同步把它复活，同一站出现两条在线同 url。
+    //
+    // 这条用例必须复用**同一个 Store**：其它用例都用 `openStore(server.db)` 造新
+    // Store，缓存是冷的，根本走不到这条路径（把 removedAt 从指纹里删掉也全绿）。
+    const store = openStore(server.db);
+    const seed = (slug: string) => store.put('station', slug, {
+      slug, name: slug, description: '描述', url: 'https://cache.example.com/',
+      rechargeThreshold: null, paymentMethods: [], offers: [], status: null,
+      uptime: null, firstTokenLatencyMs: null, foundedAt: null, source: 'agent',
+    });
+    seed('agent-cache-a.example.com');
+    seed('agent-cache-b.example.com');
+    const sync = (batchId: string) => {
+      const id = enqueueSubmission(store, {
+        kind: 'station', channel: 'feishu', originKey: 'cache.example.com', batchId, action: 'upsert',
+        payload: { slug: 'cache', name: '飞书投稿', description: '飞书描述', url: 'https://cache.example.com/', rechargeThreshold: null, paymentMethods: [], offers: [] },
+        ip: '203.0.113.53', now: new Date('2026-11-06T00:00:00Z'),
+      }, { globalPendingBreaker: false }).submission.id;
+      reviewSubmission(store, new Date('2026-11-06T00:00:00Z'), id, { status: 'approved' });
+    };
+    sync('cache-b1');   // 首次同步：建缓存，并把 agent-cache-b 更新成投稿内容
+    const online = server.db.prepare(
+      "SELECT id FROM entities WHERE kind = 'station' AND id LIKE 'agent-cache-%' AND removedAt IS NULL ORDER BY rowid LIMIT 1",
+    ).get() as { id: string };
+    const latest = server.db.prepare(
+      "SELECT id FROM submissions WHERE kind = 'station' AND action = 'upsert' AND status = 'approved' ORDER BY reviewedAt DESC, rowid DESC LIMIT 1",
+    ).get() as { id: string };
+    expect(removeStation(store, online.id, latest.id, '2026-11-07T00:00:00Z')).toBe(online.id);
+    expect(store.getWithRemoved('station', online.id)?.slug).toBe(online.id);
+
+    sync('cache-b2');   // 再同步：不能把刚下架那条复活
+    const rows = server.db.prepare(
+      "SELECT id, removedAt FROM entities WHERE kind = 'station' AND id LIKE 'agent-cache-%' ORDER BY rowid",
+    ).all() as { id: string; removedAt: string | null }[];
+    expect(rows.filter(row => row.removedAt === null)).toHaveLength(1);
+    expect(rows.find(row => row.id === online.id)?.removedAt).toBe('2026-11-07T00:00:00Z');
+  });
+
+  it('站点原地换了地址（同一 slug）后，按新地址同步仍认回同一条，不新建', async () => {
+    // 指纹只按 id 算会漏掉「id 和 removedAt 都没变、url 变了」这种更新。
+    // 运营改站点地址（管理端或导入按 slug 直接写）正是这样：slug 不变，url 换掉。
+    // 指纹不含 url 时索引不会重建，新地址在缓存里查不到，同步就会再建一条站。
+    const store = openStore(server.db);
+    const record = (url: string) => ({
+      slug: 'agent-moved.example.com', name: '迁移站', description: '描述', url,
+      rechargeThreshold: null, paymentMethods: [], offers: [], status: null,
+      uptime: null, firstTokenLatencyMs: null, foundedAt: null, source: 'agent',
+    });
+    store.put('station', 'agent-moved.example.com', record('https://moved-old.example.com/'));
+    const send = (url: string, batchId: string) => {
+      const id = enqueueSubmission(store, {
+        kind: 'station', channel: 'feishu', originKey: new URL(url).hostname, batchId, action: 'upsert',
+        payload: { slug: 'mv', name: '迁移站', description: '描述', url, rechargeThreshold: null, paymentMethods: [], offers: [] },
+        ip: '203.0.113.54', now: new Date('2026-11-06T00:00:00Z'),
+      }, { globalPendingBreaker: false }).submission.id;
+      reviewSubmission(store, new Date('2026-11-06T00:00:00Z'), id, { status: 'approved' });
+    };
+    send('https://moved-old.example.com/', 'mv-b1');   // 建索引
+    // 原地换地址：slug 与 id 不变
+    store.put('station', 'agent-moved.example.com', record('https://moved-new.example.com/'));
+
+    send('https://moved-new.example.com/', 'mv-b2');   // 按新地址同步
+    const rows = server.db.prepare(
+      "SELECT id, json_extract(data,'$.url') url FROM entities WHERE kind = 'station' AND json_extract(data,'$.url') LIKE 'https://moved-%' ORDER BY rowid",
+    ).all() as { id: string; url: string }[];
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ id: 'agent-moved.example.com', url: 'https://moved-new.example.com/' });
+  });
+
   it('站内作者自己的文章也能被管理员下架，不必走投稿队列', async () => {
     // source='user' 的文章原本只能改状态：前台确实看不见了，但管理端既没有
     // 恢复入口，也查不到下架时间。统一走软删除后两者都有了。
