@@ -49,6 +49,10 @@ export const httpUrl = z.string().max(300).refine(value => {
     const url = new URL(value);
     if (url.protocol !== 'http:' && url.protocol !== 'https:') return false;
     if (url.username || url.password) return false;
+    // 全是点的 host（`https://./`、`https://../`）能被 URL 解析器接受，但把尾点删掉
+    // 就是空 host，归一后得到 `https:///` 这种非法串——下游 `new URL(...)` 会抛
+    // TypeError，入队变成 500、历史待审则永远审不掉。这类输入直接拒绝。
+    if (url.hostname.replace(/\.+$/, '').length === 0) return false;
     return !isPrivateHostname(url.hostname);
   } catch {
     return false;
@@ -64,11 +68,11 @@ export const httpUrl = z.string().max(300).refine(value => {
  * 同步、导入与 Agent 四条入口。
  */
 function normalizeFqdnDots(value: string): string {
-  try {
-    if (!new URL(value).hostname.endsWith('.')) return value;
-  } catch {
-    return value;
-  }
+  // 不能用 `new URL(value).hostname` 判断要不要归一：URL 解析器会把 IPv4 尾点自己
+  // 吃掉（`https://1.2.3.4./` 的 hostname 已是 `1.2.3.4`），但**字符串**里那个点还在，
+  // 之后写库、比较就对不上了。直接看原始 authority。
+  if (!value.includes('.')) return value;
+  try { void new URL(value); } catch { return value; }
   // 只做**字符级**的定点删除，绝不 `url.toString()` 重写整条地址。
   // 重写会把非 ASCII 路径百分号编码（一个汉字 → 9 个字符），一条输入 201 字符、
   // 带尾点且路径含中文的地址会被展开成 680 字符并写进库；此后所有对**库内 url**
@@ -76,7 +80,9 @@ function normalizeFqdnDots(value: string): string {
   // 一条站就能把整批审核、整条同步链路打断。
   const schemeEnd = value.indexOf('://') + 3;
   const rest = value.slice(schemeEnd);
-  const pathStart = rest.search(/[/?#]/);
+  // `\` 在 http(s) URL 里等同 `/`（解析器会这样处理），字符串扫描必须一并当作终止符，
+  // 否则 `https://a.com.\\p` 会让 authority 一直读到结尾，尾点删不掉。
+  const pathStart = rest.search(/[/?#\\]/);
   const authorityEnd = pathStart === -1 ? value.length : schemeEnd + pathStart;
   const authority = value.slice(schemeEnd, authorityEnd);
   // refine 已拒绝 userinfo 与 ?#，这里只剩 host[:port]；IPv6 字面量带尾点会被 new URL 直接拒。
@@ -86,7 +92,11 @@ function normalizeFqdnDots(value: string): string {
   const port = hasPort ? authority.slice(colon) : '';
   const stripped = host.replace(/\.+$/, '');
   if (stripped === host) return value;
-  return `${value.slice(0, schemeEnd)}${stripped}${port}${value.slice(authorityEnd)}`;
+  const result = `${value.slice(0, schemeEnd)}${stripped}${port}${value.slice(authorityEnd)}`;
+  // 删点绝不能把一条合法地址变成非法地址。理论上 refine 已经挡住全点 host，
+  // 但归一放在 schema 出口就必须自己保证「输出仍能被 URL 解析」。
+  try { void new URL(result); } catch { return value; }
+  return result;
 }
 
 /** 模型和厂商的 slug 共用同一套规则：小写字母、数字和连字符，最长 64。 */

@@ -72,6 +72,28 @@ describe('httpUrl 入库归一', () => {
     expect(httpUrl.safeParse(parsed).success).toBe(true);
   });
 
+  it('全是点的 host 一律拒绝（归一后会变成非法 URL）', async () => {
+    // `https://./` 能被 URL 解析器接受，但删掉尾点就是空 host，归一产出 `https:///`；
+    // 下游 `new URL(...)` 抛 TypeError —— 入队变 500，历史待审则永远审不掉。
+    for (const bad of ['https://./', 'https://../', 'https://.', 'https://....:80/']) {
+      expect(httpUrl.safeParse(bad).success).toBe(false);
+    }
+  });
+
+  it('归一后的结果必须仍是合法 URL；反斜杠与已编码的点也算 authority 边界', async () => {
+    for (const input of ['https://a.com.\\p', 'https://a%2Ecom./', 'https://1.2.3.4./']) {
+      const parsed = httpUrl.safeParse(input);
+      expect(parsed.success).toBe(true);
+      if (!parsed.success) return;
+      expect(parsed.data.length).toBeLessThanOrEqual(input.length);
+      expect(() => new URL(parsed.data)).not.toThrow();
+      // 真的把尾点删掉了，不只是「没变坏」——用 hostname 判断，反斜杠写法也会被解析器当路径分隔符
+      expect(new URL(parsed.data).hostname.endsWith('.')).toBe(false);
+      // 归一后的值再走一次 schema 仍然合法（幂等）
+      expect(httpUrl.safeParse(parsed.data).success).toBe(true);
+    }
+  });
+
   it('不带尾点的地址原样保留', () => {
     expect(httpUrl.parse('https://example.com/pricing')).toBe('https://example.com/pricing');
   });
