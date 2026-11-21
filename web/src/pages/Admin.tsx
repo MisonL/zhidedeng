@@ -79,6 +79,7 @@ export default function Admin() {
   // 驳回理由会写进 submissions.reason，作者在 /me 能看到；不填就只显示「已驳回」。
   const [rejecting, setRejecting] = useState<string>();
   const [reasons, setReasons] = useState<Record<string, string>>({});
+  const { stationBySlug } = useCatalog();
 
   async function load(active: string, signal?: AbortSignal) {
     // 不在这里清错误：调用方可能刚设好一条操作结果，清掉就等于把它吞了。
@@ -234,7 +235,6 @@ export default function Admin() {
   }
 
   const pendingSubmissions = submissions ?? [];
-  const { stationBySlug } = useCatalog();
   // 站点类投稿要拿线上当前状态做对比；已下架的站点不在 catalog 里，按「新建」提示。
   /**
    * 站点投稿 payload 里**没有 slug**（只有 name/description/url/报价等），

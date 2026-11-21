@@ -230,15 +230,19 @@ pnpm sync:feishu --allow-skipped     # 显式跳过坏记录，本次只提交 u
 ```sh
 sudo cp deploy/zhidedeng-sync.service deploy/zhidedeng-sync.timer /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable --now zhidedeng-sync.timer   # 每 30 分钟一次，随机延迟 2 分钟
+sudo systemctl enable --now zhidedeng-sync.timer #每小时05分和35分各一次
 journalctl -u zhidedeng-sync.service -n 100        # 看最近一次跑了什么
 ```
 
-`Type=oneshot` + timer：跑完就退出，不占用常驻内存，也不会出现两次同步叠在一起。默认只提交待审批次，不会自作主张上线；要自动通过请用 `--auto-approve`，并且只对 upsert 生效，下架永远留在审核台。
+`Type=oneshot` + timer：跑完就退出，不占用常驻内存，也不会出现两次同步叠在一起。默认只提交待审批次，不会自作主张上线。要自动通过，用管理接口 `PUT /api/admin/settings`把 `autoApprove`打开——**没有命令行开关**（早期文档里写的 `--auto-approve`并不存在，脚本会静默忽略未知参数）。自动通过只对 upsert生效，下架永远留在审核台。
+
+单元里的 `ExecStart`跑的是发布目录中的 `sync-feishu.mjs`——它由 `pnpm build`一起打进 `release/`，已经 bundle了 `@zhidedeng/shared`。所以定时同步**不需要服务器上有仓库、也不需要 node_modules**，只要 Node22.18+和 lark-cli，和运行 `server.mjs`的前提完全一致。
 
 单元文件依赖 `/etc/zhidedeng/zhidedeng.env` 里的 `FEISHU_BASE_TOKEN`、`FEISHU_TABLE_ID`、`LARKSUITE_CLI_CONFIG_DIR`、`SYNC_TOKEN`、`SITE_URL`，以及服务器上的 lark-cli。缺任何一个，timer 会照常触发但脚本会打印原因后中止——不会写坏数据。
 
 **开了定时器之后，下架要在表格里做，不要只点审核台。**站点身份以飞书表格为准：表格里还留着那条记录，下一轮同步（最多30分钟）就会按正常投稿把它重新上架——这是「群友填错、重新提交就该恢复」的既有设计，不是 bug。要真正下线，先在表格里删掉该行，同步会生成下架请求，人工批准后站点才彻底消失（之后表格里没有它，也就不会再被复活）。同理 `/api/admin/import`会**跳过**已下架的站点并提示「需要人工恢复」。两条入口的取舍是刻意的：导入是管理员批量灌数据，不该顺带撤销人工下架；同步的权威来源是表格，表格里还在就等于还在架。
+
+**待审队列会随运行轮次增长，这是既有契约不是 bug。**人工审核态下，每个新批次都会为同样的内容各插一条待审（`submissions-batch.test.ts`的「跨批次仍有待审记录时产生新行，避免一键审核漏掉」锁的就是这个：复用旧批次的行会让新批次的「全部通过」漏掉它）。一旦管理员通过其中任意一条，同站点的其余待审会被 `superseded`收掉，队列随之清空。所以对接了定时器的部署有两条路：要么接受「每次审核时按最新批次一键通过」；要么用`PUT /api/admin/settings`打开 `autoApprove`，让受信渠道的 upsert直接生效（下架仍留在审核台）。如果你长时间不看审核台，队列会一直涨到人工处理为止。
 
 同步和 `--dry-run` 共用数据安全检查：任何记录无法解析时以退出码 2 中止，不发 POST；成功解析的站点为零且线上仍有站点时也中止，避免空表清空线上。显式传 `--allow-skipped` 才跳过坏记录继续，且无论有无坏记录都完全不生成下架请求，并打印 `本次不同步下架` 警告；空表保护仍然生效。
 

@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { homedir, tmpdir } from 'node:os';
@@ -486,7 +487,9 @@ process.stdout.write(fs.readFileSync(${JSON.stringify(dir)} + '/' + fixture + '.
     expect(code).toBe(1);
     expect(imports.map(request => request.body.items.length)).toEqual([500, 100]);
     expect(output).toContain('[失败] station station-0.example.com：INVALID_INPUT 未知模型：missing-model');
-    expect(output).toContain('第 2 块入队失败：HTTP 503');
+    //错误里必须带目标地址：无人值守时只看到 fetch failed，分不清是 SITE_URL填错还是服务没起来。
+    expect(output).toContain('块入队失败（http://127.0.0.1:');
+    expect(output).toContain('）：HTTP');
     expect(output).toContain(imports[0].body.batchId);
   });
 
@@ -770,4 +773,25 @@ describe('同名站点的归属', () => {
     expect(skipped.some(message => message.includes('对应多个域名'))).toBe(false);
     expect(JSON.stringify(payload)).not.toContain('无法确定归属');
   });
+});
+
+describe('部署单元与构建产物一致', () => {
+ //P1事故：timer的 ExecStart指向 scripts/sync-feishu.ts，而 deploy.sh只 rsync
+ //release/，服务器上根本没有那个文件——每半小时 MODULE_NOT_FOUND，同步等于没接线。
+ // 仓库里也没有任何断言把「单元要跑什么」和「build产出什么」对上。
+ //
+ // 断言必须比对 **输出文件名**：只判断 build命令里是否出现「scripts/sync-feishu.ts」
+ // 会被 esbuild的输入路径 `../scripts/sync-feishu.ts`蒙混过关，单元写错也照样绿。
+ it('systemd单元要跑的脚本，必须正是 pnpm build的 --outfile产物', () => {
+ const root = fileURLToPath(new URL('../../', import.meta.url));
+ const unit = readFileSync(join(root, 'deploy/zhidedeng-sync.service'), 'utf8');
+ const exec = unit.split('\n').find(line => line.startsWith('ExecStart='));
+ expect(exec).toBeDefined();
+ const script = exec!.trim().split(/\s+/).at(-1)!;
+ const pkg = readFileSync(join(root, 'package.json'), 'utf8');
+ const build = JSON.parse(pkg).scripts.build as string;
+ const outfile = /--outfile=(\S+)/.exec(build)?.[1];
+ expect(outfile).toBeDefined();
+ expect(outfile!.split('/').at(-1)).toBe(script);
+ });
 });

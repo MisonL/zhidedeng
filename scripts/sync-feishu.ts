@@ -566,7 +566,7 @@ async function main(dryRun: boolean, allowSkipped: boolean, allowRemoval: boolea
       body: JSON.stringify({ ...payload, batchId, items }),
       signal: AbortSignal.timeout(30_000),
     });
-    if (!response.ok) throw new Error(`批次 ${batchId} 第 ${offset / BATCH_SIZE + 1} 块入队失败：HTTP ${response.status} ${await response.text()}`);
+    if (!response.ok) throw new Error(`批次 ${batchId} 第 ${offset / BATCH_SIZE + 1} 块入队失败（${config.site}）：HTTP ${response.status} ${await response.text()}`);
     const chunk = batchResult(await response.json(), items);
     if (chunk.batchId !== batchId) throw new Error(`批次 ${batchId} 入队响应的 batchId 不一致，请核对服务端批次结果`);
     // 立即报告本块错误，后续 HTTP 失败不能遮住已经返回的逐条失败详情。
