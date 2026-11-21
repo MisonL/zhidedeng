@@ -1237,3 +1237,32 @@ describe('仓库卫生', () => {
     // 放长超时不会掩盖问题——真的出现字面量，断言照样会红。
   }, 60_000);
 });
+
+describe('下架版本必须落在实体上', () => {
+ it('同 host不同路径：用兄弟站的版本下架另一条，返回 STALE_REMOVAL', async () => {
+   // state按 hostname组给版本（否则同组兄弟站永远隐形、永远删不掉），
+   //但 removeStation必须逐实体核对。原来按分组键找「当前版本」，
+   //于是 A（历史导入、从没有 approved upsert）可以用 B的 submissionId通过校验，
+   //被当成「版本对得上」直接软删除——文档写的 STALE_REMOVAL形同虚设。
+   const server = createApp({ dbPath: ':memory:' });
+   const store = openStore(server.db);
+   const seed = (slug: string, url: string) => store.put('station', slug, {
+    slug, name: slug, description: '历史导入', url, rechargeThreshold: null,
+    paymentMethods: [], status: null, uptime: null, firstTokenLatencyMs: null,
+    foundedAt: null, source: 'submission',
+   });
+   seed('sub-v9-a', 'https://v9.example.com/a');
+   seed('sub-v9-b', 'https://v9.example.com/b');
+   const id = enqueueSubmission(store, {
+    kind: 'station', channel: 'feishu', originKey: 'v9.example.com', action: 'upsert',
+    payload: { slug: 'v9', name: 'B站', description: '描述', url: 'https://v9.example.com/b', rechargeThreshold: null, paymentMethods: [], offers: [] },
+    ip: '203.0.113.71', now: new Date('2026-11-06T00:00:00Z'),
+   }, { globalPendingBreaker: false }).submission.id;
+   reviewSubmission(store, new Date('2026-11-06T00:00:00Z'), id, { status: 'approved' });
+   //A用 B的版本：必须被拒，而且 A仍然在线
+   expect(() => removeStation(store, 'sub-v9-a', id, '2026-11-07T00:00:00Z')).toThrowError(/STALE_REMOVAL|没有可核对的投稿版本记录/);
+   expect(store.get('station', 'sub-v9-a')).toMatchObject({ url: 'https://v9.example.com/a' });
+   //B用 B自己的版本：正常下架
+   expect(removeStation(store, 'sub-v9-b', id, '2026-11-07T00:00:00Z')).toBe('sub-v9-b');
+ });
+});

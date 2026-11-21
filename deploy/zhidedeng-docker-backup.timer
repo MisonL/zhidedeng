@@ -1,0 +1,16 @@
+#每天凌晨4点跑一次容器备份，随机延迟最多10分钟。
+#
+#为什么错开整点不重要：同步 timer是 :05/:35，两者窗口可能重叠（备份04:00–04:10，
+#同步04:05–04:07），但备份是只读快照、库只有几百KB，重叠没有实际影响。
+#真正需要注意的是备份 timer和直跑版 zhidedeng-backup.timer不要同时启用——
+#两份备份会互相抢保留策略的名额。
+[Unit]
+Description=zhidedeng container SQLite backup (daily 04:00)
+
+[Timer]
+OnCalendar=*-*-* 04:00:00
+RandomizedDelaySec=600
+Persistent=true
+
+[Install]
+WantedBy=timers.target

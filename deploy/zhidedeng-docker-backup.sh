@@ -25,7 +25,11 @@ const { DatabaseSync } = require('node:sqlite');
 const db = new DatabaseSync('/data/zhidedeng.db', { readOnly: true });
 db.exec(\"VACUUM INTO '${tmp_in_container}'\");
 db.close();
-" 2>/dev/null
+"
+if [ $? -ne 0 ]; then
+ echo "备份失败：容器内 VACUUM INTO没成功（容器 ${container}存在吗？镜像里有 node:sqlite吗？）" >&2
+ exit 1
+fi
 
 docker cp "$container:$tmp_in_container" "$target.partial"
 # docker cp 会沿用容器内文件的权限（node 以默认 umask 建的，644），
@@ -42,7 +46,7 @@ if [ "$integrity" != "ok" ] || [ "$count" -lt 1 ]; then
   exit 1
 fi
 mv "$target.partial" "$target"
-echo "已备份 $target（integrity=ok, entities=$count）"
+echo "已备份 ${target}（integrity=ok, entities=${count}）"
 
 # 只留最近 keep 份。备份里有密码哈希和会话摘要，umask 已限成只有属主可读。
 ls -1t "$BACKUP_DIR"/app-*.db 2>/dev/null | tail -n "+$((keep + 1))" | xargs -r rm -f

@@ -504,6 +504,18 @@ describe('内容完整性与 URL 边界', () => {
     await error(await submitStation(credential(), { ...station(), [field]: 'forged' }), 400, 'INVALID_INPUT', field);
   });
 
+  it('非 ASCII路径不会被序列化放大：95字符的中文路径必须照常接受', async () => {
+  //以前 agentUrl返回 new URL(input).toString()：汉字路径会被百分号编码，
+  //一个汉字变9个字符，95字符的地址膨胀到744，撞上 httpUrl的 max(300)，
+  //报「url: Too big」——同一条地址在 web/飞书上能过、在 Agent通道被拒。
+  const path = '/中文路径'.repeat(6);
+  const url = `https://例子.com${path}`;
+  expect(url.length).toBeLessThan(300);
+  const result = await submitted(await submitStation(credential(), station(0, { url })));
+  //路径原样保留（不做百分号编码），主机转成 punycode
+  expect((result.submission.payload as CreateAgentStationRequest).url).toBe(`https://xn--fsqu00a.com${path}`);
+  });
+
   it('URL 去掉 query、fragment、用户名密码，保留协议、规范化主机、端口和路径', async () => {
     const result = await submitted(await submitStation(credential(), station(0, { url: 'https://user:pass@EXAMPLE.COM.:8443/v1?token=sensitive#private' })));
     expect(result.submission.originKey).toBe('example.com');

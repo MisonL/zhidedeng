@@ -101,8 +101,11 @@ function submissionOriginKey(store: Store, input: {
   if (input.action === 'remove') {
     const { slug } = parse(removalSchema, input.payload);
     const station = store.get('station', slug);
+    //演示站 url是 null（种子），直接 parse(httpUrl, station.url)会抛一句管理员看不懂的
+    //「expected string, received null」。这里保留入队（审核期才拒绝，契约不变），
+    //但没有 url时退回客户端给的 originKey，让 originKey照常算出来。
     // 不存在的目标只用规范化的客户端 hostname 检查冲突，审核时按幂等下架处理。
-    const url = station ? parse(httpUrl, station.url) : parse(httpUrl, `https://${input.originKey}`);
+    const url = station?.url ? parse(httpUrl, station.url) : parse(httpUrl, `https://${input.originKey}`);
     return normalizeStationOriginKey(new URL(url).hostname);
   }
   return normalizeStationOriginKey(new URL(parse(stationUrlSchema, input.payload).url).hostname);
@@ -303,7 +306,7 @@ export function enqueueBatch(store: Store, input: AdminBatchSubmitRequest & { ip
     const slug = removal?.slug;
     const target = slug ? store.get('station', slug) : undefined;
     // 重试时部分实体可能已经下架；只沿用属于该 hostname 的真实 approved 版本。
-    const version = removal && !target
+    const version = removal
       ? store.db.prepare("SELECT originKey FROM submissions WHERE id = ? AND kind = 'station' AND action = 'upsert' AND status = 'approved'").get(removal.submissionId)
       : undefined;
     const versionKey = version ? (batch.channel === 'feishu' ? feishuHostnameKey(version.originKey as string) : version.originKey) : undefined;
@@ -615,6 +618,26 @@ function validatePayload(store: Store, kind: SubmissionKind, payload: unknown, a
 }
 
 /** 下架只允许群友来源，报价和实体共用调用方的审核事务，不另开事务。 */
+type ApprovedUpsert = { id: string; originKey: string; url: string | null };
+
+/** approved的站点 upsert里，最近一次真正写在这个实体上的那条。 */
+function currentUpsertFor(store: Store, station: { url: string | null }, upserts: ApprovedUpsert[]): ApprovedUpsert | undefined {
+  //先按**整条地址**找：同 hostname不同路径是两条站，按分组键找会把 A的版本
+  //当成 B的版本——实测能用 B的 submissionId把 A下架掉，STALE_REMOVAL形同虚设。
+  const wanted = stationUrlKey(station.url);
+  const exact = upserts.find(row => row.url !== null && stationUrlKey(row.url) === wanted);
+  if (exact) return exact;
+  //分组兜底只用于「飞书把 www与裸域当成同一个站、库内只有一条」的场景：
+  //组里有两条在线站时退回分组等于又回到串站，宁可不给版本（下架会报 STALE_REMOVAL）。
+  const key = feishuHostnameKey(hostnameOf(station.url) ?? '');
+  const onlineInGroup = store.all('station').filter(other => {
+    const host = hostnameOf(other.url);
+    return host !== null && feishuHostnameKey(host) === key;
+  });
+  if (onlineInGroup.length !==1) return undefined;
+  return upserts.find(row => feishuHostnameKey(row.originKey) === key);
+}
+
 export function removeStation(store: Store, slug: string, expectedSubmissionId: string, removedAt: string): string | null {
   const station = store.get('station', slug);
   if (!station) return null;
@@ -622,14 +645,11 @@ export function removeStation(store: Store, slug: string, expectedSubmissionId: 
   // 飞书同步来的是 submission，Agent 提交的是 agent，
   // 只认 submission 会让 Agent 自动上架的站点永远删不掉。
   if (station.source === 'demo') throw new ApiError(409, 'STATION_SOURCE_CONFLICT', '演示数据不能下架');
-  const originKey = new URL(parse(httpUrl, station.url)).hostname;
-  const key = feishuHostnameKey(originKey);
-  const current = store.db.prepare("SELECT id, originKey FROM submissions WHERE kind = 'station' AND action = 'upsert' AND status = 'approved' ORDER BY reviewedAt DESC, rowid DESC")
-    .all().find(row => feishuHostnameKey(row.originKey as string) === key);
-  // 没有可核对版本（旧导入或 restore 写回的站点，从来没走过审核）时也拒绝，
-  // 但报错必须说清补救办法。原来两种情况共用一句「请重新同步」——对存量站
-  // 是错的建议，重同步多少次都不会凭空出现那条 approved 记录，
-  // 管理员只能对着一个永远失败的下架反复重试。真正的补救是跑回填脚本。
+  //版本要落在**这个实体**上：同 hostname不同路径是两条站，按分组键找人会把
+  //兄弟站的 approved投稿当成自己的版本，于是「A没有版本」的 STALE_REMOVAL形同虚设。
+  const approved = store.db.prepare("SELECT id, originKey, json_extract(payload, '$.url') AS url FROM submissions WHERE kind = 'station' AND action = 'upsert' AND status = 'approved' ORDER BY reviewedAt DESC, rowid DESC")
+    .all() as unknown as ApprovedUpsert[];
+  const current = currentUpsertFor(store, station, approved);
   if (!current) {
     throw new ApiError(409, 'STALE_REMOVAL', `站点 ${slug} 没有可核对的投稿版本记录（多为旧导入数据）。先运行 pnpm backfill:submissions 为存量站点补出版本记录，再下架`);
   }

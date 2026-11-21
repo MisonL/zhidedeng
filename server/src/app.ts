@@ -416,6 +416,20 @@ export function buildApp(store: Store, now: () => Date, options: AppOptions = {}
     const decision = submissionReviewSchema.parse(await c.req.json());
     return c.json(reviewSubmission(store, now(), c.req.param('id'), decision));
   });
+/**审核顺序要满足物化依赖：站点/模型先过，文章最后。只按调用方给的顺序审，
+ *评价会先于站点发布，物化时找不到站点，stationSlug落成 null（实测）。
+ *审核台「全部通过」正是按列表顺序传 ids（列表里评价常排在站点前面），
+ *所以必须在服务端兜住，不能指望每个调用方自己排。
+ */
+function orderByMaterializeDependency(store: Store, ids: string[]): string[] {
+  const kindOf = new Map<string, string>();
+  const placeholders = ids.map(() => '?').join(', ');
+  const rows = placeholders.length ===0 ? [] : store.db.prepare(`SELECT id, kind FROM submissions WHERE id IN (${placeholders})`).all(...ids) as { id: string; kind: string }[];
+  for (const row of rows) kindOf.set(row.id, row.kind);
+  //稳定排序：组内保持调用方给的先后（通常是最新在前）。
+  return [...ids].sort((a, b) => Number(kindOf.get(a) === 'post') - Number(kindOf.get(b) === 'post'));
+}
+
   app.post('/api/admin/submissions/batch-review', async c => {
     // ids 保留最多 100 条；batchId 处理整批 pending。每条仍是独立事务。
     const input = submissionBatchReviewSchema.parse(await c.req.json());
@@ -426,7 +440,7 @@ export function buildApp(store: Store, now: () => Date, options: AppOptions = {}
     // 2. 同类型内最新优先——同一站点常有多个待审版本，先审旧的会让新版本被
     //    supersedePending 标成 superseded，站点停在旧数据上（界面上看不出来）。
     // 所以按「站点/模型 → 文章」分组，组内 createdAt 倒序。
-    const ids = 'ids' in input ? input.ids : store.db.prepare(
+    const ids = 'ids' in input ? orderByMaterializeDependency(store, input.ids) : store.db.prepare(
       "SELECT id FROM submissions WHERE batchId = ? AND status = 'pending' "
       + "ORDER BY CASE kind WHEN 'post' THEN 1 ELSE 0 END, createdAt DESC, rowid DESC",
     )

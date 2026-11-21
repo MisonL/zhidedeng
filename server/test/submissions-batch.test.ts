@@ -1220,3 +1220,25 @@ describe('列表接口在写锁被占用时仍可读', () => {
     expect(ids).toEqual(all.items.map(item => item.id));
   });
 });
+
+describe('按 ids审核也满足物化依赖', () => {
+ it('评价排在站点前面传上来时，服务端仍先审站点，文章不会挂空站点', async () => {
+   //审核台「全部通过」按列表顺序传 ids，而列表里评价常常排在站点前面。
+   //只信调用方顺序时，评价先物化 → stationSlug落成 null，页面上文章没有归属站。
+   const host = 'ids-order.example.com';
+ const batch = await submit([
+ { ...postItem, payload: { ...(postItem.payload as Record<string, unknown>), hostname: host } },
+ stationItem(host),
+ ]);
+   const ids = batch.results.map(result => result.id);
+   //故意把评价放前面（和界面上的顺序一致）
+   const ordered = [ids[0], ids[1]];
+   const response = await send('/api/admin/submissions/batch-review', { ids: ordered, status: 'approved' });
+   expect(response.status).toBe(200);
+   const rows = server.db.prepare(
+     "SELECT id, json_extract(data, '$.stationSlug') AS stationSlug FROM entities WHERE kind = 'post'"
+   ).all() as unknown as { id: string; stationSlug: string | null }[];
+   const published = rows.find(row => row.id.startsWith('sub-'));
+   expect(published?.stationSlug).toBe('sub-ids-order-example-com');
+ });
+});

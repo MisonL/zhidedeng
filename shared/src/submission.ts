@@ -74,33 +74,38 @@ export const httpUrl = z.string().max(300).refine(value => {
  * 同步、导入与 Agent 四条入口。
  */
 function normalizeFqdnDots(value: string): string {
-  // 不能用 `new URL(value).hostname` 判断要不要归一：URL 解析器会把 IPv4 尾点自己
-  // 吃掉（`https://1.2.3.4./` 的 hostname 已是 `1.2.3.4`），但**字符串**里那个点还在，
-  // 之后写库、比较就对不上了。直接看原始 authority。
-  if (!value.includes('.')) return value;
+  //不能用 `new URL(value).hostname`判断要不要归一：URL解析器会把 IPv4尾点自己
+  //吃掉（`https://1.2.3.4./`的 hostname已是 `1.2.3.4`），但**字符串**里那个点还在，
+  //之后写库、比较就对不上了。直接看原始 authority。
+  //编码点 `%2E`同样算尾点：解析器会把它当 `.`，字符串扫描看不见。
+  if (!value.includes('.') && !/%2e/i.test(value)) return value;
   try { void new URL(value); } catch { return value; }
-  // 只做**字符级**的定点删除，绝不 `url.toString()` 重写整条地址。
-  // 重写会把非 ASCII 路径百分号编码（一个汉字 → 9 个字符），一条输入 201 字符、
-  // 带尾点且路径含中文的地址会被展开成 680 字符并写进库；此后所有对**库内 url**
-  // 再走 `httpUrl` 的地方（下架、认领）都会因超过 max(300) 直接 400，
-  // 一条站就能把整批审核、整条同步链路打断。
-  const schemeEnd = value.indexOf('://') + 3;
+  //只做**字符级**的定点删除，绝不 `url.toString()`重写整条地址。
+  //重写会把非 ASCII路径百分号编码（一个汉字 →9个字符），一条输入201字符、
+  //带尾点且路径含中文的地址会被展开成680字符并写进库；此后所有对**库内 url**
+  //再走 `httpUrl`的地方（下架、认领）都会因超过 max(300)直接400，
+  //一条站就能把整批审核、整条同步链路打断。
+  // authority的起点要容忍多斜杠：`http:////a.com.`解析成 host `a.com.`，
+  //但按 `indexOf('://') +3`定位会得到一个空 authority，于是尾点漏掉。
+  const scheme = /^[a-z][a-z0-9+.-]*:\/*/i.exec(value);
+  const schemeEnd = scheme ? scheme[0].length :0;
   const rest = value.slice(schemeEnd);
-  // `\` 在 http(s) URL 里等同 `/`（解析器会这样处理），字符串扫描必须一并当作终止符，
-  // 否则 `https://a.com.\\p` 会让 authority 一直读到结尾，尾点删不掉。
+  // `\`在 http(s) URL里等同 `/`（解析器会这样处理），字符串扫描必须一并当作终止符，
+  //否则 `https://a.com.\p`会让 authority一直读到结尾，尾点删不掉。
   const pathStart = rest.search(/[/?#\\]/);
   const authorityEnd = pathStart === -1 ? value.length : schemeEnd + pathStart;
   const authority = value.slice(schemeEnd, authorityEnd);
-  // refine 已拒绝 userinfo 与 ?#，这里只剩 host[:port]；IPv6 字面量带尾点会被 new URL 直接拒。
+  // refine已拒绝 userinfo与 ?#，这里只剩 host[:port]；IPv6字面量带尾点会被 new URL直接拒。
   const colon = authority.lastIndexOf(':');
-  const hasPort = colon !== -1 && /^\d+$/.test(authority.slice(colon + 1));
+  const hasPort = colon !== -1 && /^\d+$/.test(authority.slice(colon +1));
   const host = hasPort ? authority.slice(0, colon) : authority;
   const port = hasPort ? authority.slice(colon) : '';
-  const stripped = host.replace(/\.+$/, '');
+  //尾点与编码点可以混着出现（`a.com.%2E`），统一剥到底。
+  const stripped = host.replace(/(%2e|[。．｡.])+$/i, '');
   if (stripped === host) return value;
   const result = `${value.slice(0, schemeEnd)}${stripped}${port}${value.slice(authorityEnd)}`;
-  // 删点绝不能把一条合法地址变成非法地址。理论上 refine 已经挡住全点 host，
-  // 但归一放在 schema 出口就必须自己保证「输出仍能被 URL 解析」。
+  //删点绝不能把一条合法地址变成非法地址。理论上 refine已经挡住全点 host，
+  //但归一放在 schema出口就必须自己保证「输出仍能被 URL解析」。
   try { void new URL(result); } catch { return value; }
   return result;
 }

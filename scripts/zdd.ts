@@ -82,7 +82,10 @@ function isPrivateHost(hostname: string): boolean {
     return false;
   }
   // IPv6：唯一本地地址 fc00::/7 与链路本地 fe80::/10。
-  if (host.startsWith('fc') || host.startsWith('fd') || host.startsWith('fe8') || host.startsWith('fe9')
+  if (!host.includes(':')) return false;
+ //只有 IPv6字面量才谈得上 fc00::/7这类前缀。原来不判冒号，公网域名
+ // `fcaudit.com`、`fdaudit.com`会被当成唯一本地地址，明文 http被放行。
+ if (host.startsWith('fc') || host.startsWith('fd') || host.startsWith('fe8') || host.startsWith('fe9')
     || host.startsWith('fea') || host.startsWith('feb')) return true;
   return false;
 }
@@ -635,7 +638,7 @@ function emit(value: unknown): void {
  * 放宽到「至少 32 个」又误伤 45 字符的合法模型名。按精确长度匹配才能真正
  * 区分凭证和普通文本——这是唯一确定凭证样子的地方。
  */
-const TOKEN_PATTERN = /zd_[A-Za-z0-9_-]{43}(?![A-Za-z0-9_-])/g;
+const TOKEN_PATTERN = /zd_[A-Za-z0-9_-]{43}/g;
 
 /**
  * 抹掉凭证。服务端错误消息、fetch 异常、用户误传的文件名都可能把明文

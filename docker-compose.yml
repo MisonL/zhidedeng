@@ -36,6 +36,12 @@ services:
       INVITE_CODES: ${INVITE_CODES:-}
     volumes:
       - zhidedeng-data:/data
+    #日志默认 json-file且无上限：跑久了会把磁盘写满，而且没人会注意到。
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
     deploy:
       resources:
         limits:

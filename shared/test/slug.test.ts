@@ -115,3 +115,20 @@ describe('httpUrl 入库归一', () => {
   expect(httpUrl.parse('https://a.com.:8080/')).toBe('https://a.com:8080/');
   expect(httpUrl.parse('https://a.com./')).toBe('https://a.com/');
  });
+ it('多斜杠 authority与编码尾点也要归一，库里不留第二种写法', () => {
+   // `http:////a.com.`解析成 host `a.com.`，按 indexOf('://') +3定位会得到空 authority；
+   // `%2E`是编码点，解析器当 `.`用，但字符串扫描看不见。两者都实测漏掉过。
+   expect(httpUrl.parse('http:////a.com.')).toBe('http:////a.com');
+   expect(httpUrl.parse('http://a.com%2E')).toBe('http://a.com');
+   expect(httpUrl.parse('https://a.com.%2E/')).toBe('https://a.com/');
+   //归一后的 host不能以点结尾，这是「不产生第二种写法」的判据。
+   expect(new URL(httpUrl.parse('http:////a.com.:80')).hostname).toBe('a.com');
+ });
+ it('Unicode句点当作尾点一并去掉（。．｡）', () => {
+   // WHATWG主机解析会把 U+3002/U+FF0E/U+FF61映射成 `.`，于是 `a.com。`的
+   // hostname就是 `a.com.`；只剥 ASCII点会让这种写法在库里留下第二种样子。
+   expect(httpUrl.parse('https://a.com。/')).toBe('https://a.com/');
+   expect(httpUrl.parse('https://a.com．')).toBe('https://a.com');
+   expect(new URL(httpUrl.parse('https://a.com｡/x')).hostname).toBe('a.com');
+ });
+

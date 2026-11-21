@@ -211,7 +211,8 @@ describe('凭证脱敏', () => {
   it('长业务文本不会被误抹', () => {
     // 早期用「zd_ 后至少 16 个字符」判断，会把这类正常标识抹成 zd_***。
     expect(scrubSecret('zd_model_identifier_2026')).toBe('zd_model_identifier_2026');
-    expect(scrubSecret('zd_' + 'x'.repeat(44))).toBe('zd_' + 'x'.repeat(44));
+    //44位同类字符不再豁免：凭证嵌在文件名里时必须抹掉，宁可多抹一点。
+    expect(scrubSecret('zd_' + 'x'.repeat(44))).toBe('zd_***x');
   });
 
   it('批量结果走 emit 时脱敏，错误消息里的凭证不会进 stdout', async () => {
@@ -219,6 +220,14 @@ describe('凭证脱敏', () => {
     const secret = 'zd_' + 'B'.repeat(43);
     expect(JSON.stringify(scrubSecret({ failed: [{ message: `凭据 ${secret} 无效` }] })))
       .not.toContain(secret);
+  });
+
+  it('凭证后面还跟着别的内容也要抹（文件名、路径）', () => {
+    //原来的正则要求「之后不再是 base64url字符」，于是 zd_<43位>_draft.json这种
+    //带凭证前缀的文件名整串不匹配，令牌原样打进 stdout/stderr。
+    const secret = 'zd_' + 'E'.repeat(43);
+    expect(scrubSecret(`${secret}_draft.json`)).toBe('zd_***_draft.json');
+    expect(JSON.stringify(scrubSecret({ [`file_${secret}.json`]:1 }))).not.toContain(secret);
   });
 
   it('对象键名里的凭证也被抹掉', () => {
@@ -705,6 +714,16 @@ describe('服务地址安全', () => {
     for (const base of ['http://172.16.81.4:8788', 'http://192.168.1.5:8787', 'http://10.0.90.200', 'http://127.0.0.1:8788']) {
       expect(assertSafeBase(base)).toBe(base.replace(/\/+$/, ''));
     }
+  });
+
+  it('公网域名以 fc/fd/fe8开头也不会被当成内网', () => {
+    // IPv6唯一本地地址 fc00::/7与链路本地 fe80::/10按**前缀字符串**判断，
+    //但没先确认这是 IPv6字面量：fcaudit.com、fdaudit.com、fe80.example
+    //全被当成内网，明文 http被放行，凭证就此走公网明文。
+    for (const base of ['http://fcaudit.com', 'http://fdaudit.com', 'http://fe80.example.com']) {
+      expect(() => assertSafeBase(base)).toThrow(/公网地址必须用 https/);
+    }
+    expect(assertSafeBase('http://[fd00::1]:8788')).toBe('http://[fd00::1]:8788');
   });
 
   it('172.16/12 的边界不被放宽成整个 172/8', () => {

@@ -45,18 +45,26 @@ function objectPayload(input: unknown): Record<string, unknown> {
 }
 
 function agentUrl(input: unknown, field = 'url'): string {
-  if (typeof input !== 'string') throw new ApiError(400, 'INVALID_INPUT', `${field} 必须是 http/https 网址`);
+  if (typeof input !== 'string') throw new ApiError(400, 'INVALID_INPUT', `${field}必须是 http/https网址`);
   let url: URL;
-  try { url = new URL(input); } catch { throw new ApiError(400, 'INVALID_INPUT', `${field} 不是有效网址`); }
-  if (url.protocol !== 'http:' && url.protocol !== 'https:') throw new ApiError(400, 'INVALID_INPUT', `${field} 只允许 http/https`);
+  try { url = new URL(input); } catch { throw new ApiError(400, 'INVALID_INPUT', `${field}不是有效网址`); }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') throw new ApiError(400, 'INVALID_INPUT', `${field}只允许 http/https`);
   const hostname = url.hostname.replace(/\.+$/, '');
-  if (!hostname || isPrivateHostname(hostname)) throw new ApiError(400, 'INVALID_INPUT', `${field} 不允许内网、回环或本地地址`);
-  url.hostname = hostname;
-  url.username = '';
-  url.password = '';
-  url.search = '';
-  url.hash = '';
-  return url.toString();
+  if (!hostname || isPrivateHostname(hostname)) throw new ApiError(400, 'INVALID_INPUT', `${field}不允许内网、回环或本地地址`);
+  //清理 query / fragment /账号密码，并把 IDN主机转成 punycode——但**路径必须原样保留**。
+  //以前这里直接 `url.toString()`：序列化会把非 ASCII路径百分号编码，一个汉字变9个
+  //字符，95字符的中文路径变成744字符，随后撞上 httpUrl的 max(300)，报
+  //「url: Too big」——同一条地址在 web/飞书上能过、在 Agent通道被拒。
+  //这里改成「只重写 authority，路径按原字符串拼接」，长度与展示都不再漂移。
+  const scheme = /^[a-z][a-z0-9+.-]*:\/*/i.exec(input);
+  const schemeEnd = scheme ? scheme[0].length :0;
+  const rest = input.slice(schemeEnd);
+  const pathStart = rest.search(/[/?#\\]/);
+  const authorityEnd = pathStart === -1 ? input.length : schemeEnd + pathStart;
+  const cutEnd = input.slice(authorityEnd).search(/[?#]/);
+  const rawPath = cutEnd === -1 ? input.slice(authorityEnd) : input.slice(authorityEnd, authorityEnd + cutEnd);
+  const port = url.port ? `:${url.port}` : '';
+  return `${url.protocol}//${hostname}${port}${rawPath}`;
 }
 
 function postHostname(hostname: string): string {

@@ -105,22 +105,37 @@ pnpm build   # 产出 release/：server.mjs（单文件）、web/、backup-sqlit
    deploy ALL=(root) NOPASSWD: /usr/bin/systemctl restart zhidedeng, /usr/bin/journalctl -u zhidedeng -n 50 --no-pager
    ```
 
-### 容器部署的备份（与上面 systemd 直跑不同）
+### 容器部署：发布、备份与定时同步
 
-容器部署时数据库在 docker 卷里、宿主机没有对容器的写锁协调，所以用
-`deploy/zhidedeng-docker-backup.sh`：在**容器内**以只读连接执行 `VACUUM INTO`
-（SQLite 保证 WAL 下的一致性快照），`docker cp` 取出来后再校验
-`integrity_check` 与实体数，最后留最近 14 份。备份含密码哈希与会话摘要，权限 0600。
+容器部署和上面的 systemd直跑是**两条不同的路径**，别混用：
+
+- systemd直跑：`deploy/deploy.sh`把 `release/` rsync到 `/opt/zhidedeng`，由 `zhidedeng.service`执行 `node server.mjs`，备份用 `deploy/backup-sqlite.sh`。
+- 容器部署：`docker compose up -d --build`起容器，数据库在 docker卷里。这条路径没有 `deploy.sh`可用，也没有 `/opt/zhidedeng`。
+
+容器发布就是标准 compose流程，**构建与回滚都用镜像 tag**：
 
 ```sh
-sudo install -m 0755 deploy/zhidedeng-docker-backup.sh /usr/local/bin/zhidedeng-backup
-# /etc/systemd/system/zhidedeng-backup.{service,timer} 里设
-#   Environment=BACKUP_DIR=/var/backups/zhidedeng
-#   Environment=BACKUP_KEEP=14
-#   ExecStart=/usr/local/bin/zhidedeng-backup
-sudo systemctl enable --now zhidedeng-backup.timer
-sudo systemctl start zhidedeng-backup.service   # 立刻验证一次
+docker compose build
+docker compose up -d
+curl -fsS --noproxy "*" http://127.0.0.1:8788/api/health #发布门槛
+# 回滚：把上一版镜像重新 tag成当前名，再 up -d
 ```
+
+容器部署时数据库在 docker卷里、宿主机上没有可直接打开的库文件，所以备份要用 `deploy/zhidedeng-docker-backup.sh`：在**容器内**以只读连接执行 `VACUUM INTO`（SQLite保证 WAL下的一致性快照），`docker cp`取出来后再校验 `integrity_check`与实体数，最后留最近14份。备份含密码哈希与会话摘要，权限0600。仓库里带了配套单元：
+
+```sh
+sudo install -m0755 deploy/zhidedeng-docker-backup.sh /usr/local/bin/zhidedeng-backup
+sudo cp deploy/zhidedeng-docker-backup.{service,timer} /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now zhidedeng-docker-backup.timer
+sudo systemctl start zhidedeng-docker-backup.service #立刻验证一次
+```
+
+注意单元里的 `User=root`：它要调 `docker`，普通账号没有 `docker.sock`权限；`ReadWritePaths=/var/backups/zhidedeng`必须与 `BACKUP_DIR`一致，否则 `ProtectSystem=strict`下写到一半就失败。
+
+**两种备份脚本都会拒绝空库。**只查 `integrity_check`不够——`DB_PATH`写错时 sqlite3会就地建一个空库，校验照样 ok、退出码0，然后保留策略把真备份按14份滚掉。现在要求 `entities`表存在且行数大于0。
+
+定时同步（`zhidedeng-sync.timer`）在容器部署下需要额外一步：单元执行的是 `/opt/zhidedeng/sync-feishu.mjs`，而容器只把产物放在镜像内的 `/app/release`。要么把 `release/`也解到宿主机 `/opt/zhidedeng`（`deploy.sh`那条路本来就会做），要么把单元的 `WorkingDirectory`/`ExecStart`指到你解包的位置。镜像里没有 `lark-cli`，所以同步**不要**塞进容器里跑。
 
 **这一条必须做**：没有备份时，一次误操作、磁盘故障或 `VACUUM` 中断就是全站数据丢失，
 而库里是用户投稿、审核记录和账号。定时器默认 04:00 触发、带 10 分钟随机延迟、
@@ -215,7 +230,7 @@ curl -X POST -H "Authorization: Bearer $SYNC_TOKEN" -H 'Content-Type: applicatio
 export LARKSUITE_CLI_CONFIG_DIR=...  # lark-cli 配置目录，必填，不回落到默认的 ~/.lark-cli
 export FEISHU_BASE_TOKEN=... FEISHU_TABLE_ID=...
 export SITE_URL=http://127.0.0.1:8787 # 服务器本机地址
-#容器部署时这里是发布到宿主机的端口（compose 里是 8788），不是容器内的 8787。
+# 容器部署时这里是发布到宿主机的端口（compose 里是 8788），不是容器内的 8787。
 export SYNC_TOKEN=...                 # 与服务环境文件相同，完整 dry-run 计划也需要
 
 pnpm sync:feishu --dry-run           # 只读 GET，打印计划或中止原因
@@ -234,7 +249,7 @@ sudo systemctl enable --now zhidedeng-sync.timer #每小时 05 分和 35 分各�
 journalctl -u zhidedeng-sync.service -n 100        # 看最近一次跑了什么
 ```
 
-`Type=oneshot` + timer：跑完就退出，不占用常驻内存，也不会出现两次同步叠在一起。默认只提交待审批次，不会自作主张上线。要自动通过，用管理接口 `PUT /api/admin/settings` 把 `autoApprove` 打开——**没有命令行开关**（早期文档里写的 `--auto-approve` 并不存在，脚本会静默忽略未知参数）。自动通过只对 upsert 生效，下架永远留在审核台。
+`Type=oneshot` + timer：跑完就退出，不占用常驻内存，也不会出现两次同步叠在一起。默认只提交待审批次，不会自作主张上线。要自动通过，用管理接口 `POST /api/admin/settings` 把 `autoApprove` 打开——**没有命令行开关**（早期文档里写的 `--auto-approve` 并不存在，脚本会静默忽略未知参数）。自动通过只对 upsert 生效，下架永远留在审核台。
 
 单元里的 `ExecStart` 跑的是发布目录中的 `sync-feishu.mjs`——它由 `pnpm build` 一起打进 `release/`，已经 bundle 了 `@zhidedeng/shared`。所以定时同步**不需要服务器上有仓库、也不需要 node_modules**，只要 Node22.18+ 和 lark-cli，和运行 `server.mjs` 的前提完全一致。
 
@@ -242,7 +257,9 @@ journalctl -u zhidedeng-sync.service -n 100        # 看最近一次跑了什么
 
 **开了定时器之后，下架要在表格里做，不要只点审核台。**站点身份以飞书表格为准：表格里还留着那条记录，下一轮同步（最多 30 分钟）就会按正常投稿把它重新上架——这是「群友填错、重新提交就该恢复」的既有设计，不是 bug。要真正下线，先在表格里删掉该行，同步会生成下架请求，人工批准后站点才彻底消失（之后表格里没有它，也就不会再被复活）。同理 `/api/admin/import` 会**跳过**已下架的站点并提示「需要人工恢复」。两条入口的取舍是刻意的：导入是管理员批量灌数据，不该顺带撤销人工下架；同步的权威来源是表格，表格里还在就等于还在架。
 
-**待审队列会随运行轮次增长，这是既有契约不是 bug。**人工审核态下，每个新批次都会为同样的内容各插一条待审（`submissions-batch.test.ts` 的「跨批次仍有待审记录时产生新行，避免一键审核漏掉」锁的就是这个：复用旧批次的行会让新批次的「全部通过」漏掉它）。一旦管理员通过其中任意一条，同站点的其余待审会被 `superseded` 收掉，队列随之清空。所以对接了定时器的部署有两条路：要么接受「每次审核时按最新批次一键通过」；要么用 `PUT /api/admin/settings` 打开 `autoApprove`，让受信渠道的 upsert 直接生效（下架仍留在审核台）。如果你长时间不看审核台，队列会一直涨到人工处理为止。
+**待审队列会随运行轮次增长，这是既有契约不是 bug。**人工审核态下，每个新批次都会为同样的内容各插一条待审（`submissions-batch.test.ts` 的「跨批次仍有待审记录时产生新行，避免一键审核漏掉」锁的就是这个：复用旧批次的行会让新批次的「全部通过」漏掉它）。一旦管理员通过其中任意一条，同站点的其余待审会被 `superseded` 收掉，队列随之清空。所以对接了定时器的部署有两条路：要么接受「每次审核时按最新批次一键通过」；要么用 `POST /api/admin/settings` 打开 `autoApprove`，让受信渠道的 upsert 直接生效（下架仍留在审核台）。如果你长时间不看审核台，队列会一直涨到人工处理为止。
+
+同步还有两道**下架规模**闸门：解析出的站点不到线上的一半就中止；一次计划下架超过 max(3,在架数的一半)也中止。确认表格里确实删了这些站之后，用 `--allow-bulk-removal`显式放行；只想同步新增和更新就用 `--no-removal`。
 
 同步和 `--dry-run` 共用数据安全检查：任何记录无法解析时以退出码 2 中止，不发 POST；成功解析的站点为零且线上仍有站点时也中止，避免空表清空线上。显式传 `--allow-skipped` 才跳过坏记录继续，且无论有无坏记录都完全不生成下架请求，并打印 ` 本次不同步下架 ` 警告；空表保护仍然生效。
 
