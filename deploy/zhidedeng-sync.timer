@@ -1,0 +1,17 @@
+# 每 30 分钟同步一次飞书收集表。随机延迟避免和备份、整点任务撞在一起。
+#
+# 为什么不是每小时：群友在表里补一条站点，管理员希望尽快能在审核台看到；30 分钟
+# 内必然被拉进来一次，比「每天一次」实用得多。为什么不更密：lark-cli 读取是外部
+# 接口，间隔太短既没必要也容易被限流。
+#
+# Persistent=true 让机器重启后立刻补跑一次——停机期间提交的内容不该等下一轮。
+[Unit]
+Description=zhidedeng Feishu table sync (every 30 minutes)
+
+[Timer]
+OnCalendar=*:0/30
+RandomizedDelaySec=120
+Persistent=true
+
+[Install]
+WantedBy=timers.target

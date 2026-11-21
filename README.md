@@ -23,7 +23,7 @@ pnpm workspace + TypeScript 严格模式。
 | `server/` | Hono + `node:sqlite`，单进程，生产环境同时托管前端 |
 | `web/` | Vite + React 19 + react-router |
 | `scripts/` | 飞书同步脚本 |
-| `deploy/` | systemd、nginx、备份和部署脚本 |
+| `deploy/` | systemd（服务、备份、定时同步）、nginx、备份和部署脚本 |
 
 需要 Node 22.18 或以上的 22.x（依赖 `node:sqlite` 和原生 TypeScript 类型剥离）和 pnpm 12。
 
@@ -221,6 +221,21 @@ pnpm sync:feishu --dry-run           # 只读 GET，打印计划或中止原因
 pnpm sync:feishu
 pnpm sync:feishu --allow-skipped     # 显式跳过坏记录，本次只提交 upsert，不同步下架
 ```
+
+### 定时同步
+
+手工跑一次只适合试水。长期运行用仓库里的 systemd 单元：
+
+```sh
+sudo cp deploy/zhidedeng-sync.service deploy/zhidedeng-sync.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now zhidedeng-sync.timer   # 每 30 分钟一次，随机延迟 2 分钟
+journalctl -u zhidedeng-sync.service -n 100        # 看最近一次跑了什么
+```
+
+`Type=oneshot` + timer：跑完就退出，不占用常驻内存，也不会出现两次同步叠在一起。默认只提交待审批次，不会自作主张上线；要自动通过请用 `--auto-approve`，并且只对 upsert 生效，下架永远留在审核台。
+
+单元文件依赖 `/etc/zhidedeng/zhidedeng.env` 里的 `FEISHU_BASE_TOKEN`、`FEISHU_TABLE_ID`、`LARKSUITE_CLI_CONFIG_DIR`、`SYNC_TOKEN`、`SITE_URL`，以及服务器上的 lark-cli。缺任何一个，timer 会照常触发但脚本会打印原因后中止——不会写坏数据。
 
 同步和 `--dry-run` 共用数据安全检查：任何记录无法解析时以退出码 2 中止，不发 POST；成功解析的站点为零且线上仍有站点时也中止，避免空表清空线上。显式传 `--allow-skipped` 才跳过坏记录继续，且无论有无坏记录都完全不生成下架请求，并打印 `本次不同步下架` 警告；空表保护仍然生效。
 
