@@ -487,7 +487,7 @@ process.stdout.write(fs.readFileSync(${JSON.stringify(dir)} + '/' + fixture + '.
     expect(code).toBe(1);
     expect(imports.map(request => request.body.items.length)).toEqual([500, 100]);
     expect(output).toContain('[失败] station station-0.example.com：INVALID_INPUT 未知模型：missing-model');
-    //错误里必须带目标地址：无人值守时只看到 fetch failed，分不清是 SITE_URL填错还是服务没起来。
+    // 错误里必须带目标地址：无人值守时只看到 fetch failed，分不清是 SITE_URL 填错还是服务没起来。
     expect(output).toContain('块入队失败（http://127.0.0.1:');
     expect(output).toContain('）：HTTP');
     expect(output).toContain(imports[0].body.batchId);
@@ -776,12 +776,12 @@ describe('同名站点的归属', () => {
 });
 
 describe('部署单元与构建产物一致', () => {
- //P1事故：timer的 ExecStart指向 scripts/sync-feishu.ts，而 deploy.sh只 rsync
- //release/，服务器上根本没有那个文件——每半小时 MODULE_NOT_FOUND，同步等于没接线。
- // 仓库里也没有任何断言把「单元要跑什么」和「build产出什么」对上。
+ // P1 事故：timer 的 ExecStart 指向 scripts/sync-feishu.ts，而 deploy.sh 只 rsync
+ // release/，服务器上根本没有那个文件——每半小时 MODULE_NOT_FOUND，同步等于没接线。
+ // 仓库里也没有任何断言把「单元要跑什么」和「build 产出什么」对上。
  //
- // 断言必须比对 **输出文件名**：只判断 build命令里是否出现「scripts/sync-feishu.ts」
- // 会被 esbuild的输入路径 `../scripts/sync-feishu.ts`蒙混过关，单元写错也照样绿。
+ // 断言必须比对 **输出文件名**：只判断 build 命令里是否出现「scripts/sync-feishu.ts」
+ // 会被 esbuild 的输入路径 `../scripts/sync-feishu.ts` 蒙混过关，单元写错也照样绿。
  it('systemd单元要跑的脚本，必须正是 pnpm build的 --outfile产物', () => {
  const root = fileURLToPath(new URL('../../', import.meta.url));
  const unit = readFileSync(join(root, 'deploy/zhidedeng-sync.service'), 'utf8');
