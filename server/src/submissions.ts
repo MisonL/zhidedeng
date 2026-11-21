@@ -708,8 +708,6 @@ function materialize(store: Store, submission: SubmissionRecord, reviewedAt: str
     const { offers, ...payload } = parseStationPayload(store, submission.payload);
     // 飞书批次沿用旧同步的 www 分组，认领原站点；新 slug 仍统一由 stationSlug 分配。
     const mine = findStation(store, submission, payload.url);
-    const grouped = submission.channel === 'feishu'
-      && feishuHostnameKey(submission.originKey) === feishuHostnameKey(hostnameOf(payload.url) ?? '');
     const slug = mine?.slug ?? stationSlug(store, payload.url, submission.originKey);
     // 必须用 getWithRemoved：store.get 看不见已下架的行，站点下架后再同步一次
     // 会把它当成新站，四个指标字段（可用率/首字延迟/建站时间/状态）全写 null。

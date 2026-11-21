@@ -16,7 +16,7 @@ Slogan：我们的AI中转指南。
 
 - 种子里的中转站都是虚构样例，名称、倍率、可用率、延迟、评论、评测均为演示数据，严禁在种子里使用真实中转站名称
 - 飞书表单只采集审核状态严格等于「通过」的记录，再走平台投稿审核；物化后标明「群友提交，未经平台核实」。agent 渠道新建内容标明「AI 采集，未经平台核实」。这两种来源的评价正文按纯文本显示，用户站内投稿仍按 Markdown 渲染（`web/src/format.ts` 的 `sourceLabel`、`web/src/pages/PostDetail.tsx`）
-- 没有实测数据的可用率、延迟等指标一律为 null，页面显示「暂无」，不当 0 分也不编造。队列创建或更新站点时，`uptime`、`firstTokenLatencyMs`、`foundedAt`、`status` 都显式写 null；综合得分在 uptime 为 null 时同为 null，按得分或可用率排序时缺失值在后（`server/src/submissions.ts` 的 `materialize`、`server/src/service.ts` 的 `station` 与排序分支）
+- 没有实测数据的可用率、延迟等指标一律为 null，页面显示「暂无」，不当 0 分也不编造。队列创建或更新站点时，`uptime`、`firstTokenLatencyMs`、`foundedAt`、`status` 都显式写 null；综合得分在 uptime 为 null 时同为 null，按得分或可用率排序时缺失值在后；同一分（或同一可用率）的站点按 slug 定序，保证全序稳定、翻页不重复不丢失（`server/src/submissions.ts` 的 `materialize`、`server/src/service.ts` 的 `station` 与排序分支）
 - Agent 入口在任意嵌套层级拒绝 `uptime`、`firstTokenLatencyMs`、`foundedAt`、`status`、`score`、`lowestRate` 和凭证类字段，返回 `400 FORBIDDEN_FIELD`，字段名忽略大小写、下划线和连字符。没有探测机制就不接受自报实测指标；score 和 lowestRate 由服务端算，凭证只用于鉴权（`server/src/agent-api.ts` 的 `forbidden` 与 `rejectForbiddenFields`）
 - 已有站点更新保留最初 source，不能把飞书站点改标成 Agent（站点被下架后重新同步也保留，物化用 `getWithRemoved` 取旧值——`store.get` 看不见已下架行，会把它当新站并清空四个指标）。队列下架拒绝 **demo** 来源，返回 `409 STATION_SOURCE_CONFLICT`；agent 与 user 来源允许下架（只认 submission 会让 Agent 自动上架的站点永远删不掉）。版本不符返回 `409 STALE_REMOVAL`，站点和报价不变。站点身份按 hostname 认领，飞书渠道按 `www`/裸域分组认领，**已下架的站点也参与认领**，否则换写法再同步会另建一条指标全空的新实体（`server/src/submissions.ts` 的 `removeStation`、`findStation`、`stationSlug`）
 - 全站页脚常驻声明，当前 `SITE_NOTICE` 文案仍只说明演示数据和群友提交；站点详情及内容标签已覆盖 agent。页脚缺少 Agent 来源说明是当前界面缺口（`web/src/format.ts` 的 `SITE_NOTICE`、`web/src/components/Layout.tsx`、`web/src/pages/Stations.tsx`）
