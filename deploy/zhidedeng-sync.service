@@ -39,6 +39,8 @@ EnvironmentFile=/etc/zhidedeng/zhidedeng.env
 ExecStart=/usr/bin/env node --experimental-strip-types scripts/sync-feishu.ts
 # 单次运行的上限：正常情况下几秒到几十秒；卡住时别把下次触发一起堵住。
 TimeoutStartSec=900
+#运维约定：**下架要在飞书表格里做，不要只点审核台。**表格里还留着记录时，
+#下一轮同步会把该站点按正常投稿重新上架（既有设计：群友填错后重新提交就该恢复）。
 UMask=0077
 StateDirectory=zhidedeng
 StateDirectoryMode=0700
