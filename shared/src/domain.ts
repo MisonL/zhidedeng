@@ -2,12 +2,14 @@ export type Id = string;
 export type ISODateTime = string;
 export type ISODate = string;
 export type VendorSlug = string;
+export const MIN_RATE = 0.05;
+export const MAX_RATE = 20;
 export type PostKind = 'deal' | 'review' | 'community' | 'guide';
 export type StationStatus = 'running' | 'unstable';
 export type TargetType = 'post' | 'station';
 export type VoteValue = 'up' | 'down' | null;
-// demo：虚构演示数据；submission：群友经飞书表单提交，未经平台核实。
-export type ContentSource = 'demo' | 'submission';
+// demo：虚构演示数据；submission：群友提交；agent：AI 采集。后两者未经平台核实。
+export type ContentSource = 'demo' | 'submission' | 'agent';
 export type PostStatus = 'pending' | 'approved' | 'rejected';
 
 export interface Vendor {
@@ -35,6 +37,18 @@ export interface User {
   avatar: string;
   bio: string;
   tokens: number;
+}
+
+// 凭证管理列表的元数据，不含明文和哈希。
+export interface AgentToken {
+  id: Id;
+  label: string;
+  tokenPrefix: string;
+  createdAt: ISODateTime;
+  lastUsedAt: ISODateTime | null;
+  revokedAt: ISODateTime | null;
+  useCount: number;
+  status: 'active' | 'revoked';
 }
 
 export type Author = Pick<User, 'handle' | 'nickname' | 'avatar'>;
@@ -88,14 +102,29 @@ export interface Station extends InteractionState {
   score: number | null;
   // 只含协议、主机和路径，不带 query 与 fragment。
   url: string | null;
-  source: ContentSource;
+  source: ContentSource | 'user';
 }
+
+/**
+ * 倍率的计价口径。
+ *
+ * `rate` 本身只说「相对官方价多少」，不说这个数字是怎么算出来的。中转站至少
+ * 有四种常见口径，同一个数字在不同口径下差得很远：输入按量、输出按量、
+ * 打包价、以及把输入输出混在一起的整站倍率。它们放在同一张榜上排序是错的，
+ * 但 schema 里原先没有字段能表达差异，只能靠审核时人判断——榜上却写着
+ * 「数字越小越便宜」。
+ */
+export type RateBasis = 'blended' | 'input' | 'output' | 'package';
 
 export interface StationOffer {
   stationSlug: string;
   modelSlug: string;
   // 仅表示相对官方价格的倍率。
   rate: number;
+  /** 这个倍率对应的口径。历史数据没有该字段时按 blended 读。 */
+  basis: RateBasis;
+  /** 报价来源时间（提交/同步时给出）。null 表示来源没说，不代表「刚刚」。 */
+  quotedAt: ISODateTime | null;
 }
 
 export interface ModelOffer extends StationOffer {
@@ -130,7 +159,23 @@ export interface Post extends InteractionState {
   source: ContentSource | 'user';
   // pending/rejected 只有作者本人读得到。
   status: PostStatus;
+  /**
+   * 审核理由（驳回原因），仅对作者本人可见。
+   *
+   * 之前这个字段不存在：作者在「我的分享」里看得到 status=rejected，
+   * 却完全不知道哪里不合格——服务端明明把理由写进了 submissions.reason，
+   * 却没有任何接口把它送出来。只有作者自己能看到，别人读到的仍是 undefined。
+   */
+  reviewReason?: string | null;
 }
+
+/**
+ * 列表里的文章：不带正文。
+ *
+ * 正文上限 10 万字，而列表每页 20 条——带上它最坏是一次 2MB 的响应，
+ * 而卡片只需要标题和摘要。详情页有独立接口 `GET /api/posts/:id`。
+ */
+export type PostSummary = Omit<Post, 'body'>;
 
 export interface Favorite extends Target {
   userHandle: string;
@@ -193,3 +238,10 @@ export interface ExpertRanking {
   shareCount: number;
   upCount: number;
 }
+
+/**
+ * 前后端共用的展示类字段长度上限。
+ * 分开写死会让前端放行、后端 400——用户只看到「请求参数无效」，不知道是长度问题。
+ * 放在这里而不是 submission.ts：后者依赖 zod，前端只引常量时不该把 zod 带进产物。
+ */
+export const PROFILE_LIMITS = { nickname: 20, bio: 500 } as const;

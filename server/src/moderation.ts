@@ -1,23 +1,77 @@
 import type { AdminDisableUserResponse, PostStatus } from '@zhidedeng/shared';
 import type { Store } from './database.ts';
 import { ApiError } from './errors.ts';
+import { comparePublishedAt } from './service.ts';
+import { reviewSubmission } from './submissions.ts';
 
 // 管理接口的动作，由 app.ts 在 Bearer 校验之后调用。没有后台页面，运维用 curl。
 
 export function listPosts(store: Store, status: PostStatus) {
   const items = store.all('post').filter(post => post.status === status)
-    .sort((a, b) => a.publishedAt.localeCompare(b.publishedAt))
+    .sort((a, b) => comparePublishedAt(a.publishedAt, b.publishedAt))
     .map(({ id, kind, title, summary, body, authorHandle, stationSlug, modelSlug, publishedAt, status: current }) => ({ id, kind, title, summary, body, authorHandle, stationSlug, modelSlug, publishedAt, status: current }));
-  return { items };
+  // 站内投稿已进统一队列，物化前只在 submissions 里，不列出来审核员就看不到。
+  // 排除已物化的：物化时 post id 就是 submission id，两边都查会列出同一条两次。
+  const queued = store.db.prepare(
+    "SELECT * FROM submissions WHERE kind = 'post' AND channel = 'web' AND status = ? AND NOT EXISTS (SELECT 1 FROM entities WHERE kind = 'post' AND entities.id = submissions.id) ORDER BY createdAt",
+  ).all(status).map(row => {
+    const payload = JSON.parse(row.payload as string) as { kind: string; title: string; summary: string; body: string; stationSlug: string | null; modelSlug: string | null };
+    return { id: row.id as string, ...payload, authorHandle: row.actorHandle as string | null, publishedAt: row.createdAt as string, status };
+  });
+  return { items: [...items, ...queued].sort((a, b) => comparePublishedAt(a.publishedAt, b.publishedAt)) };
 }
 
-export function reviewPost(store: Store, id: string, status: PostStatus) {
+export function reviewPost(store: Store, now: () => Date, id: string, status: PostStatus) {
   const post = store.get('post', id);
-  if (!post) throw new ApiError(404, 'NOT_FOUND', '文章不存在');
-  // 这些文章由全量同步写入，这里改了下次同步又会恢复。
-  if (post.source === 'submission') throw new ApiError(409, 'MANAGED_BY_SOURCE', '这是群友提交的内容，请到飞书表格撤销「通过」后重新同步');
+  if (!post) {
+    // 站内投稿还在队列里：交给统一的审核函数，物化和状态推进都在那里。
+    const row = store.db.prepare(
+      "SELECT 1 FROM submissions WHERE id = ? AND kind = 'post' AND channel = 'web' AND status = 'pending'",
+    ).get(id);
+    if (!row) throw new ApiError(404, 'NOT_FOUND', '文章不存在');
+    const reviewed = reviewSubmission(store, now(), id, { status: status === 'approved' ? 'approved' : 'rejected' });
+    return { id, status: reviewed.status as PostStatus };
+  }
+  // 群友提交的文章由飞书全量同步写入，直接改状态下次同步就白改了。
+  // 但原来的报错把管理员指向了一条走不通的路：让去飞书撤销「通过」再同步——
+  // 撤销只会让这条记录从批次里消失，一个不存在的记录生成不了下架请求。
+  // 所以这里改成真的下架（软删除，同步不会再复活，见 materialize 里的守卫）。
+  if (post.source === 'submission' && status === 'rejected') {
+    withdrawPost(store, id, now().toISOString());
+    return { id, status };
+  }
   store.put('post', id, { ...post, status });
   return { id, status };
+}
+
+/**
+ * 下架一篇已发布的文章（管理员）。
+ *
+ * 和站点的下架一样是软删除：数据留着，随时能恢复，前台立刻看不见。
+ *
+ * 这里不区分来源。「请去飞书撤销后重新同步」曾经是唯一的撤回路径，但它对
+ * 群友来源根本走不通——同步脚本只处理审核状态为「通过」的记录，撤销「通过」
+ * 只会让这条记录**不再出现在批次里**，一个已经不存在的记录无法生成任何
+ * 下架请求。实测：撤销后重同步，文章原样在线。所以管理员必须有一个直接的
+ * 下架入口；materialize 那边也加了守卫，防止下一次同步把它复活。
+ */
+export function withdrawPost(store: Store, id: string, removedAt: string): { id: string; removed: true } {
+  // 用 getWithRemoved：已经下架的也要认出来，报「已下架」而不是「不存在」。
+  // 用 get 的话重复点一次会得到 404，管理员会以为这篇没了。
+  const post = store.getWithRemoved('post', id);
+  if (!post) throw new ApiError(404, 'NOT_FOUND', '文章不存在');
+  // 演示数据和站点侧是同一套规矩（removeStation 拒绝 source='demo'）：
+  // 那些是虚构样例，撤掉只会让站点看起来像坏了，而它们本来也不承载任何真实信息。
+  if (post.source === 'demo') throw new ApiError(409, 'POST_SOURCE_CONFLICT', '演示数据不能下架');
+  if (!store.markRemoved('post', id, removedAt)) throw new ApiError(409, 'ALREADY_REMOVED', '该文章已下架，不需要重复操作');
+  return { id, removed: true };
+}
+
+/** 恢复被下架的文章，只清软删除标记，正文一直是原样保留的。 */
+export function restorePost(store: Store, id: string): { id: string; restored: true } {
+  if (!store.getWithRemoved('post', id)) throw new ApiError(404, 'NOT_FOUND', '文章不存在');
+  if (!store.restore('post', id)) throw new ApiError(409, 'ALREADY_ONLINE', '该文章当前在线，不需要恢复');
+  return { id, restored: true };
 }
 
 /** 禁用后所有会话立即失效，公开内容保留；恢复后要重新登录。 */
@@ -27,7 +81,16 @@ export function setAccountDisabled(store: Store, handle: string, disabled: boole
   const found = account.handle as string;
   return store.transaction(() => {
     store.db.prepare('UPDATE accounts SET disabledAt = ? WHERE handle = ?').run(disabled ? now.toISOString() : null, found);
-    if (disabled) store.db.prepare('DELETE FROM sessions WHERE handle = ?').run(found);
+    if (disabled) {
+      store.db.prepare('DELETE FROM sessions WHERE handle = ?').run(found);
+      // Agent 凭证必须一并吊销。禁用期间它被 accounts.disabledAt IS NULL 挡住，
+      // 但只删会话不吊销凭证的话，账号恢复那一刻旧 token 就原样复活了——
+      // 攻击者不用重新认证，而管理员以为「禁用」已经切断了他的访问。
+      // 只吊销没吊销过的，保留首次吊销时间供审计。
+      // agent_tokens 表在凭证分支才引入，这里按表存在与否决定是否执行。
+      const hasTokens = store.db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'agent_tokens'").get();
+      if (hasTokens) store.db.prepare('UPDATE agent_tokens SET revokedAt = ? WHERE handle = ? AND revokedAt IS NULL').run(now.toISOString(), found);
+    }
     return { handle: found, disabled };
   });
 }

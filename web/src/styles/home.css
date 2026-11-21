@@ -237,6 +237,9 @@ select:hover { border-color: #cfc7bc; }
 .post-card:hover .post-title a { color: var(--red); }
 .post-rate { color: var(--red); font-size: 17px; font-weight: 500; line-height: 1.4; }
 .post-summary { display: -webkit-box; margin-top: 2px; color: var(--text-2); font-size: 14px; line-height: 1.7; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
+/* 驳回理由：只在作者自己的列表里出现。和摘要不同，它在移动端**不隐藏**——
+   摘要可以省，但「为什么没通过」是作者最需要看到的一句话。 */
+.post-review-reason { margin-top: 6px; padding: 6px 10px; border-left: 3px solid var(--warn, #c98a00); border-radius: 4px; background: color-mix(in srgb, var(--warn, #c98a00) 8%, transparent); color: var(--text-2); font-size: 13px; line-height: 1.6; }
 .post-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; margin-top: auto; padding-top: 4px; }
 .post-side { display: inline-flex; align-items: center; gap: 12px; margin-left: auto; color: var(--text-3); font-size: 13px; white-space: nowrap; }
 .post-source { max-width: 12em; color: var(--text-2); overflow: hidden; text-overflow: ellipsis; transition: color 180ms var(--ease); }
@@ -342,6 +345,7 @@ a.post-source:hover { color: var(--red); }
   .post-title { margin-bottom: 4px; font-size: 16px; }
   .post-rate { margin-bottom: 5px; font-size: 15px; }
   .post-summary { display: none; }
+  .post-review-reason { grid-column: 2; }
   .post-foot { grid-column: 1 / -1; gap: 6px 8px; margin-top: 8px; padding-top: 0; }
   .post-foot .vote-ratio, .post-foot .post-source { display: none; }
   .post-side { gap: 8px; }

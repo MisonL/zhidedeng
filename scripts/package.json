@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "zdd": "node --experimental-strip-types zdd.ts"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

@@ -5,11 +5,21 @@ export const API_ROUTES = {
   login: { method: 'POST', path: '/api/auth/login' },
   logout: { method: 'POST', path: '/api/auth/logout' },
   changePassword: { method: 'POST', path: '/api/auth/password' },
+  createAgentToken: { method: 'POST', path: '/api/account/agent-tokens' },
+  getAgentTokens: { method: 'GET', path: '/api/account/agent-tokens' },
+  revokeAgentToken: { method: 'DELETE', path: '/api/account/agent-tokens/:id' },
+  createAgentStation: { method: 'POST', path: '/api/agent/stations' },
+  createAgentPost: { method: 'POST', path: '/api/agent/posts' },
+  createAgentModel: { method: 'POST', path: '/api/agent/models' },
+  suggestModel: { method: 'POST', path: '/api/models/suggest' },
+  suggestStation: { method: 'POST', path: '/api/stations/suggest' },
+  getAgentStatus: { method: 'GET', path: '/api/agent/status' },
   getMe: { method: 'GET', path: '/api/me' },
   updateMe: { method: 'PATCH', path: '/api/me' },
   checkIn: { method: 'POST', path: '/api/me/checkin' },
   getMyFavorites: { method: 'GET', path: '/api/me/favorites' },
   getMyPosts: { method: 'GET', path: '/api/me/posts' },
+  getMySubmissions: { method: 'GET', path: '/api/me/submissions' },
   getVendors: { method: 'GET', path: '/api/vendors' },
   getModels: { method: 'GET', path: '/api/models' },
   getModel: { method: 'GET', path: '/api/models/:slug' },
@@ -26,8 +36,11 @@ export const API_ROUTES = {
   getBanners: { method: 'GET', path: '/api/banners' },
   search: { method: 'GET', path: '/api/search' },
   getHotSearches: { method: 'GET', path: '/api/hot-searches' },
+  createInviteCode: { method: 'POST', path: '/api/admin/invite-codes' },
+  getInviteCodes: { method: 'GET', path: '/api/admin/invite-codes' },
+  revokeInviteCode: { method: 'POST', path: '/api/admin/invite-codes/:id/revoke' },
 } as const satisfies Record<keyof ApiContracts, {
-  method: 'GET' | 'PATCH' | 'POST' | 'PUT';
+  method: 'GET' | 'PATCH' | 'POST' | 'PUT' | 'DELETE';
   path: `/api/${string}`;
 }>;
 

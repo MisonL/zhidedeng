@@ -163,7 +163,10 @@ textarea { display: block; resize: vertical; line-height: 1.6; }
 .me-stats dd { color: var(--ink); font-size: 20px; font-weight: 700; }
 .tabs-page { margin: 0 -12px 4px; border-bottom: 1px solid var(--line); }
 .settings-form { max-width: 480px; }
-.settings-password { margin-top: 28px; padding-top: 4px; border-top: 1px solid var(--line); }
+.settings-password, .settings-agent-tokens { margin-top: 28px; padding-top: 4px; border-top: 1px solid var(--line); }
+.agent-token-issued { max-width: 480px; margin-block: 16px; padding: 12px; border: 1px solid var(--line); border-radius: var(--radius-small); background: var(--surface-warm); }
+.agent-token-issued input { font-family: var(--font-num); }
+.agent-token-table { min-width: 720px; }
 .auth-page { max-width: 440px; width: 100%; margin-inline: auto; }
 .auth-page .submit-btn { width: 100%; }
 .auth-switch { margin-top: 14px; text-align: center; }
@@ -176,7 +179,7 @@ textarea { display: block; resize: vertical; line-height: 1.6; }
 .docs-route { white-space: nowrap; }
 .method { display: inline-block; min-width: 50px; margin-right: 8px; padding: 0 5px; border-radius: 3px; color: #fff; font: 700 11px/18px var(--font-num); text-align: center; }
 .method-get { background: #2f7d6b; }
-.method-post { background: var(--red); }
+.method-post, .method-delete { background: var(--red); }
 .method-put { background: #d9722b; }
 .method-patch { background: #7a4fc9; }
 .docs-params { color: var(--text-2); font-size: 12px; }

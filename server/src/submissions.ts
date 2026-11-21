@@ -1,0 +1,985 @@
+import { createHash, randomUUID } from 'node:crypto';
+import { z } from 'zod';
+import type { AdminBatchSubmitRequest, AdminBatchSubmitResponse, AdminSubmissionStateResponse, SubmissionChannel, SubmissionKind, SubmissionRecord, SubmissionStatus } from '@zhidedeng/shared';
+import { feishuHostnameKey, STATION_SLUG_MAX, stationSlugBase, stationSlugSuffix } from '@zhidedeng/shared';
+import { adminSlug, httpUrl, modelSchema, postSchema, stationSchema, text } from '@zhidedeng/shared/submission';
+
+import type { SqlRow, SqlValue, StationRecord, Store } from './database.ts';
+import { ApiError, isDatabaseBusyError } from './errors.ts';
+
+const submissionKind = z.enum(['station', 'model', 'post']);
+const submissionChannel = z.enum(['feishu', 'agent', 'web']);
+const submissionAction = z.enum(['upsert', 'remove']);
+const submissionStatus = z.enum(['pending', 'approved', 'rejected', 'superseded']);
+const sourceByChannel = { agent: 'agent', feishu: 'submission', web: 'user' } as const;
+const batchIdentifier = z.string().trim().min(1).max(200);
+
+export const submissionQuerySchema = z.strictObject({
+  status: submissionStatus.optional(),
+  kind: submissionKind.optional(),
+  batchId: batchIdentifier.optional(),
+  page: z.coerce.number().int().min(1).max(1_000_000).default(1),
+  pageSize: z.coerce.number().int().min(1).transform(size => Math.min(size, 50)).default(20),
+});
+export const submissionReviewSchema = z.strictObject({
+  status: z.enum(['approved', 'rejected']),
+  reason: z.string().trim().max(1000).optional(),
+});
+export const submissionBatchReviewSchema = z.union([
+  submissionReviewSchema.extend({ ids: z.array(z.string().trim().min(1).max(200)).min(1).max(100) }),
+  submissionReviewSchema.extend({ batchId: batchIdentifier }),
+]);
+
+// 站内发帖的表单结构：与飞书投稿不同，作者直接给标题、摘要、正文。
+const webPostSchema = z.strictObject({
+  kind: z.enum(['deal', 'review', 'community', 'guide']),
+  title: z.string().min(1), summary: z.string().min(1), body: z.string().min(1),
+  stationSlug: z.string().nullish(), modelSlug: z.string().nullish(),
+});
+const submissionFields = {
+  kind: submissionKind,
+  originKey: z.string().min(1).max(253),
+  payload: z.unknown(),
+  actorHandle: text(200).nullish(),
+  action: submissionAction.default('upsert'),
+};
+export const submissionBatchSchema = z.strictObject({
+  channel: submissionChannel,
+  batchId: batchIdentifier.optional(),
+  items: z.array(z.object(submissionFields)).max(500),
+});
+const enqueueSchema = z.object({
+  ...submissionFields,
+  channel: submissionChannel,
+  batchId: batchIdentifier.nullish(),
+  ip: z.string().min(1).max(100),
+  now: z.date(),
+}).refine(input => input.action !== 'remove' || input.kind === 'station', '只有站点支持下架');
+export { postSchema, stationSchema };
+const stationUrlSchema = z.object({ url: httpUrl });
+const removalSchema = z.object({ slug: z.string().min(1).max(200), submissionId: batchIdentifier });
+
+export function parseSubmissionInput<T>(schema: z.ZodType<T>, input: unknown): T {
+  const result = schema.safeParse(input);
+  if (!result.success) {
+    const issue = result.error.issues[0];
+    const field = issue.code === 'unrecognized_keys' ? [...issue.path, ...issue.keys].join('.') : issue.path.join('.');
+    throw new ApiError(400, 'INVALID_INPUT', `投稿参数无效：${field}: ${issue.message}`);
+  }
+  return result.data;
+}
+
+const parse = parseSubmissionInput;
+
+function submissionRecord(row: SqlRow): SubmissionRecord {
+  return {
+    id: row.id as string, kind: row.kind as SubmissionKind, channel: row.channel as SubmissionChannel,
+    originKey: row.originKey as string, payload: JSON.parse(row.payload as string),
+    batchId: row.batchId as string | null, action: row.action as SubmissionRecord['action'],
+    actorHandle: row.actorHandle as string | null, status: row.status as SubmissionStatus,
+    reason: row.reason as string | null, createdAt: row.createdAt as string, reviewedAt: row.reviewedAt as string | null,
+  };
+}
+
+/** 站点身份由实际网址决定；下架按 slug 查目标，不信任客户端给的 key。 */
+/**
+ * 站点身份：URL 的 hostname 归一后的小写形式，去掉末尾的点。
+ *
+ * 不做这一步的话 `api.example.com` 与 `api.example.com.`（FQDN 绝对形式，浏览器和
+ * curl 都能发）是两个不同的 originKey：去重认不出是同一站、单域名待审配额各算一份，
+ * 一个域名就能把 2 条待审撑成 4 条。IPv6 字面量在 URL 里带方括号，一并去掉。
+ */
+function normalizeStationOriginKey(value: string): string {
+  const bare = value.trim().toLowerCase().replace(/^\[|\]$/g, '').replace(/\.+$/, '');
+  return bare;
+}
+
+function submissionOriginKey(store: Store, input: {
+  kind: SubmissionKind; action: SubmissionRecord['action']; payload: unknown; originKey: string;
+}): string {
+  if (input.kind !== 'station') return input.originKey;
+  if (input.action === 'remove') {
+    const { slug } = parse(removalSchema, input.payload);
+    const station = store.get('station', slug);
+    //演示站 url是 null（种子），直接 parse(httpUrl, station.url)会抛一句管理员看不懂的
+    //「expected string, received null」。这里保留入队（审核期才拒绝，契约不变），
+    //但没有 url时退回客户端给的 originKey，让 originKey照常算出来。
+    // 不存在的目标只用规范化的客户端 hostname 检查冲突，审核时按幂等下架处理。
+    const url = station?.url ? parse(httpUrl, station.url) : parse(httpUrl, `https://${input.originKey}`);
+    return normalizeStationOriginKey(new URL(url).hostname);
+  }
+  return normalizeStationOriginKey(new URL(parse(stationUrlSchema, input.payload).url).hostname);
+}
+
+function assertBatchChannel(store: Store, batchId: string | null | undefined, channel: SubmissionChannel): void {
+  if (batchId === null || batchId === undefined) return;
+  const conflict = store.db.prepare('SELECT channel FROM submissions WHERE batchId = ? AND channel <> ? LIMIT 1').get(batchId, channel);
+  if (conflict) throw new ApiError(409, 'BATCH_CHANNEL_MISMATCH', `批次 ${batchId} 属于 ${String(conflict.channel)} 渠道，不能混入 ${channel} 投稿`);
+}
+
+function assertBatchOpen(store: Store, batchId: string | null | undefined): void {
+  if (batchId === null || batchId === undefined) return;
+  // 还有待审条目，说明这一批还没审完，继续追加是正常的重试/续块。
+  if (store.db.prepare("SELECT 1 FROM submissions WHERE batchId = ? AND status = 'pending' LIMIT 1").get(batchId)) return;
+  // 自动通过的分块会把每条立即置为 approved，此时批次其实还在进行中；
+  // 若把它们当成「已审核」，开启自动通过后超过一块的同步就必然失败。
+  const reviewed = store.db.prepare("SELECT 1 FROM submissions WHERE batchId = ? AND NOT (status = 'approved' AND autoApproved = 1) LIMIT 1")
+    .get(batchId);
+  if (reviewed) throw new ApiError(409, 'BATCH_ALREADY_REVIEWED', '批次已审核完成，不能追加新条目');
+}
+
+const AUTO_APPROVE_KEY = 'submissions.autoApprove';
+/** 给管理员展示的审核原因；批次状态由 autoApproved 元数据判断。 */
+const AUTO_APPROVE_REASON = '自动通过';
+
+/** 自动通过开关。管理员可随时切换，默认关闭（所有投稿都要人工审）。 */
+export function autoApproveEnabled(store: Store): boolean {
+  return store.db.prepare('SELECT value FROM settings WHERE key = ?').get(AUTO_APPROVE_KEY)?.value === 'true';
+}
+
+export function setAutoApprove(store: Store, enabled: boolean, now: Date): boolean {
+  return store.transaction(() => {
+    store.db.prepare('INSERT INTO settings (key, value, updatedAt) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updatedAt = excluded.updatedAt')
+      .run(AUTO_APPROVE_KEY, String(enabled), now.toISOString());
+    return enabled;
+  });
+}
+
+/** 全站待审队列上限。放在统一入队口，三个渠道共用：
+ *  只挡住 agent 通道时，web 通道照样能把队列灌满，Agent 投稿被 409 卡死，
+ *  而灌满它的成本只是十来个免费账号。 */
+export const GLOBAL_PENDING = 200;
+
+/**
+ * 入队。开启自动通过时只直接物化 upsert，下架始终等待人工审核；
+ * 校验不通过则不入队也不上站，直接 400，不会留下需要清理的脏记录。
+ */
+export function enqueueSubmission(store: Store, input: {
+  kind: SubmissionKind;
+  channel: SubmissionChannel;
+  originKey: string;
+  batchId?: string | null;
+  action?: SubmissionRecord['action'];
+  payload: unknown;
+  actorHandle?: string | null;
+  ip: string;
+  now: Date;
+}, options: {
+  pendingOnly?: boolean;
+  /**
+   * 是否套用全站待审熔断。默认套用。
+   * 管理端批次（飞书全量导入）必须显式关掉：一次同步就可能超过 200 条，
+   * 而它本身已是受信通道，不应该被面向用户自助投稿的闸门拦住。
+   */
+  globalPendingBreaker?: boolean;
+  deduplicateByActor?: boolean;
+  // 在查重之后、插入之前执行，复用本函数的 BEGIN IMMEDIATE，不能另开事务。
+  beforeInsert?: () => void;
+  /**
+   * 命中幂等去重时的回调。调用方可以退掉常规额度、改记到单独的宽松配额上：
+   * 重试不该扣光额度，无限探测又必须被限住。
+   */
+  onDeduplicated?: () => void;
+} = {}): { submission: SubmissionRecord; deduplicated: boolean; autoApproved: boolean } {
+  const validated = parse(enqueueSchema, input);
+  // 自动通过时先校验 payload 格式，避免把一条注定审核失败的记录写进队列。
+  // 站内发帖的表单结构与飞书投稿不同，按渠道分开校验。
+  if (autoApproveEnabled(store)) validatePayload(store, validated.kind, validated.payload, validated.action, validated.channel);
+  let payload: string | undefined;
+  try {
+    payload = JSON.stringify(validated.payload);
+  } catch {
+    throw new ApiError(400, 'INVALID_INPUT', '投稿内容不是有效 JSON');
+  }
+  if (payload === undefined) throw new ApiError(400, 'INVALID_INPUT', '投稿内容不是有效 JSON');
+  const serialized = payload;
+  const parsedPayload: unknown = JSON.parse(serialized);
+  const payloadHash = createHash('sha256').update(serialized).digest('hex');
+
+  // 查重、插入和（可选）自动物化一起锁定，避免并发下重复入队或半途失败留下脏记录。
+  return store.transaction(() => {
+    assertBatchChannel(store, validated.batchId, validated.channel);
+    assertBatchOpen(store, validated.batchId);
+    const originKey = submissionOriginKey(store, { ...validated, payload: parsedPayload });
+    const auto = !options.pendingOnly && autoApproveEnabled(store) && validated.action === 'upsert';
+    if (auto || validated.action === 'remove') validatePayload(store, validated.kind, parsedPayload, validated.action, validated.channel);
+    // 自动通过下相同内容已上站就不再重复物化；人工审核下仍只按 pending 去重。
+    const scope = auto ? "AND status IN ('pending','approved')" : "AND status = 'pending'";
+    const actorScope = options.deduplicateByActor ? 'AND channel = ? AND actorHandle IS ?' : '';
+    // 去重不带 batchId：带上它等于「只有同一批次内才幂等」，而同步脚本每次都用新的
+    // 随机 batchId，于是重跑一遍就把已成功的条目再插一遍（实测两次同步 2 行 1 实体）。
+    // 原本担心「新批次借用旧批次的 id 导致一键审核漏掉条目」——那说的是 pending：
+    // 人工审核态下 scope 仍限定 status='pending'，跨批次复用 pending 行会让新批次的
+    // 一键审核漏掉它，所以这种情况要继续产生新行。自动通过态没有「待审」概念，
+    // 已上站就是已上站，直接幂等命中。
+    const crossBatch = auto && validated.batchId !== null && validated.batchId !== undefined;
+    const existing = crossBatch
+      ? store.db.prepare(`SELECT * FROM submissions WHERE kind = ? AND originKey = ? AND action = ? AND payloadHash = ? AND batchId IS NOT NULL ${actorScope} ${scope} ORDER BY createdAt DESC, rowid DESC LIMIT 1`)
+        .get(validated.kind, originKey, validated.action, payloadHash,
+          ...(options.deduplicateByActor ? [validated.channel, validated.actorHandle ?? null] : []))
+      : store.db.prepare(`SELECT * FROM submissions WHERE kind = ? AND originKey = ? AND action = ? AND payloadHash = ? AND batchId IS ? ${actorScope} ${scope} ORDER BY createdAt DESC, rowid DESC LIMIT 1`)
+        .get(validated.kind, originKey, validated.action, payloadHash, validated.batchId ?? null,
+          ...(options.deduplicateByActor ? [validated.channel, validated.actorHandle ?? null] : []));
+    // 模型是全局唯一的：同一个 slug 不管从哪个通道来，都是同一个模型。
+    // 各通道用自己的 originKey 的话，Agent 和站内各提一条同 slug 就会产生两条待审——
+    // 先审的那条建成，后审的必然 MODEL_EXISTS 落 rejected，审核员白审一次；
+    // 等待期间那条还占着提交方的待审配额。
+    // 放在幂等判定之前查会误伤「完全相同的重复提交」：那种应该幂等命中而不是报错。
+    if (!existing && validated.kind === 'model' && validated.action === 'upsert') {
+      const { slug } = parse(modelSchema, parsedPayload);
+      const pendingSame = store.db.prepare(
+        "SELECT id FROM submissions WHERE kind = 'model' AND status = 'pending' AND json_extract(payload, '$.slug') = ? LIMIT 1",
+      ).get(slug);
+      if (pendingSame) throw new ApiError(409, 'PENDING_DUPLICATE', `模型 ${slug} 已有待审的投稿，请等审核后再提交`);
+    }
+    const reviewedAt = validated.now.toISOString();
+    // 飞书 www/裸域切换会更新同一实体，版本应取实际实体当前 URL 的 hostname。
+    const currentOriginKey = auto && existing?.status === 'approved' && validated.kind === 'station'
+      ? hostnameOf(findStation(store, submissionRecord(existing), parse(stationUrlSchema, parsedPayload).url)?.url ?? null)
+      : originKey;
+    const latest = auto && existing?.status === 'approved' && currentOriginKey !== null
+      ? store.db.prepare("SELECT id FROM submissions WHERE kind = ? AND originKey = ? AND status = 'approved' ORDER BY reviewedAt DESC, rowid DESC LIMIT 1").get(validated.kind, currentOriginKey)
+      : undefined;
+    // approved 只在仍是最新版本时去重，否则需要重新物化本次提交的内容。
+    if (existing && (existing.status === 'pending' || latest?.id === existing.id)) {
+      const submission = submissionRecord(existing);
+      if (auto && submission.status === 'pending') {
+        materialize(store, submission, reviewedAt);
+        store.db.prepare("UPDATE submissions SET status = 'approved', autoApproved = 1, reason = ?, reviewedAt = ? WHERE id = ?").run(AUTO_APPROVE_REASON, reviewedAt, submission.id);
+        supersedePending(store, submission, reviewedAt);
+        return { submission: { ...submission, status: 'approved', reason: AUTO_APPROVE_REASON, reviewedAt }, deduplicated: true, autoApproved: true };
+      }
+      options.onDeduplicated?.();
+      return { submission, deduplicated: true, autoApproved: false };
+    }
+    // 全站熔断：与渠道无关。顺序是「幂等判定之后、beforeInsert 之前」——
+    // 重复提交不该被这里挡住；同时必须在配额预占之前，否则队列已满时
+    // Agent 拿到的错误会来自它自己账号的配额，反而被引导去「改数据」。
+    // 用独立的错误码 QUEUE_FULL：它表示「等管理员审完」，不是「你写错了」。
+    if (options.globalPendingBreaker !== false) {
+      // 只数**用户侧**渠道的待审（agent / web），不数飞书批次。
+      // 原因：管理端批次入队天然会一次超过 200 条（一次全量同步几百个站点），
+      // 而它自己不受熔断约束。若熔断数全渠道，同步刚跑完就把所有用户挡在
+      // QUEUE_FULL 外面，要人工审完几百条才恢复——实测 500 条同步后普通用户
+      // 立刻投稿失败。飞书队列本就是管理员按批次推进的，不需要对用户侧负责。
+      const pending = Number(store.db.prepare(
+        "SELECT count(*) AS count FROM submissions WHERE status = 'pending' AND channel IN ('agent','web')",
+      ).get()!.count);
+      if (pending >= GLOBAL_PENDING) {
+        throw new ApiError(409, 'QUEUE_FULL', `全站待审队列已满（${GLOBAL_PENDING} 条），请稍后再提交，不需要修改内容`);
+      }
+    }
+    options.beforeInsert?.();
+    const submission: SubmissionRecord = {
+      id: randomUUID(), kind: validated.kind, channel: validated.channel, originKey,
+      batchId: validated.batchId ?? null, action: validated.action,
+      payload: parsedPayload, actorHandle: validated.actorHandle ?? null,
+      status: auto ? 'approved' : 'pending', reason: auto ? AUTO_APPROVE_REASON : null,
+      reviewedAt: auto ? reviewedAt : null, createdAt: reviewedAt,
+    };
+    // 物化失败时整条记录随事务回滚，不会留下 approved 但没上站的幽灵。
+    if (auto) materialize(store, submission, reviewedAt);
+    store.db.prepare('INSERT INTO submissions (id, kind, channel, originKey, batchId, action, autoApproved, payload, payloadHash, actorHandle, ip, status, reason, reviewedAt, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+      .run(submission.id, submission.kind, submission.channel, submission.originKey, submission.batchId, submission.action, auto ? 1 : 0, serialized, payloadHash,
+        submission.actorHandle, validated.ip, submission.status, submission.reason, submission.reviewedAt, submission.createdAt);
+    if (auto) supersedePending(store, submission, reviewedAt);
+    return { submission, deduplicated: false, autoApproved: auto };
+  });
+}
+
+/** 先拒绝批次身份冲突和无版本下架；其余业务校验逐条返回，各自提交事务。 */
+export function enqueueBatch(store: Store, input: AdminBatchSubmitRequest & { ip: string; now: Date }): AdminBatchSubmitResponse {
+  const batch = parse(submissionBatchSchema, { channel: input.channel, batchId: input.batchId, items: input.items });
+  const batchId = batch.batchId ?? randomUUID();
+  if (batch.items.length > 0) {
+    assertBatchChannel(store, batchId, batch.channel);
+    assertBatchOpen(store, batchId);
+  }
+  const stationOrigins = new Map<string, { index: number; action: SubmissionRecord['action']; slug?: string; removable: boolean }[]>();
+  for (const [index, item] of batch.items.entries()) {
+    if (item.kind !== 'station') continue;
+    const hostname = submissionOriginKey(store, item);
+    // 飞书会把 www 与裸域名物化到同一站点，冲突检测必须沿用这个分组。
+    const key = batch.channel === 'feishu' ? feishuHostnameKey(hostname) : hostname;
+    const action = item.action ?? 'upsert';
+    const removal = action === 'remove' ? parse(removalSchema, item.payload) : undefined;
+    const slug = removal?.slug;
+    const target = slug ? store.get('station', slug) : undefined;
+    // 重试时部分实体可能已经下架；只沿用属于该 hostname 的真实 approved 版本。
+    const version = removal
+      ? store.db.prepare("SELECT originKey FROM submissions WHERE id = ? AND kind = 'station' AND action = 'upsert' AND status = 'approved'").get(removal.submissionId)
+      : undefined;
+    const versionKey = version ? (batch.channel === 'feishu' ? feishuHostnameKey(version.originKey as string) : version.originKey) : undefined;
+    const intent = { index: index + 1, action, slug, removable: target?.source === 'submission' || versionKey === key };
+    const previous = stationOrigins.get(key) ?? [];
+    const conflict = previous.find(existing => !(existing.action === 'remove' && action === 'remove'
+      && existing.removable && intent.removable && existing.slug !== slug));
+    if (conflict) throw new ApiError(400, 'INVALID_INPUT', `第 ${conflict.index} 条与第 ${index + 1} 条站点 hostname 冲突：${key}`);
+    previous.push(intent);
+    stationOrigins.set(key, previous);
+  }
+  const results: AdminBatchSubmitResponse['results'] = batch.items.map(item => {
+    try {
+      validatePayload(store, item.kind, item.payload, item.action ?? 'upsert', batch.channel);
+      // 管理端批次是受信通道，且一次同步天然会超过 200 条，不套用户侧的熔断。
+      const { submission, deduplicated, autoApproved } = enqueueSubmission(store, { ...item, batchId, channel: batch.channel, ip: input.ip, now: input.now }, { globalPendingBreaker: false });
+      // 返回请求里的 key 以便逐条对账；记录里的站点 key 已由服务端规范化。
+      return { originKey: item.originKey, kind: item.kind, id: submission.id, status: submission.status, deduplicated, autoApproved };
+    } catch (error) {
+      // 另一个写入方可能在预检后认领新 batchId，事务内发现时仍返回整批 409。
+      if (error instanceof ApiError && (error.code === 'BATCH_CHANNEL_MISMATCH' || error.code === 'BATCH_ALREADY_REVIEWED')) throw error;
+      if (error instanceof ApiError) return { originKey: item.originKey, kind: item.kind, error: { code: error.code, message: error.message } };
+      throw error;
+    }
+  });
+  return { batchId, results };
+}
+
+export function listSubmissions(store: Store, input: {
+  status?: SubmissionStatus;
+  kind?: SubmissionKind;
+  batchId?: string;
+  page?: number;
+  pageSize?: number;
+}) {
+  const { status, kind, batchId, page, pageSize } = parse(submissionQuerySchema, input);
+  const filters: string[] = [];
+  const params: SqlValue[] = [];
+  if (status) { filters.push('status = ?'); params.push(status); }
+  if (kind) { filters.push('kind = ?'); params.push(kind); }
+  if (batchId) { filters.push('batchId = ?'); params.push(batchId); }
+  const where = filters.length ? ` WHERE ${filters.join(' AND ')}` : '';
+  // 两条语句要在同一个读快照里：否则中间插入一条，total 与 items 就对不上，
+  // 管理端会显示「共 51 条」却只列出 50 条。
+  //
+  // 用 DEFERRED 而不是 store.transaction 的 BEGIN IMMEDIATE：这是纯读操作，
+  // 拿写锁会让「有人在写」时列表接口一起 503——只读查询不该排队等写锁。
+  // DEFERRED 在第一条 SELECT 时开启读事务，两条查询看到同一个快照。
+  // 已经在外层事务里（调用方自己开的事务）就不要再开一个：SQLite 不允许嵌套
+  // 裸 BEGIN。外层事务本身就是同一个快照，直接读即可。
+  const read = () => {
+    const total = Number(store.db.prepare(`SELECT COUNT(*) AS total FROM submissions${where}`).get(...params)!.total);
+    // 新的排前面。同一站点常有多个待审版本，管理员按列表从上往下审：
+    // 升序时先遇到旧版本，通过后新版本被标成 superseded——站点停在旧数据上。
+    // 实测：先后提交「第一版·旧」「第二版·新」，升序审核的最终站点名是「第一版·旧」。
+    // 倒序则先看到最新版本，符合「我要的是最新状态」的直觉。
+    const rows = store.db.prepare(`SELECT * FROM submissions${where} ORDER BY createdAt DESC, rowid DESC LIMIT ? OFFSET ?`)
+      .all(...params, pageSize, (page - 1) * pageSize);
+    return { items: rows.map(submissionRecord), total, page, pageSize };
+  };
+  if (store.inTransaction()) return read();
+  store.db.prepare('BEGIN DEFERRED').run();
+  try {
+    return read();
+  } finally {
+    store.db.prepare('COMMIT').run();
+  }
+}
+
+/** 从站点 url 取归一化 hostname，用于判断某个 slug 是不是同一个站点。 */
+export function hostnameOf(url: string | null): string | null {
+  if (!url) return null;
+  // 去 FQDN 尾点：`example.com.` 与 `example.com` 必须落到同一条实体。
+  // 与 shared 的 feishuHostnameKey、同步脚本 normalizeUrl 保持同一归一。
+  try { return new URL(url).hostname.toLowerCase().replace(/\.+$/, ''); } catch { return null; }
+}
+
+/**
+ * hostname + 路径 + 查询串，用作「整条地址」的认领键。
+ *
+ * 只按 hostname 认领在正常数据下够了，但历史上可能存在**同 hostname 不同路径**的
+ * 两条站（早先分组认领会改写 url、全量导入按给定 slug 直接写，都能造出来）。
+ * 那时按 hostname 取 rowid 第一条会把 url 改写成投稿里的路径，而另一条本来就是这个
+ * url——又变成两条在线站同 url。先比整条地址能把这种情况区分开。
+ * 末尾斜杠与大小写不参与比较，避免 `/a` 与 `/a/` 被当成两条。
+ */
+function stationUrlKey(url: string | null): string | null {
+  if (!url) return null;
+  try {
+    const parsed = new URL(url);
+    const path = parsed.pathname.replace(/\/+$/, '') || '/';
+    const host = parsed.hostname.toLowerCase().replace(/\.+$/, '');
+    return `${host}${parsed.port ? `:${parsed.port}` : ''}${path}${parsed.search}`;
+  } catch { return null; }
+}
+
+/** 物化和版本查重沿用同一首次认领规则，只有飞书批次归并 www。 */
+/**
+ * 按 hostname 找站点。
+ * hostname 是从 url 派生的，没有独立索引，所以这里每次都会全表扫描并解析 JSON。
+ * 单条审核无所谓；批量审核 n 条、库里有 m 个站点时是 O(n·m)——实测 600 条 + 大量站点
+ * 时一个批次要十几秒。当前站点规模（几十个）下无感，若将来批量审核变慢，先从这里下手：
+ * 为 entities 增加 hostname 列并建索引，或让批次审核复用一个可增量的索引。
+ */
+function findStation(store: Store, submission: Pick<SubmissionRecord, 'channel' | 'originKey'>, url: string): StationRecord | undefined {
+  const hostname = hostnameOf(url);
+  if (hostname === null) return undefined;
+  // 只看 channel，不看 batchId：www/裸域 分组是**飞书渠道的语义**，跟这批记录
+  // 有没有批次号无关。带上 batchId 会让「管理端单条空批次投稿」绕过分组，
+  // 于是同一站点的 www 与裸域写法被判成两个站。文章侧已经完全不看 batchId 了。
+  const grouped = submission.channel === 'feishu'
+    && feishuHostnameKey(submission.originKey) === feishuHostnameKey(hostname);
+  const index = stationHostIndex(store);
+  // 认领优先级：**在线精确 > 已下架精确 > 在线分组 > 已下架分组**。
+  //
+  // 为什么「在线」排在「已下架」前面：库里可能已经有两条同 url 的实体（历史遗留
+  // ——早先按分组认领会改写 url，全量导入也按给定 slug 直接写，都能造出来）。
+  // 只下架了其中一条时，若让已下架那条按 rowid 先到先得，同步会把它复活，
+  // 于是又变成「两条在线站同 url」——正是这几个提交要消灭的状态。在线那条才是
+  // 现在给人看的，必须先更新它。
+  //
+  // 为什么「精确」排在「分组」前面：线上同时有 `x.com` 与 `www.x.com` 两条站时，
+  // 按分组取 rowid 第一条会认领更早的 `www.x.com` 并改写它的 url，同样制造
+  // 「同 url 双在线」+「另一条再也不被同步」。
+  //
+  // 为什么已下架也要参与：站点身份看 hostname，已下架的站被同步带回来时必须还是
+  // 同一个 slug，否则挂在旧 slug 上的文章与互动全成孤儿。只看在线的实测后果是
+  // 「在线 www.n + 已下架 n，投裸域 n」会先命中在线的 www.n 并把它的 url 改写成
+  // n，此后恢复 n 就又是两条在线同 url。
+  const urlKey = stationUrlKey(url);
+  return (urlKey === null ? undefined : index.byUrl.get(urlKey))
+    ?? (urlKey === null ? undefined : index.allByUrl.get(urlKey))
+    ?? index.byHost.get(hostname)
+    ?? index.allByHost.get(hostname)
+    ?? (grouped
+      ? index.byGroupedHost.get(feishuHostnameKey(hostname))
+        ?? index.allByGroupedHost.get(feishuHostnameKey(hostname))
+      : undefined);
+}
+
+/**
+ * hostname → 站点 的派生索引，按 Store 版本号缓存。
+ *
+ * 原来这里是 `store.all('station').find(...)`：每调一次就把整张站点表读出来、
+ * 逐条 JSON.parse 再解析 URL。单条审核无所谓，但批量审核是 n 条 × m 个站点——
+ * 实测 500 条审核要 28.7 秒，期间 Node 单线程被完全占住，连 /api/health 都要等
+ * 21.8 秒。缓存之后这个循环变成 O(n)。
+ *
+ * 失效靠 `store.entityVersion`：任何 put 都会 +1。同一条站点在批次里被更新过，
+ * 下一次查找就会重建索引——不会读到旧站点。索引里保留「第一个出现的」，与原先
+ * `find` 的语义一致。
+ *
+ * **不能只看版本号**：批量审核每通过一条就 put 一个站点，版本号随之 +1。
+ * 若版本一变就重建，n 条审核 = n 次全表扫描，整批退化成 O(n·m)——
+ * 实测 400 条时每百条从 1.1s 涨到 2.5s。所以额外核对一次站点集合的指纹
+ * （id + url 的条数与哈希）：新增站点会改变它，必然重建；
+ * 而「改了别的字段（名称、报价、描述）」不影响 hostname→slug 的映射，可以复用。
+ * 代价是每次查找多一次 O(m) 的指纹计算，m 是站点数（当前几十个）。
+ */
+function stationHostIndex(store: Store): Pick<StationHostIndex, 'version' | 'byHost' | 'byGroupedHost' | 'byUrl' | 'allByUrl' | 'allByHost' | 'allByGroupedHost'> {
+  const cached = stationIndexCache.get(store);
+  if (cached && cached.version === store.entityVersion) return cached;
+  // 先用一条**不做 JSON.parse** 的轻查询算指纹：绝大多数审核是在更新已有站点，
+  // 站点集合没变，指纹相同就直接沿用缓存，一条全表 JSON 解析都不该付。
+  // （早先版本在一次扫描里同时算指纹和建表，结果「更新」场景也要把整张站点表
+  // 解析一遍，1000 个站时反而比之前慢 2.4 倍。）
+  const fingerprintRows = store.db.prepare(
+    "SELECT id, json_extract(data,'$.url') AS url, removedAt FROM entities WHERE kind = 'station' ORDER BY rowid",
+  ).all() as unknown as { id: string; url: string | null; removedAt: string | null }[];
+  const hash = createHash('sha1');
+  for (const row of fingerprintRows) {
+    // 只关心「哪些 id 对应哪个 url、是否下架」，名称/描述/报价变了不影响认领。
+    // 这里特意用**原始 url** 而不是归一化后的 hostname：索引里存的是整条站点记录，
+    // `findStation(...)?.url` 这类调用方会读它（见 submissionOriginKey）。
+    // 只哈希 hostname 的话，「hostname 不变、路径变了」时指纹不变，索引里留着旧 url。
+    // 顺序必须是 rowid（见原注释：删除再插回会反转次序），这里已经是 rowid。
+    // 必须 String() 包装：历史脏数据里 url 可能是数字或布尔，`hash.update(123)`
+    // 会抛 ERR_INVALID_ARG_TYPE，把整条审核拖成「非预期错误、停在 pending」。
+    //
+    // 每个字段带长度前缀：只靠分隔符的话，`["a\u0001b", "c"]` 与
+    // `["a", "b\u0001c"]` 会拼出同一串。正常 url 里不可能出现控制字符，
+    // 但指纹错了就是「静默用错索引」，代价很高，加前缀几乎不要钱。
+    const field = (value: unknown) => {
+      // null 与 '' 必须分开：两者 String() 后一样，但 `removedAt=''` 是历史脏数据
+      // 里「没下架」的另一种写法还是「已下架」要看 store 的判定，混在一处会让
+      // 指纹把一次下架吞掉，复用旧索引、把本该下架的重复实体又认领回来。
+      const mark = value == null ? 'N' : 'V';
+      const text = String(value ?? '');
+      return `${mark}${text.length}\u0000${text}`;
+    };
+    hash.update(field(row.id)).update(field(row.url)).update(field(row.removedAt));
+  }
+  const fingerprint = `${fingerprintRows.length}:${hash.digest('hex')}`;
+  if (cached && cached.fingerprint === fingerprint) {
+    // 指纹相同意味着「id / url / 是否下架」逐条一致，六张表必然等价——整份沿用，
+    // 只更新版本号。不要只替换一部分表：那会造成「在线表是旧的、含下架表是新的」
+    // 这种看起来无害、实际靠不住的状态。
+    cached.version = store.entityVersion;
+    return cached;
+  }
+
+  const byHost = new Map<string, StationRecord>();
+  const byGroupedHost = new Map<string, StationRecord>();
+  const byUrl = new Map<string, StationRecord>();
+  const allByHost = new Map<string, StationRecord>();
+  const allByGroupedHost = new Map<string, StationRecord>();
+  const allByUrl = new Map<string, StationRecord>();
+  for (const station of store.allWithRemoved('station')) {
+    const host = hostnameOf(station.url);
+    if (host === null) continue;
+    const grouped = feishuHostnameKey(host);
+    const urlKey = stationUrlKey(station.url);
+    // 「先出现的赢」：与原先 `store.allWithRemoved(...).find(...)` 逐字一致
+    // （顺序都是 rowid，所以组装索引时也必须按 rowid 遍历）。
+    if (!allByHost.has(host)) allByHost.set(host, station);
+    if (!allByGroupedHost.has(grouped)) allByGroupedHost.set(grouped, station);
+    if (urlKey !== null && !allByUrl.has(urlKey)) allByUrl.set(urlKey, station);
+  }
+  for (const station of store.all('station')) {
+    const host = hostnameOf(station.url);
+    if (host === null) continue;
+    if (!byHost.has(host)) byHost.set(host, station);
+    const grouped = feishuHostnameKey(host);
+    if (!byGroupedHost.has(grouped)) byGroupedHost.set(grouped, station);
+    const urlKey = stationUrlKey(station.url);
+    if (urlKey !== null && !byUrl.has(urlKey)) byUrl.set(urlKey, station);
+  }
+  const next = { version: store.entityVersion, fingerprint, byHost, byGroupedHost, byUrl, allByUrl, allByHost, allByGroupedHost };
+  stationIndexCache.set(store, next);
+  // 一次审核内复用：批内新建的站点不会让这条审核反复重建索引。
+  return next;
+}
+
+/** 用 WeakMap 挂在 Store 上，多个 Store（测试）互不干扰，Store 被回收时缓存一起走。 */
+type StationHostIndex = {
+  version: number; fingerprint: string;
+  byHost: Map<string, StationRecord>; byGroupedHost: Map<string, StationRecord>;
+  /** 整条地址（hostname+路径+查询串）→ 站点，用于区分同 hostname 不同路径的历史数据。 */
+  byUrl: Map<string, StationRecord>; allByUrl: Map<string, StationRecord>;
+  /** 含已下架：认领 slug 时要连下架的站一起看（见 findStation）。 */
+  allByHost: Map<string, StationRecord>; allByGroupedHost: Map<string, StationRecord>;
+};
+
+const stationIndexCache = new WeakMap<Store, StationHostIndex>();
+
+/**
+ * 站点 slug：`sub-` 加归一化 hostname 的可读形式。
+ * hostname 超过长度上限、或清洗后与另一个站点撞车时，改用哈希后缀保证唯一——
+ * 否则两个不同站点会写到同一条记录上，后审的覆盖先审的。
+ * 身份一律取 url 的 hostname（不是 originKey），兼容以记录 ID 作为 originKey 的历史投稿，
+ * 同一站点的重复提交仍然落在同一条记录上。
+ * 派生规则来自 shared/slug.ts，飞书只传 hostname，由这里统一分配 slug。
+ */
+function stationSlug(store: Store, url: string | null, originKey: string): string {
+  const hostname = hostnameOf(url);
+  const identity = hostname ?? originKey.trim().toLowerCase();
+  // 先认领：只要已有站点的 hostname 相同，就沿用它的 slug——不管当初落在可读形式
+  // 还是哈希后缀上。否则 base 被别的站占走又释放时，同一站点会在两种 slug 间横跳。
+  //
+  // 已下架的行也要认：软删除保留了实体，就是为了恢复后还是同一个站点。
+  // 只看在线的话，重新上架会被当成全新站点而分配带哈希的 slug，原来挂在
+  // 旧 slug 上的文章与互动记录全部变成孤儿——数据没丢，但再也显示不出来。
+  //
+  // 认领统一由 findStation 做（含已下架、精确优先、在线优先），这里只在
+  // 「没有任何已有站点能认领」时才被调用，负责分配一个新的唯一 slug。
+  // 这里**不再**自己认领。认领（含已下架、精确优先、在线优先）统一由
+  // `findStation` 做，调用方写的是 `mine?.slug ?? stationSlug(...)`；两边各写一遍
+  // 只会在有人改了一边时静默分叉。走到这里就意味着「没有任何已有站点能认领」，
+  // 只剩分配新 slug 这一件事。
+
+  // 分配 slug 时必须把已下架的行也算作「已占用」（用 getWithRemoved）。
+  // 否则两个 hostname 清洗出同一个 base 时（a-b.example.com 与 a.b.example.com 都得到
+  // sub-a-b-example-com），后者的 put 会整行覆盖前者并清掉 removedAt——
+  // 前者数据真的没了，已下架清单里也查不到，无从恢复。
+  const taken = (slug: string) => store.getWithRemoved('station', slug) !== undefined;
+  const base = stationSlugBase(identity);
+  if (base.length <= STATION_SLUG_MAX && !taken(base)) return base;
+  // 撞车或超长：可读前缀加哈希。哈希本身也可能撞上别的站点（例如某个 hostname
+  // 恰好等于 "<别的域名>-<这几位>"），所以继续加盐直到找到空位。
+  for (let salt = 0; salt < 100; salt += 1) {
+    const suffix = stationSlugSuffix(identity, salt);
+    const candidate = `${base.slice(0, STATION_SLUG_MAX - suffix.length - 1)}-${suffix}`;
+    if (!taken(candidate)) return candidate;
+  }
+  throw new ApiError(409, 'SLUG_CONFLICT', '无法为这个站点分配唯一的地址');
+}
+
+export function parseStationPayload(store: Store, input: unknown) {
+  const payload = parse(stationSchema, input);
+  for (const offer of payload.offers) {
+    if (!store.get('model', offer.modelSlug)) throw new ApiError(400, 'INVALID_INPUT', `未知模型：${offer.modelSlug}`);
+  }
+  return payload;
+}
+
+/**
+ * 入队校验与审核复用相同规则，批次中的无效内容逐条返回错误。
+ * 站内发帖的表单结构与飞书投稿不同，按渠道分流。
+ */
+function validatePayload(store: Store, kind: SubmissionKind, payload: unknown, action: SubmissionRecord['action'], channel: SubmissionChannel): void {
+  if (action === 'remove') {
+    if (kind !== 'station') throw new ApiError(400, 'INVALID_INPUT', '只有站点支持下架');
+    parse(removalSchema, payload);
+  } else if (kind === 'model') parse(modelSchema, payload);
+  else if (kind === 'station') parseStationPayload(store, payload);
+  // 站内发帖给的是标题/摘要/正文，不涉及 hostname。
+  else if (channel === 'web') parse(webPostSchema, payload);
+  else parse(postSchema, payload);
+}
+
+/** 下架只允许群友来源，报价和实体共用调用方的审核事务，不另开事务。 */
+type ApprovedUpsert = { id: string; originKey: string; url: string | null };
+
+/** approved的站点 upsert里，最近一次真正写在这个实体上的那条。 */
+function currentUpsertFor(store: Store, station: { url: string | null }, upserts: ApprovedUpsert[]): ApprovedUpsert | undefined {
+  //先按**整条地址**找：同 hostname不同路径是两条站，按分组键找会把 A的版本
+  //当成 B的版本——实测能用 B的 submissionId把 A下架掉，STALE_REMOVAL形同虚设。
+  const wanted = stationUrlKey(station.url);
+  const exact = upserts.find(row => row.url !== null && stationUrlKey(row.url) === wanted);
+  if (exact) return exact;
+  //分组兜底只用于「飞书把 www与裸域当成同一个站、库内只有一条」的场景：
+  //组里有两条在线站时退回分组等于又回到串站，宁可不给版本（下架会报 STALE_REMOVAL）。
+  const key = feishuHostnameKey(hostnameOf(station.url) ?? '');
+  const onlineInGroup = store.all('station').filter(other => {
+    const host = hostnameOf(other.url);
+    return host !== null && feishuHostnameKey(host) === key;
+  });
+  if (onlineInGroup.length !==1) return undefined;
+  return upserts.find(row => feishuHostnameKey(row.originKey) === key);
+}
+
+export function removeStation(store: Store, slug: string, expectedSubmissionId: string, removedAt: string): string | null {
+  const station = store.get('station', slug);
+  if (!station) return null;
+  // 种子和演示数据不能被下架覆盖。其余来源都该能下线：
+  // 飞书同步来的是 submission，Agent 提交的是 agent，
+  // 只认 submission 会让 Agent 自动上架的站点永远删不掉。
+  if (station.source === 'demo') throw new ApiError(409, 'STATION_SOURCE_CONFLICT', '演示数据不能下架');
+  //版本要落在**这个实体**上：同 hostname不同路径是两条站，按分组键找人会把
+  //兄弟站的 approved投稿当成自己的版本，于是「A没有版本」的 STALE_REMOVAL形同虚设。
+  const approved = store.db.prepare("SELECT id, originKey, json_extract(payload, '$.url') AS url FROM submissions WHERE kind = 'station' AND action = 'upsert' AND status = 'approved' ORDER BY reviewedAt DESC, rowid DESC")
+    .all() as unknown as ApprovedUpsert[];
+  const current = currentUpsertFor(store, station, approved);
+  if (!current) {
+    throw new ApiError(409, 'STALE_REMOVAL', `站点 ${slug} 没有可核对的投稿版本记录（多为旧导入数据）。先运行 pnpm backfill:submissions 为存量站点补出版本记录，再下架`);
+  }
+  if (current.id !== expectedSubmissionId) throw new ApiError(409, 'STALE_REMOVAL', '该站点在读取后已被更新，请重新同步');
+  // 软删除而不是真删：站点以自动运行为主，一次误读不该丢整批数据。
+  // 报价保留（它们记的是这个站曾提供过什么），恢复时原样拿回来。
+  // 同一个 slug 再上架时 put 会清掉标记，也就是自动恢复。
+  store.markRemoved('station', slug, removedAt);
+  return slug;
+}
+
+/** 只列出有 approved 飞书 upsert 的 hostname 组，并返回组内全部在线群友站点。 */
+export function submissionState(store: Store): AdminSubmissionStateResponse {
+  const feishuRows = store.db.prepare("SELECT * FROM submissions WHERE kind = 'station' AND channel = 'feishu' AND action = 'upsert' AND status = 'approved' ORDER BY reviewedAt DESC, rowid DESC").all();
+  const feishuHosts = new Set<string>();
+  for (const row of feishuRows) {
+    const submission = submissionRecord(row);
+    const origin = feishuHostnameKey(submission.originKey);
+    // 历史行的 payload 可能是旧格式（比如缺 description）。整条接口因此返回 400，
+    // 同步脚本会把它当失败中止——一条老数据就能让整条同步链路停摆，只能靠人改库。
+    // 这里逐行跳过并记警告：宁可漏掉一个 hostname 的下架判定，也不要全停。
+    const parsedPayload = stationSchema.safeParse(submission.payload);
+    if (!parsedPayload.success) {
+      console.error(`投稿 ${submission.id} 的 payload 格式不符合当前 schema，已跳过：${parsedPayload.error.issues[0]?.message ?? '未知原因'}`);
+      continue;
+    }
+    const hostname = hostnameOf(parsedPayload.data.url);
+    if (hostname !== null && origin === feishuHostnameKey(hostname)) feishuHosts.add(origin);
+  }
+
+  // 移除记录不改变同组其他遗留实体的版本；渠道更新仍会推进组的 upsert 版本。
+  const approvedUpserts = store.db.prepare("SELECT id, originKey FROM submissions WHERE kind = 'station' AND action = 'upsert' AND status = 'approved' ORDER BY reviewedAt DESC, rowid DESC").all();
+  const currentByHost = new Map<string, string>();
+  for (const row of approvedUpserts) {
+    const key = feishuHostnameKey(row.originKey as string);
+    if (!currentByHost.has(key)) currentByHost.set(key, row.id as string);
+  }
+
+  const stations: AdminSubmissionStateResponse['stations'] = [];
+  for (const station of store.all('station')) {
+    // 只排除演示站。原来看 `source === 'submission'`，于是「本来是 agent 站、被飞书
+    // 同 hostname 认领后指标与 source 都保留」的站点永远进不了这张表——飞书里真删掉
+    // 它的时候，自动下架计划清不掉，只能人工去库里翻。
+    // 这里并不会把纯 agent 站卷进来：下面还要求 `feishuHosts.has(key)`，也就是
+    // 飞书确实同步过这个 hostname，那时它的快照就是权威。
+    if (station.source === 'demo') continue;
+    const originKey = hostnameOf(station.url);
+    if (originKey === null) continue;
+    const key = feishuHostnameKey(originKey);
+    const submissionId = currentByHost.get(key);
+    if (!feishuHosts.has(key) || !submissionId) continue;
+    stations.push({ slug: station.slug, submissionId, originKey, url: station.url, name: station.name });
+  }
+  return { stations: stations.sort((a, b) => a.originKey.localeCompare(b.originKey) || a.slug.localeCompare(b.slug)) };
+}
+
+/** 把一条投稿写进 entities。不自己开事务，由调用方决定边界。 */
+function materialize(store: Store, submission: SubmissionRecord, reviewedAt: string): string | undefined {
+  if (submission.action === 'remove') {
+    if (submission.kind !== 'station') throw new ApiError(400, 'INVALID_INPUT', '只有站点支持下架');
+    const { slug, submissionId } = parse(removalSchema, submission.payload);
+    if (removeStation(store, slug, submissionId, reviewedAt) === null) {
+      const reason = '站点已不存在，视为已下架';
+      console.info(`站点 ${slug} ${reason}`);
+      return reason;
+    }
+  } else if (submission.kind === 'model') {
+    const payload = parse(modelSchema, submission.payload);
+    // 提交时厂商是存在的，是之后被删了。这不是这条投稿本身的问题，
+    // 补回厂商再审核就能过，所以用独立错误码，让审核端保持 pending 而不是永久拒绝。
+    if (!store.get('vendor', payload.vendor)) throw new ApiError(400, 'VENDOR_MISSING', `厂商 ${payload.vendor} 不存在，请先恢复该厂商再审核`);
+    // 已存在的模型直接覆盖会静默改写名称和厂商、并清空 tags，与新增接口的 409 不一致。
+    if (store.get('model', payload.slug)) throw new ApiError(409, 'MODEL_EXISTS', `模型 ${payload.slug} 已存在，请拒绝这条投稿；如需改名请用 PATCH /api/admin/models/:slug`);
+    store.put('model', payload.slug, { ...payload, tags: [] });
+  } else if (submission.kind === 'station') {
+    const { offers, ...payload } = parseStationPayload(store, submission.payload);
+    // 飞书批次沿用旧同步的 www 分组，认领原站点；新 slug 仍统一由 stationSlug 分配。
+    const mine = findStation(store, submission, payload.url);
+    const slug = mine?.slug ?? stationSlug(store, payload.url, submission.originKey);
+    // 必须用 getWithRemoved：store.get 看不见已下架的行，站点下架后再同步一次
+    // 会把它当成新站，四个指标字段（可用率/首字延迟/建站时间/状态）全写 null。
+    // 这四项全站没有别的写入入口，写没了就补不回来——「下架后同步会自动恢复」
+    // 听起来是好事，实际是拿指标换的。catalog.ts 已经踩过同一个坑并加了快照。
+    // 注意：演示站是**可以被同步改内容的**——既有用例
+    // 「slug 已存在时更新内容和全部报价，保留原 source=demo 与指标」就是这条契约：
+    // 内容（名称/描述/报价）跟着投稿走，只有 source 和四项指标沿用旧值。
+    // 种子演示站的 url 都是 null，正常同步认不到它们，所以现实中碰不到；
+    // 真发生了也是「改内容、不改身份」，不是数据丢失。
+    const previous = store.getWithRemoved('station', slug);
+    // 更新已有 slug 时保留最初来源，不能把飞书站点改标成 AI 采集。
+    // 指标字段（可用率、首字延迟、成立时间、运行状态）投稿 payload 里根本没有，
+    // 全站也没有别的写入入口。这里必须沿用旧值：写 null 等于「每次同步都把
+    // 种子站点的可用率清空，且没有任何途径填回来」，前端可用率和评分会一起消失。
+    store.put('station', slug, {
+      ...payload, slug, status: previous?.status ?? null,
+      uptime: previous?.uptime ?? null,
+      firstTokenLatencyMs: previous?.firstTokenLatencyMs ?? null,
+      foundedAt: previous?.foundedAt ?? null,
+      source: previous ? previous.source : sourceByChannel[submission.channel],
+    });
+    store.db.prepare('DELETE FROM offers WHERE stationSlug = ?').run(slug);
+    // basis 缺省 blended：老提交方不带这个字段，沿用「整站混合倍率」的原语义。
+    // quotedAt 缺省 null（来源没说），**不要**在这里塞审核时间——那是入库时间，
+    // 不是报价时间，冒充成来源时间会让榜上的「报价于」全是假的。
+    const insert = store.db.prepare("INSERT INTO offers (stationSlug, modelSlug, rate, basis, quotedAt) VALUES (?, ?, ?, ?, ?)");
+    for (const offer of offers) insert.run(slug, offer.modelSlug, offer.rate, offer.basis ?? 'blended', offer.quotedAt ?? null);
+  } else if (submission.channel === 'web') {
+    // 站内发帖：payload 是作者填的表单，不是飞书那种带 hostname 的结构。
+    const payload = parse(webPostSchema, submission.payload);
+    for (const [slug, label] of [[payload.stationSlug, '关联中转站'], [payload.modelSlug, '关联模型']] as const) {
+      if (!slug) continue;
+      if (!store.get(label === '关联中转站' ? 'station' : 'model', slug)) throw new ApiError(400, 'INVALID_INPUT', `${label} ${slug} 不存在`);
+    }
+    store.put('post', submission.id, {
+      id: submission.id, kind: payload.kind, title: payload.title, summary: payload.summary, body: payload.body,
+      authorHandle: submission.actorHandle ?? 'unknown', stationSlug: payload.stationSlug ?? null, modelSlug: payload.modelSlug ?? null,
+      cover: null, publishedAt: reviewedAt, status: 'approved', source: 'user',
+    });
+  } else {
+    const payload = parse(postSchema, submission.payload);
+    // 两边都要过同一套归一：payload 里的 hostname 可能来自历史行（带尾点、大小写），
+    // 站点 url 也可能是尾点写法。直接拿 `new URL(...).hostname` 比会把同一站判成两条。
+    //
+    // 但**先精确、再分组**：www 与裸域各自一条实体时（认领优先级就是为这种情形设计的），
+    // 只按分组键找会取 rowid 第一条，把 `www.x` 的文章挂到裸域 `x` 上。
+    const exactHost = payload.hostname == null ? null : hostnameOf(`https://${payload.hostname}`);
+    const groupedHost = exactHost === null ? null : feishuHostnameKey(exactHost);
+    const stations = store.all('station');
+    const exactHit = exactHost === null ? undefined
+      : stations.find(station => hostnameOf(station.url) === exactHost);
+    const groupedHit = exactHit ?? (groupedHost === null ? undefined
+      : stations.find(station => {
+        const other = hostnameOf(station.url);
+        return other !== null && feishuHostnameKey(other) === groupedHost;
+      }));
+    const stationSlug = groupedHit?.slug ?? null;
+    // 飞书每次同步都会生成新批次，评价按原记录更新，不能每同步一次就多发一篇文章。
+    //
+    // 这里**不再按 batchId 是否为空分流**。batchId 为空只可能来自管理端单条投稿
+    // （同步与批次审核都会补一个 UUID），此前把它排除在外，导致同一条投稿在
+    // 「单条通道物化成 `sub-<投稿id>`」与「导入通道算成 `feishu-<recordId>`」之间
+    // 来回翻转——id 一变，读者投票和收藏就又成了孤儿。判据必须和 catalog.ts
+    // 的 `postIds` 逐字一致：只认 channel，不认 batchId。
+    const first = submission.channel === 'feishu'
+      ? store.db.prepare("SELECT id FROM submissions WHERE kind = 'post' AND channel = 'feishu' AND originKey = ? AND status = 'approved' ORDER BY rowid LIMIT 1").get(submission.originKey)
+      : undefined;
+    const legacyId = `feishu-${submission.originKey}`;
+    // 必须用 getWithRemoved：store.get 看不见已下架的行，于是「老文章还在吗」
+    // 这个判断会把已下架的老文章当成不存在，改用 `sub-<投稿id>` 建出一篇新的。
+    // 软删除只认 id，换个 id 就是复活——实测下架旧式导入的文章后同步一次，
+    // 前台立刻又多出一篇内容相同的新文章。
+    const legacy = submission.channel === 'feishu' && store.getWithRemoved('post', legacyId)?.source === 'submission';
+    const postId = legacy ? legacyId : `sub-${first?.id ?? submission.id}`;
+    // 管理员下架过的文章不能被下一次同步复活。软删除标记的含义是「人已经决定这篇
+    // 不该在线」，而这里每次同步都无条件写 status: 'approved'——实测：下架后重同步，
+    // 文章原样回来。站点靠 put 清标记来表达「重新上架」，那是有意的；文章这里没有
+    // 人再点一次「通过」，所以必须显式拦住，让人走恢复接口。
+    // 返回原因即表示「本条没有产生新版本」，调用方据此不清理旧的下架请求。
+    // removedAt 是独立列，不在 PostRecord 里（业务层不该看见它），所以单查一次。
+    const withdrawn = store.db.prepare("SELECT removedAt FROM entities WHERE kind = 'post' AND id = ?").get(postId) as
+      { removedAt: string | null } | undefined;
+    if (withdrawn?.removedAt != null) return '此前已被下架，本次同步跳过';
+    store.put('post', postId, {
+      id: postId, kind: 'review', title: payload.title, summary: payload.summary, body: payload.body,
+      authorHandle: payload.authorHandle ?? 'anonymous-submission', authorNickname: payload.authorName,
+      // 没填发布时间就用**提交时间**，不是审核时间。审核可能排队几天，
+      // 用审核时间会让一条旧文章在「最新」榜上冒到前面，与事实不符。
+      stationSlug, modelSlug: null, cover: null, publishedAt: payload.publishedAt ?? submission.createdAt,
+      status: 'approved', source: sourceByChannel[submission.channel],
+    });
+  }
+}
+
+/** 新版本上站后，同 key 的其他待审记录没有再审的意义。 */
+/** 被新版本替代的旧投稿要给提交人一个能看懂的原因，否则 Agent 无法自我纠正。 */
+const SUPERSEDED_REASON = '已被同一站点的更新版本替代，无需处理';
+
+/**
+ * 同一站点被审掉一版后，其余待审版本没有再审的意义。
+ *
+ * 注意方向：无论被审的是哪一版，被替代的都是**其余所有**待审版本。
+ * 我曾想「只替代更新的那几版，让旧的继续待审」，跑测试才发现反了——
+ * 审旧版本时不该让新版本继续排着队，因为一旦旧版本已上线，新版本正是
+ * 提交方想要的那个结果，把它标成 superseded 反而是正确的收尾。
+ * 真正的问题不在替代方向，而在**审核台列表是升序**（先提交的排前面），
+ * 管理员从上往下点「通过」时先过的是旧版本。那一层在审核台修（默认最新的在前）。
+ */
+function supersedePending(store: Store, submission: SubmissionRecord, reviewedAt: string): void {
+  // 下架请求只替代待审的 upsert，不替代别的下架请求（两条下架都指向同一站时，
+  // 后一条审核会拿到「站点已不存在」的说明，不是无意义待审）。
+  const actionFilter = submission.action === 'remove' ? "AND action = 'upsert'" : '';
+
+  // 模型与文章的身份就是 originKey，直接按它替代。
+  if (submission.kind !== 'station') {
+    store.db.prepare(`UPDATE submissions SET status = 'superseded', reason = ?, reviewedAt = ? WHERE kind = ? AND originKey = ? AND status = 'pending' AND id <> ? ${actionFilter}`)
+      .run(SUPERSEDED_REASON, reviewedAt, submission.kind, submission.originKey, submission.id);
+    return;
+  }
+
+  // 站点不能按 originKey 一刀切：originKey 只是 hostname，**同 hostname 不同路径**
+  // 可能是两条不同实体。曾经无条件按 originKey 替代，结果批准 /a 的更新把「复活
+  // /b」的待审清成 superseded——那条投稿凭空消失，已下架的站再也救不回来。
+  // 现在一律「逐条按它自己的 payload 走一遍 findStation」，只有批准后确实会写到
+  // **本次审核作用到的那个实体**，才替代。
+  const targetSlug = submission.action === 'remove'
+    ? parse(removalSchema, submission.payload).slug
+    : findStation(store, submission, parse(stationUrlSchema, submission.payload).url)?.slug;
+  if (targetSlug === undefined) return;
+
+  // 候选范围分两批，替代条件不同（沿用既有契约）：
+  //  - 同一 originKey：任何渠道、任何批次都算，它本来就是「同一个落点」的最强信号；
+  //  - 别名写法（www / 裸域）：只有**飞书批次**才替代。管理端单条（无 batchId）
+  //    与 agent/web 的待审是有意保留的，它们各自可能指向另一条实体，不该被顺手清掉。
+  const key = feishuHostnameKey(submission.originKey);
+  const aliasHosts = [key, `www.${key}`].filter(host => feishuHostnameKey(host) === key && host !== submission.originKey);
+  const groups: { origins: string[]; filter: string }[] = [
+    { origins: [submission.originKey], filter: '' },
+    { origins: aliasHosts, filter: "AND channel = 'feishu' AND batchId IS NOT NULL" },
+  ];
+
+  // 「这条待审批准后会写到哪个实体」——按它自己的 payload 算，就是批准它时走的路。
+  const slugOf = (candidate: SubmissionRecord): string | undefined => {
+    if (candidate.action === 'remove') return parse(removalSchema, candidate.payload).slug;
+    return findStation(store, { channel: candidate.channel, originKey: candidate.originKey }, parse(stationUrlSchema, candidate.payload).url)?.slug;
+  };
+
+  for (const group of groups) {
+    for (const origin of group.origins) {
+      const rows = store.db.prepare(
+        `SELECT * FROM submissions WHERE kind = 'station' AND originKey = ? AND status = 'pending' AND id <> ? ${actionFilter} ${group.filter}`,
+      ).all(origin, submission.id);
+      for (const raw of rows) {
+        const candidate = submissionRecord(raw as Record<string, unknown>);
+        let candidateSlug: string | undefined;
+        try {
+          candidateSlug = slugOf(candidate);
+        } catch (error) {
+          // payload 是旧格式/坏数据：判断不了它会写到哪，宁可留着让人看见。
+          // 但它会一直 pending，而「批次还有 pending」就允许继续追加——等于这条坏行
+          // 把批次永远敞开。至少留个日志，别让它悄无声息地卡住。
+          console.warn(`投稿 ${candidate.id} 的 payload 解析失败，替代判定已跳过：${(error as Error).message}`);
+          continue;
+        }
+        if (candidateSlug !== targetSlug) continue;
+        store.db.prepare("UPDATE submissions SET status = 'superseded', reason = ?, reviewedAt = ? WHERE id = ? AND status = 'pending'")
+          .run(SUPERSEDED_REASON, reviewedAt, candidate.id);
+      }
+    }
+  }
+}
+
+export function reviewSubmission(store: Store, now: Date, id: string, decision: {
+  status: 'approved' | 'rejected';
+  reason?: string;
+}): SubmissionRecord {
+  // 曾经试过「一条审核内复用同一份索引快照」来省掉重复重建，实测反而更慢
+  // （每百条 0.4s → 1.5s）：快照让后续查找看到过期映射，走到别的重建路径上。
+  // 现在的瓶颈在别处，这里保持直通。
+  return reviewSubmissionInner(store, now, id, decision);
+}
+
+function reviewSubmissionInner(store: Store, now: Date, id: string, decision: {
+  status: 'approved' | 'rejected';
+  reason?: string;
+}): SubmissionRecord {
+  const { status, reason } = parse(submissionReviewSchema, decision);
+  const reviewedAt = parse(z.date(), now).toISOString();
+  try {
+    return store.transaction(() => {
+      const row = store.db.prepare('SELECT * FROM submissions WHERE id = ?').get(id);
+      if (!row) throw new ApiError(404, 'NOT_FOUND', '投稿不存在');
+      const submission = submissionRecord(row);
+      if (submission.status !== 'pending') throw new ApiError(409, 'ALREADY_REVIEWED', '投稿已审核或被新版本替代');
+
+      // Agent 通道的驳回必须给理由。这条通道没人盯着屏幕，被拒后唯一的
+      // 反馈就是 reason；为空时提交方只能去问用户，用户也答不出来，
+      // 「驳回 → 修正 → 重投」这个闭环就断在最后一步。
+      if (status === 'rejected' && submission.channel === 'agent' && !reason) {
+        throw new ApiError(400, 'REASON_REQUIRED', 'Agent 提交的投稿驳回时必须填写理由，否则提交方无法修正');
+      }
+      let resolvedReason = reason ?? null;
+      let materializationReason: string | undefined;
+      if (status === 'approved') {
+        // 历史 pending 也采用 URL 身份，避免审核后仍用旧 key 绕过下架版本校验。
+        if (submission.kind === 'station' && submission.action === 'upsert') submission.originKey = submissionOriginKey(store, submission);
+        materializationReason = materialize(store, submission, reviewedAt);
+        resolvedReason = materializationReason ?? resolvedReason;
+      }
+
+      store.db.prepare('UPDATE submissions SET status = ?, autoApproved = 0, originKey = ?, reason = ?, reviewedAt = ? WHERE id = ?').run(status, submission.originKey, resolvedReason, reviewedAt, id);
+      // 已不存在的目标没有产生新版本，不能借清理旧下架请求替代新的待审投稿。
+      if (status === 'approved' && materializationReason === undefined) supersedePending(store, submission, reviewedAt);
+      return { ...submission, status, reason: resolvedReason, reviewedAt };
+    });
+  } catch (error) {
+    // 物化失败时事务已回滚。记录要是留在 pending 就再没人能动它：
+    // 批次永远「还有待审的」，同批重跑被静默吞掉；
+    // Agent 的待审配额统计全部 pending 行，几条必然失败的记录就能锁死一个账号，
+    // 全局吃满后所有 Agent 投稿停摆。所以物化失败必须落终态。
+    // 区分「本来就不该改状态」与「永久失败」：
+    // - ALREADY_REVIEWED：这条已被处理过，状态本身就是终态；
+    // - STALE_REMOVAL：读取后站点被更新过，重新同步就能过，重试有意义；
+    // - 404：目标不存在。
+    // 其余失败（MODEL_EXISTS、STATION_SOURCE_CONFLICT、SLUG_CONFLICT）
+    // 不会随时间自愈，留着 pending 只会一边占配额一边让批次永远审不完。
+    const retriable = error instanceof ApiError && (
+      error.status === 404 || error.code === 'ALREADY_REVIEWED' || error.code === 'STALE_REMOVAL'
+      // 演示数据被要求下架是操作对象选错了，不是这条内容本身有问题。
+      || error.code === 'STATION_SOURCE_CONFLICT'
+      // 厂商在提交后被删：补回来就能审，不该让投稿方白丢一次提交。
+      || error.code === 'VENDOR_MISSING'
+      // 驳回漏填理由：这是操作失误，补上理由重试即可。不当作永久失败——
+      // 否则一次手快点「拒绝」就把一条正常投稿钉成 rejected，
+      // 理由还是「审核时无法物化：…必须填写理由」，管理员补理由也救不回来。
+      || error.code === 'REASON_REQUIRED');
+    if (error instanceof ApiError && !retriable) {
+      try {
+        store.db.prepare("UPDATE submissions SET status = 'rejected', reason = ?, reviewedAt = ? WHERE id = ? AND status = 'pending'")
+          .run(`审核时无法物化：${error.message}`.slice(0, 1000), reviewedAt, id);
+      } catch (fallbackError) {
+        // 兜底写入自己失败时不能让原始错误消失：调用方要知道真正的失败原因。
+        console.error('审核失败后写入 rejected 也失败了，该记录可能停在 pending', fallbackError);
+      }
+    } else if (!(error instanceof ApiError)) {
+      // 非 ApiError（TypeError、SQLite 约束错误）不自动判终态：这类错误分不清
+      // 「这条内容有问题」还是「写库那一刻出了基础设施故障」，判成 rejected
+      // 会在后一种情况下丢掉用户的投稿。代价是它可能停在 pending、占着配额，
+      // 所以至少要让它在日志里可被发现，而不是无声无息。
+      console.error('审核抛出非预期错误，该投稿可能停在 pending，需要人工处理', { id, error });
+    }
+    throw error;
+  }
+}

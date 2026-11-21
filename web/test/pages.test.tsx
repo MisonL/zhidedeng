@@ -11,7 +11,7 @@ describe('数据诚信声明', () => {
   it('全站页脚常驻，站点详情顶部也显示', async () => {
     const detail: StationDetail = {
       ...station,
-      offers: [{ stationSlug: 'yunzhan', modelSlug: 'deepseek-v4', rate: 0.6, model: vendors[0].models[0] }],
+      offers: [{ stationSlug: 'yunzhan', modelSlug: 'deepseek-v4', rate: 0.6, basis: 'blended', quotedAt: null, model: vendors[0].models[0] }],
     };
     stubApi({ 'GET /api/stations/yunzhan': detail });
     renderApp('/stations/yunzhan');
@@ -20,6 +20,42 @@ describe('数据诚信声明', () => {
     expect(await screen.findByRole('heading', { name: '云栈' })).toBeInTheDocument();
     expect(within(screen.getByRole('main')).getByText(new RegExp(DISCLAIMER))).toBeInTheDocument();
     expect(screen.getByText('0.6x')).toBeInTheDocument();
+  });
+
+  it('报价标明计价口径与来源时间，来源没说不写成「刚刚」', async () => {
+    // rate 只说「相对官方价多少」。不标口径的话，按输入 0.3 和综合 0.5
+    // 会并排放着，读者以为能直接比大小——而它们说的不是一回事。
+    const detail: StationDetail = {
+      ...station,
+      offers: [
+        { stationSlug: 'yunzhan', modelSlug: 'deepseek-v4', rate: 0.3, basis: 'input', quotedAt: null, model: vendors[0].models[0] },
+        { stationSlug: 'yunzhan', modelSlug: 'gpt-5', rate: 0.5, basis: 'blended', quotedAt: '2026-11-01T00:00:00.000Z', model: vendors[1].models[0] },
+      ],
+    };
+    stubApi({ 'GET /api/stations/yunzhan': detail });
+    renderApp('/stations/yunzhan');
+    expect(await screen.findByText('按输入')).toBeInTheDocument();
+    expect(screen.getByText('综合')).toBeInTheDocument();
+    // null 表示来源没说，不能显示成「刚刚」或今天
+    expect(screen.getByText('时间未知')).toBeInTheDocument();
+    expect(screen.getByText('2026-11-01')).toBeInTheDocument();
+  });
+
+  it('老库里没有口径字段按综合读，认不出的口径显示未知而不是默默当综合', async () => {
+    // 老库的 offers 只有三列，补列后是 blended；但 ALTER 补不上 CHECK，
+    // 历史脏值（比如手工 UPDATE 进去的）确实可能存在。这时不能替它编一个口径。
+    const detail = {
+      ...station,
+      offers: [
+        { stationSlug: 'yunzhan', modelSlug: 'deepseek-v4', rate: 0.4, model: vendors[0].models[0] },
+        { stationSlug: 'yunzhan', modelSlug: 'gpt-5', rate: 0.5, basis: 'garbage', quotedAt: null, model: vendors[1].models[0] },
+      ],
+    } as unknown as StationDetail;
+    stubApi({ 'GET /api/stations/yunzhan': detail });
+    renderApp('/stations/yunzhan');
+    expect(await screen.findByText('综合')).toBeInTheDocument();
+    expect(screen.getByText('未知口径')).toBeInTheDocument();
+    expect(screen.queryByText('按输入')).toBeNull();
   });
 });
 
@@ -163,5 +199,60 @@ describe('商务合作', () => {
     stubApi();
     renderApp('/business');
     expect(screen.getByText(/联系方式待配置/)).toBeInTheDocument();
+  });
+});
+
+describe('补录模型', () => {
+  // 用 fixtures 里已有的厂商，避免自己编一个对不上真实接口的形状。
+  const catalogVendor = vendors[0]!;
+  const VENDOR = catalogVendor.slug;
+
+  it('选「补充模型」后显示模型字段，提交走 /api/models/suggest', async () => {
+    const fetchMock = stubApi({
+      'GET /api/vendors': page(vendors),
+      'POST /api/models/suggest': { id: 'm1', slug: 'claude-sonnet-4-5', status: 'pending', deduplicated: false },
+    });
+    renderApp('/submit?kind=model');
+
+    expect(screen.getByRole('radio', { name: '补充模型' })).toBeChecked();
+    // 模型不该显示文章的标题/摘要/正文。
+    expect(screen.queryByLabelText('标题')).not.toBeInTheDocument();
+    // catalog 未就绪时厂商下拉是空的，此时设 value 会被丢掉——先等选项出现。
+    await screen.findByRole('option', { name: catalogVendor.name });
+
+    fireEvent.change(screen.getByLabelText('模型 slug'), { target: { value: 'Claude-Sonnet-4-5' } });
+    fireEvent.change(screen.getByLabelText('厂商'), { target: { value: VENDOR } });
+    fireEvent.change(screen.getByLabelText('模型名称'), { target: { value: 'Claude Sonnet 4.5' } });
+    fireEvent.change(screen.getByLabelText('一句话说明'), { target: { value: '一句话' } });
+    fireEvent.click(screen.getByRole('button', { name: '提交审核' }));
+
+    await waitFor(() => expect(callsTo(fetchMock, 'POST', '/api/models/suggest')).toHaveLength(1));
+    // slug 统一转小写，和服务端的 slug 规则一致。
+    expect(callsTo(fetchMock, 'POST', '/api/models/suggest')[0].body).toEqual({
+      slug: 'claude-sonnet-4-5', vendor: VENDOR, name: 'Claude Sonnet 4.5', description: '一句话',
+    });
+  });
+
+  it('模型字段不全时不发请求，给出提示', async () => {
+    const fetchMock = stubApi({ 'GET /api/vendors': page(vendors) });
+    renderApp('/submit?kind=model');
+    fireEvent.click(screen.getByRole('button', { name: '提交审核' }));
+    expect(await screen.findByText('模型需要填写 slug、厂商、名称和说明')).toBeInTheDocument();
+    expect(callsTo(fetchMock, 'POST', '/api/models/suggest')).toHaveLength(0);
+  });
+
+  it('服务端拒绝时显示原因', async () => {
+    stubApi({
+      'GET /api/vendors': page(vendors),
+      'POST /api/models/suggest': () => apiError(409, 'MODEL_EXISTS', '模型已存在'),
+    });
+    renderApp('/submit?kind=model');
+    await screen.findByRole('option', { name: catalogVendor.name });
+    fireEvent.change(screen.getByLabelText('模型 slug'), { target: { value: 'dup' } });
+    fireEvent.change(screen.getByLabelText('厂商'), { target: { value: VENDOR } });
+    fireEvent.change(screen.getByLabelText('模型名称'), { target: { value: '名称' } });
+    fireEvent.change(screen.getByLabelText('一句话说明'), { target: { value: '说明' } });
+    fireEvent.click(screen.getByRole('button', { name: '提交审核' }));
+    expect(await screen.findByText('模型已存在')).toBeInTheDocument();
   });
 });

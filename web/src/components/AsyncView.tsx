@@ -28,7 +28,7 @@ interface AsyncViewProps<T> {
 }
 
 /** 统一的加载、空、错误三态。 */
-export default function AsyncView<T>({ state, isEmpty, skeleton, empty, children }: AsyncViewProps<T>) {
+export default function AsyncView<T>({ state, isEmpty, skeleton, empty: emptyFallback, children }: AsyncViewProps<T>) {
   if (state.error) {
     return (
       <div className="state state-error">
@@ -38,7 +38,11 @@ export default function AsyncView<T>({ state, isEmpty, skeleton, empty, children
     );
   }
   if (state.data === undefined) return skeleton ?? <Skeleton />;
-  if (isEmpty?.(state.data)) return empty ?? <Empty />;
+  // 数组默认按「空即空态」处理。原先只有显式传 isEmpty 才算空，于是 `[]` 会被当成
+  // 有数据、children 照常执行，里面的 items[0].id 直接抛 TypeError——
+  // 新部署站点还没审核通过的文章时，首页、社区、评测三页会一起白屏。
+  const empty = isEmpty ? isEmpty(state.data) : Array.isArray(state.data) && state.data.length === 0;
+  if (empty) return emptyFallback ?? <Empty />;
   return children(state.data);
 }
 

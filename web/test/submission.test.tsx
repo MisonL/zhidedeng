@@ -74,6 +74,61 @@ describe('群友提交的内容要标明来源', () => {
   });
 });
 
+describe('AI 采集的内容要标明来源', () => {
+  const agentStation = { ...submitted, source: 'agent' as const };
+  const label = 'AI 采集，未经平台核实';
+
+  it('站点和文章卡片显示 AI 来源标签', () => {
+    stubApi();
+    renderWithProviders(
+      <>
+        <StationCard station={agentStation} />
+        <PostCard post={makePost('agent-post', { source: 'agent' })} />
+      </>,
+    );
+    expect(screen.getAllByText(label)).toHaveLength(2);
+  });
+
+  it('站点详情声明 AI 来源', async () => {
+    stubApi({ 'GET /api/stations/sub-example-com': { ...agentStation, offers: [] }, 'GET /api/posts': page([]) });
+    renderApp('/stations/sub-example-com');
+    expect(await within(screen.getByRole('main')).findByRole('note')).toHaveTextContent(label);
+  });
+
+  it('模型比价表显示站点的 AI 来源', async () => {
+    const model = { slug: 'gpt-5', vendor: 'openai', name: 'GPT-5', description: '通用旗舰', tags: [] };
+    stubApi({ 'GET /api/models/gpt-5': { ...model, offers: [{ stationSlug: agentStation.slug, modelSlug: 'gpt-5', rate: 0.5, station: agentStation }] } });
+    renderApp('/models/gpt-5');
+    const row = (await screen.findByRole('link', { name: '群友站' })).closest('tr')!;
+    expect(within(row).getByText(label)).toBeInTheDocument();
+  });
+
+  it('文章详情声明 AI 来源，正文保持纯文本', async () => {
+    const body = '[链接](https://example.com/)\n![图片](https://example.com/a.png)\n<img src=x onerror=alert(1)>';
+    stubApi({ 'GET /api/posts/agent-post': makePost('agent-post', { source: 'agent', body, stationSlug: null, modelSlug: null }) });
+    const { container } = renderApp('/posts/agent-post');
+    expect(await within(screen.getByRole('main')).findByRole('note')).toHaveTextContent(label);
+    const article = container.querySelector('.article')!;
+    expect(article.querySelector('.article-plain')!.textContent).toBe(body);
+    expect(article.querySelector('.markdown, .article-plain a, .article-plain img')).toBeNull();
+  });
+
+  it('web 来源站点声明用户投稿，避免显示成演示数据', async () => {
+    stubApi({ 'GET /api/stations/sub-example-com': { ...submitted, source: 'user', offers: [] }, 'GET /api/posts': page([]) });
+    renderApp('/stations/sub-example-com');
+    const notice = await within(screen.getByRole('main')).findByRole('note');
+    expect(notice).toHaveTextContent('用户投稿，未经平台核实');
+    expect(notice).not.toHaveTextContent('演示数据');
+  });
+
+  it('用户投稿文章仍渲染 Markdown', async () => {
+    stubApi({ 'GET /api/posts/user-post': makePost('user-post', { source: 'user', body: '# 用户正文' }) });
+    renderApp('/posts/user-post');
+    expect(await screen.findByRole('heading', { name: '用户正文' })).toBeInTheDocument();
+    expect(within(screen.getByRole('main')).queryByText(label)).not.toBeInTheDocument();
+  });
+});
+
 describe('没有测量数据时显示暂无', () => {
   it('站点卡片不出现 null 也不编造数字', () => {
     stubApi();

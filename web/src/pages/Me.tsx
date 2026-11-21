@@ -2,6 +2,7 @@ import { useState } from 'react';
 import type { FormEvent } from 'react';
 import { Link, useSearchParams } from 'react-router';
 import type { CurrentUser } from '@zhidedeng/shared';
+import { PROFILE_LIMITS } from '@zhidedeng/shared';
 import { api } from '../api';
 import AsyncView, { Empty, LoadMore, Skeleton } from '../components/AsyncView';
 import PostCard from '../components/PostCard';
@@ -10,12 +11,65 @@ import { Avatar } from '../components/visuals';
 import { loginPath } from '../format';
 import { usePaged } from '../hooks';
 import { useHere, useMe } from '../state';
+import AgentTokens from './AgentTokens';
 
 const TABS = [
   { value: 'favorites', label: '我的收藏' },
   { value: 'posts', label: '我的分享' },
+  // 文章之外还有模型补录和站点推荐，那两条也有审核和驳回理由。
+  // 只在「我的分享」里看，作者补了模型/站点就查不到任何结果。
+  { value: 'submissions', label: '我的投稿' },
   { value: 'settings', label: '账户设置' },
 ] as const;
+
+type SubmissionItem = Awaited<ReturnType<typeof api.getMySubmissions>>['items'][number];
+const KIND_LABEL: Record<'station' | 'model' | 'post', string> = { station: '中转站', model: '模型', post: '文章' };
+const STATUS_LABEL: Record<string, string> = { pending: '审核中', approved: '已通过', rejected: '未通过', superseded: '已被新提交替代' };
+
+/** 三种投稿的落地链接不同：站点/模型/文章各有自己的详情页。 */
+function submissionPath(item: Pick<SubmissionItem, 'kind' | 'targetSlug'>) {
+  if (!item.targetSlug) return null;
+  if (item.kind === 'station') return `/stations/${item.targetSlug}`;
+  if (item.kind === 'model') return `/models/${item.targetSlug}`;
+  return `/posts/${item.targetSlug}`;
+}
+
+function MySubmissions() {
+  const paged = usePaged((page, signal) => api.getMySubmissions({ page, pageSize: 10 }, signal), []);
+  return (
+    <>
+      <AsyncView
+        state={paged}
+        isEmpty={(items) => items.length === 0}
+        empty={<Empty title="还没有投稿" action={{ to: '/submit', label: '去投稿' }} />}
+      >
+        {(items) => (
+          <div className="card-list">
+            {items.map((item) => {
+              const to = submissionPath(item);
+              const reason = item.status === 'rejected' ? item.reason : null;
+              return (
+                <article key={item.id} className="card">
+                  <div className="tags">
+                    <span className="tag">{KIND_LABEL[item.kind]}</span>
+                    <span className={`tag ${item.status === 'rejected' ? 'tag-warn' : ''}`}>{STATUS_LABEL[item.status] ?? item.status}</span>
+                  </div>
+                  <h3 className="post-title">{to ? <Link to={to}>{item.title}</Link> : item.title}</h3>
+                  {/* 驳回理由必须能看见：否则作者只知道没通过，不知道改什么。 */}
+                  {reason && <p className="post-review-reason">未通过原因：{reason}</p>}
+                  <p className="hint">
+                    {item.status === 'approved' && to ? '已上线，点标题查看' : item.status === 'approved' ? '已通过' : '审核后才会公开'}
+                  </p>
+                </article>
+              );
+            })}
+          </div>
+        )}
+      </AsyncView>
+      <LoadMore paged={paged} />
+    </>
+  );
+}
 
 function Favorites() {
   const paged = usePaged((page, signal) => api.getMyFavorites({ page, pageSize: 10 }, signal), []);
@@ -73,11 +127,11 @@ function Settings({ user }: { user: CurrentUser }) {
     <form className="settings-form" onSubmit={save} noValidate>
       <div className="field">
         <label className="field-label" htmlFor="me-nickname">昵称</label>
-        <input id="me-nickname" maxLength={30} value={nickname} onChange={(event) => setNickname(event.target.value)} />
+        <input id="me-nickname" maxLength={PROFILE_LIMITS.nickname} value={nickname} onChange={(event) => setNickname(event.target.value)} />
       </div>
       <div className="field">
         <label className="field-label" htmlFor="me-bio">简介</label>
-        <textarea id="me-bio" rows={3} maxLength={200} value={bio} onChange={(event) => setBio(event.target.value)} />
+        <textarea id="me-bio" rows={3} maxLength={PROFILE_LIMITS.bio} value={bio} onChange={(event) => setBio(event.target.value)} />
       </div>
       {message && <p className={message.ok ? 'form-success' : 'form-error'} role={message.ok ? 'status' : 'alert'}>{message.text}</p>}
       <button type="submit" className="btn btn-red submit-btn" disabled={saving}>{saving ? '保存中…' : '保存'}</button>
@@ -166,7 +220,8 @@ export default function Me() {
             </div>
             {tab === 'favorites' && <Favorites />}
             {tab === 'posts' && <MyPosts />}
-            {tab === 'settings' && <><Settings user={user} /><ChangePassword /></>}
+            {tab === 'submissions' && <MySubmissions />}
+            {tab === 'settings' && <><Settings user={user} /><ChangePassword /><AgentTokens key={user.handle} /></>}
             {tab !== 'settings' && <p className="hint me-tip">想分享新的体验？<Link to="/submit">去投稿</Link></p>}
           </>
         ))}

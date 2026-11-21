@@ -2,6 +2,19 @@ import { serveStatic } from '@hono/node-server/serve-static';
 import type { Hono } from 'hono';
 import type { Env } from 'hono/types';
 
+/**
+ * 安全响应头。nginx 模板里给前端配了一整套，但容器直映射（docker-compose 里
+ * 只有 `ports: 8788:8787`，前面没有 nginx）时一条都不会下发——那正是现在的部署方式。
+ * 策略与 nginx 模板保持一致：只允许同源脚本、禁止被 iframe 嵌套、禁止 MIME 嗅探。
+ * style-src 保留 'unsafe-inline' 是因为 React 的 style 属性会被转成内联样式。
+ */
+const SECURITY_HEADERS: ReadonlyArray<readonly [string, string]> = [
+  ['content-security-policy', "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"],
+  ['x-content-type-options', 'nosniff'],
+  ['x-frame-options', 'DENY'],
+  ['referrer-policy', 'same-origin'],
+];
+
 const NO_CACHE = 'no-cache';
 const IMMUTABLE = 'public, max-age=31536000, immutable';
 const SHORT = 'public, max-age=3600';
@@ -20,12 +33,16 @@ export function mountWeb<E extends Env>(app: Hono<E>, webRoot: string) {
     if (found) {
       const cache = path.startsWith('/assets/') ? IMMUTABLE : path === '/' || path.endsWith('index.html') ? NO_CACHE : SHORT;
       found.headers.set('cache-control', cache);
+      for (const [name, value] of SECURITY_HEADERS) found.headers.set(name, value);
       return found;
     }
     if (path.startsWith('/assets/')) return next();
 
     const fallback = await page(c, next);
-    fallback?.headers.set('cache-control', NO_CACHE);
+    if (fallback) {
+      fallback.headers.set('cache-control', NO_CACHE);
+      for (const [name, value] of SECURITY_HEADERS) fallback.headers.set(name, value);
+    }
     return fallback;
   });
 }

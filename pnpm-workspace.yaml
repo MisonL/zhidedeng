@@ -5,3 +5,5 @@ packages:
   - scripts
 allowBuilds:
   esbuild: true
+minimumReleaseAgeExclude:
+  - '@hono/node-server@2.1.9'

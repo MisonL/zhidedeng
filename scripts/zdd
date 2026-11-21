@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# zdd 的启动壳。Node 22 可以直接跑 .ts，不需要编译。
+# 真正的实现在同目录的 zdd.ts。
+#
+# 要解析软链：装包后 node_modules/.bin/zdd 是指向本文件的符号链接，
+# 直接用 dirname "$0" 会定位到 .bin/ 而不是 scripts/，找不到 zdd.ts。
+set -euo pipefail
+source_path="${BASH_SOURCE[0]}"
+while [ -L "$source_path" ]; do
+  dir="$(cd -P "$(dirname "$source_path")" && pwd)"
+  source_path="$(readlink "$source_path")"
+  case "$source_path" in /*) ;; *) source_path="$dir/$source_path" ;; esac
+done
+target="$(cd -P "$(dirname "$source_path")" && pwd)"
+
+# 依赖没装时 Node 只会抛 ERR_MODULE_NOT_FOUND，退出码 1——
+# 在 zdd 的约定里 1 是「用法错误」，Agent 会去改参数而不是去装依赖。
+# 先探一次，给出能照着做的结构化提示。
+if ! command -v node >/dev/null 2>&1; then
+  printf '%s\n' '{"ok":false,"code":1,"message":"找不到 node，需要 Node 22.18 以上","detail":null,"nextAction":"安装 Node 22.x 后重试"}'
+  exit 1
+fi
+# 必须在脚本所在目录探测：zdd.ts 的模块解析从 scripts/ 开始，
+# 从仓库根探测会误判（@zhidedeng/shared 是 scripts 的依赖）。
+if ! (cd "$target" && node --experimental-strip-types -e 'import("@zhidedeng/shared/submission").then(()=>{},()=>process.exit(1))') >/dev/null 2>&1; then
+  printf '%s\n' '{"ok":false,"code":1,"message":"依赖未安装，找不到 @zhidedeng/shared","detail":null,"nextAction":"在仓库根目录执行 pnpm install 后重试"}'
+  exit 1
+fi
+
+exec node --experimental-strip-types "$target/zdd.ts" "$@"

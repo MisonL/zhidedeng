@@ -5,7 +5,7 @@ import { api } from '../api';
 import { formatRate, formatUptime, KIND_LABEL } from '../format';
 import { useAsync, useCarousel, usePaged } from '../hooks';
 import { useCatalog } from '../state';
-import AsyncView, { LoadMore, Skeleton } from './AsyncView';
+import AsyncView, { Empty, LoadMore, Skeleton } from './AsyncView';
 import PostCard from './PostCard';
 import { PostCover } from './visuals';
 
@@ -103,7 +103,13 @@ export function FeedSidebar() {
           <h2 className="side-title">热门中转站</h2>
           <Link className="module-more" to="/stations">全部站点</Link>
         </header>
-        <AsyncView state={catalog}>
+        {/* children 不读 state.data（数据在上面先切过片），所以数组默认空态在这里不生效，
+            必须显式传 isEmpty：否则没有站点时这一块只剩标题和「全部站点」，看起来像坏了。 */}
+        <AsyncView
+          state={catalog}
+          isEmpty={() => stations.length === 0}
+          empty={<Empty title="还没有收录站点" action={{ to: '/submit', label: '推荐一个' }} />}
+        >
           {() => (
             <ol className="side-stations">
               {stations.map((station, position) => (

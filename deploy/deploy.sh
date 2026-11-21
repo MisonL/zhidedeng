@@ -23,10 +23,19 @@ if [ "${SKIP_TESTS:-}" != "1" ]; then
   pnpm -r typecheck
   pnpm -r test
 fi
+#构建机的 umask会被 rsync -a原样带到服务器：umask077时发布出来的目录是700，
+#zhidedeng用户读不到、服务起不来。这里显式归一。
+umask 022
 pnpm build
 
 # 只同步 release/ 的内容；数据库在 /var/lib/zhidedeng，不受 --delete 影响。
-rsync -az --delete release/ "$DEPLOY_HOST:$deploy_path/"
+#发布目录里除了 release/的内容，还常有运维自己放的东西：.env、docker-compose.yml、
+#node_modules、补丁脚本。--delete会把它们一并删掉，恢复还得重新配。这里显式排除。
+rsync -az --delete \
+ --exclude=.env --exclude='.env.*' --exclude=docker-compose.yml \
+ --exclude=node_modules --exclude=.git --exclude='*.log' \
+ release/ \
+ "${DEPLOY_HOST}:${deploy_path}/"
 ssh "$DEPLOY_HOST" "sudo systemctl restart $(printf '%q' "$service")"
 
 for _ in $(seq 1 30); do

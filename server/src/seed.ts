@@ -75,7 +75,9 @@ function writeSeed(store: Store, now: Date) {
     });
     for (let offerIndex = 0; offerIndex < 6 + index % 10; offerIndex++) {
       const model = models[(index * 3 + offerIndex * 5) % models.length];
-      store.db.prepare('INSERT INTO offers (stationSlug, modelSlug, rate) VALUES (?, ?, ?)')
+      // 演示数据统一按 blended（整站混合倍率）标，quotedAt 留 null：
+      // 虚构站没有真实报价时间，编一个日期等于伪造来源。
+      store.db.prepare("INSERT INTO offers (stationSlug, modelSlug, rate, basis, quotedAt) VALUES (?, ?, ?, 'blended', NULL)")
         .run(slug, model.slug, Number((0.35 + ((index * 11 + offerIndex * 7) % 80) / 100).toFixed(2)));
     }
   });

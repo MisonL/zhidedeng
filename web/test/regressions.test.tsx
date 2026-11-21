@@ -262,3 +262,26 @@ describe('中转站列表', () => {
     expect(callsTo(fetchMock, 'GET', '/api/stations').map(({ url }) => url.searchParams.get('sort'))).not.toContain('foo');
   });
 });
+
+describe('分页「加载更多」必须收敛', () => {
+  it('服务端报的 total 大于实际可取条数时，空页之后不再显示「加载更多」', async () => {
+    // 回归：hasMore 原来只看 `data.length < total`。只要服务端报的 total 比实际
+    // 能取到的多（跳过不可读目标、翻页期间有新写入），length 永远追不上 total，
+    // 按钮一直可点、每点一次发一个空请求。实测第 2、3 页都是空，hasMore 仍为 true。
+    const items = [makePost('p1'), makePost('p2')];
+    const fetchMock = stubApi({
+      // total 谎报成 10，但第 2 页起都是空
+      'GET /api/posts': ({ url }: StubRequest) => json(page(url.searchParams.get('page') === '1' ? items : [], 10)),
+    });
+    renderApp('/');
+    const more = await screen.findByRole('button', { name: '加载更多' });
+    expect(more).toBeTruthy();
+
+    fireEvent.click(more);
+    // 第 2 页返回空 → 到底了，按钮应当消失。
+    // 用固定等待而不是 waitFor：这里断言的是「消失」，waitFor 在变异版本下
+    // 可能因为初始渲染时序提前通过，反而抓不住回归。
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 400)); });
+    expect(screen.queryByRole('button', { name: '加载更多' })).toBeNull();
+  });
+});

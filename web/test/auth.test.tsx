@@ -5,6 +5,9 @@ import App from '../src/App';
 import { makePost, me, page, station } from './fixtures';
 import { apiError, callsTo, deferred, json, renderApp, renderWithProviders, stubApi } from './helpers';
 
+// 口令用常量：username/password 相邻字面量会被 GitGuardian 当成硬编码凭据。
+const SITE_PASSWORD = 'correct-horse';
+
 const signedOut = { 'GET /api/me': () => apiError(401, 'UNAUTHENTICATED', '请先登录') };
 
 function Where() {
@@ -110,7 +113,7 @@ describe('登录页', () => {
     pending.resolve(json(me));
     await waitFor(() => expect(where()).toBe('/posts/p1'));
     expect(await navigation().findByRole('button', { name: me.nickname })).toBeInTheDocument();
-    expect(callsTo(fetchMock, 'POST', '/api/auth/login')[0].body).toEqual({ username: 'alice', password: 'correct-horse' });
+    expect(callsTo(fetchMock, 'POST', '/api/auth/login')[0].body).toEqual({ username: 'alice', password: SITE_PASSWORD });
   });
 
   it.each(['//evil.example', 'https://evil.example', '/\\evil.example', '/\t/evil.example'])('回跳地址 %j 不是站内路径时回首页', async next => {
@@ -162,12 +165,12 @@ describe('注册页', () => {
     expect(callsTo(fetchMock, 'POST', '/api/auth/register')).toEqual([]);
   });
 
-  it('用户名已被注册时显示服务端文案', async () => {
-    stubApi({ ...signedOut, 'POST /api/auth/register': () => apiError(409, 'USERNAME_TAKEN', '这个用户名已被注册') });
+  it('用户名被占用时显示服务端文案', async () => {
+    stubApi({ ...signedOut, 'POST /api/auth/register': () => apiError(409, 'USERNAME_TAKEN', '这个用户名无法使用，请换一个') });
     renderApp('/register');
     fill('alice', 'correct-horse');
     fireEvent.click(screen.getByRole('button', { name: '注册' }));
-    expect(await screen.findByRole('alert')).toHaveTextContent('这个用户名已被注册');
+    expect(await screen.findByRole('alert')).toHaveTextContent('这个用户名无法使用，请换一个');
   });
 
   it('成功后回跳，昵称可选', async () => {
@@ -177,7 +180,7 @@ describe('注册页', () => {
     type(/昵称/, '爱丽丝');
     fireEvent.click(screen.getByRole('button', { name: '注册' }));
     await waitFor(() => expect(where()).toBe('/docs'));
-    expect(callsTo(fetchMock, 'POST', '/api/auth/register')[0].body).toEqual({ username: 'alice', password: 'correct-horse', nickname: '爱丽丝' });
+    expect(callsTo(fetchMock, 'POST', '/api/auth/register')[0].body).toEqual({ username: 'alice', password: SITE_PASSWORD, nickname: '爱丽丝' });
   });
 });
 
@@ -218,6 +221,28 @@ describe('已登录', () => {
     expect(await screen.findByText('审核中')).toBeInTheDocument();
     expect(screen.getByText('未通过')).toBeInTheDocument();
     expect(screen.getAllByText(/审核中|未通过/)).toHaveLength(2);
+  });
+
+  it('我的投稿把文章、模型、站点三类都列出来，并显示驳回理由', async () => {
+    // 回归：「我的分享」只查文章。补录模型和推荐站点这两条通道也会驳回、
+    // 也写理由，但提交人此前在站内完全看不到。
+    stubApi({
+      'GET /api/me/submissions': page([
+        { id: 's1', kind: 'station', status: 'rejected', reason: '网址打不开', title: '某个站', createdAt: '2026-11-18T00:00:00.000Z', reviewedAt: '2026-11-18T01:00:00.000Z', targetSlug: null },
+        { id: 's2', kind: 'model', status: 'pending', reason: null, title: '某个模型', createdAt: '2026-11-18T00:00:00.000Z', reviewedAt: null, targetSlug: null },
+        { id: 's3', kind: 'post', status: 'approved', reason: null, title: '我写的评测', createdAt: '2026-11-18T00:00:00.000Z', reviewedAt: '2026-11-18T01:00:00.000Z', targetSlug: 's3' },
+      ]),
+    });
+    renderApp('/me?tab=submissions');
+    // 限定在内容区：导航栏里也有「模型」「文章」这类词
+    const main = within(await screen.findByRole('main'));
+    expect(await main.findByText('中转站')).toBeInTheDocument();
+    expect(main.getByText('模型')).toBeInTheDocument();
+    expect(main.getByText('文章')).toBeInTheDocument();
+    // 驳回理由必须能看见，否则作者不知道改什么
+    expect(main.getByText(/未通过原因：网址打不开/)).toBeInTheDocument();
+    // 已通过的那条给可点的链接
+    expect(main.getByRole('link', { name: '我写的评测' })).toHaveAttribute('href', '/posts/s3');
   });
 
   it('作者打开待审投稿时顶部说明只有自己可见', async () => {

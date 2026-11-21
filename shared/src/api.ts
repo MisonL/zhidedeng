@@ -1,7 +1,7 @@
 import type {
-  Banner, CheckIn, Comment, CommentReply, CommunityRanking, CurrentUser,
-  ExpertRanking, FavoriteItem, Model, ModelDetail, ModelRanking, Post, PostKind,
-  RankingTab, Station, StationDetail, Target, VendorWithModels, VoteSummary, VoteValue,
+  AgentToken, Banner, CheckIn, Comment, CommentReply, CommunityRanking, CurrentUser,
+  ExpertRanking, FavoriteItem, Model, ModelDetail, ModelRanking, Post, PostKind, PostSummary,
+  ISODateTime, RankingTab, RateBasis, Station, StationDetail, Target, Vendor, VendorWithModels, VoteSummary, VoteValue,
 } from './domain.js';
 
 export interface PaginationQuery {
@@ -14,6 +14,92 @@ export interface PaginatedResponse<T> {
   total: number;
   page: number;
   pageSize: number;
+}
+
+export type SubmissionKind = 'station' | 'model' | 'post';
+export type SubmissionChannel = 'feishu' | 'agent' | 'web';
+export type SubmissionStatus = 'pending' | 'approved' | 'rejected' | 'superseded';
+
+export interface SubmissionRecord {
+  id: string;
+  kind: SubmissionKind;
+  channel: SubmissionChannel;
+  originKey: string;
+  batchId: string | null;
+  action: 'upsert' | 'remove';
+  payload: unknown;
+  actorHandle: string | null;
+  status: SubmissionStatus;
+  reason: string | null;
+  createdAt: string;
+  reviewedAt: string | null;
+}
+
+// POST /api/admin/submissions/batch。管理接口，不进公开契约。
+export interface AdminBatchSubmitRequest {
+  channel: SubmissionChannel;
+  // 不传时由服务端生成。
+  batchId?: string;
+  items: {
+    kind: SubmissionKind;
+    originKey: string;
+    payload: unknown;
+    actorHandle?: string | null;
+    action?: 'upsert' | 'remove';
+  }[];
+}
+export interface AdminBatchSubmitResponse {
+  batchId: string;
+  results: {
+    originKey: string;
+    kind: SubmissionKind;
+    id?: string;
+    status?: SubmissionStatus;
+    deduplicated?: boolean;
+    autoApproved?: boolean;
+    error?: { code: string; message: string };
+  }[];
+}
+
+// GET /api/admin/submissions/state。只供同步脚本比较已上线的队列站点。
+export interface InviteCode {
+  id: string;
+  codePrefix: string;
+  note: string | null;
+  /** null 表示不限次数。 */
+  maxUses: number | null;
+  usedCount: number;
+  createdAt: string;
+  expiresAt: string | null;
+  revokedAt: string | null;
+}
+
+export interface CreateInviteCodeRequest {
+  note?: string;
+  maxUses?: number | null;
+  expiresAt?: string | null;
+}
+
+export interface CreateInviteCodeResponse {
+  /** 明文只在这里返回一次，库里只有哈希。 */
+  code: string;
+  inviteCode: InviteCode;
+}
+
+export interface GetInviteCodesRequest { }
+
+export interface GetInviteCodesResponse {
+  items: InviteCode[];
+}
+
+export interface RevokeInviteCodeRequest { }
+
+export interface RevokeInviteCodeResponse {
+  inviteCode: InviteCode;
+}
+
+export interface AdminSubmissionStateResponse {
+  stations: { slug: string; submissionId: string; originKey: string; url: string | null; name: string }[];
 }
 
 export interface ApiErrorResponse {
@@ -43,6 +129,112 @@ export interface ChangePasswordRequest {
 }
 // 成功后该账号的其他会话全部失效，当前会话保留。
 export interface ChangePasswordResponse { ok: true }
+export interface CreateAgentTokenRequest {
+  label: string;
+  inviteCode?: string;
+}
+// 明文只在本次签发返回，之后列表只能读到展示前缀。
+export type CreateAgentTokenResponse = Pick<AgentToken, 'id' | 'tokenPrefix' | 'label' | 'createdAt'> & { token: string };
+export type GetAgentTokensRequest = EmptyRequest;
+export type GetAgentTokensResponse = AgentToken[];
+export interface RevokeAgentTokenRequest { id: string }
+export interface RevokeAgentTokenResponse { id: string; revokedAt: string }
+
+// Agent 提交直接接收投稿 payload，不接受 channel、actorHandle、batchId 或审核字段。
+export interface CreateAgentStationRequest {
+  name: string;
+  description: string;
+  url: string;
+  rechargeThreshold: number | null;
+  paymentMethods: string[];
+  offers: { modelSlug: string; rate: number; basis?: RateBasis; quotedAt?: ISODateTime | null }[];
+}
+export interface CreateAgentPostRequest {
+  title: string;
+  summary: string;
+  body: string;
+  authorName: string;
+  hostname?: string | null;
+  publishedAt?: string | null;
+}
+export interface AgentSubmitResponse {
+  submission: SubmissionRecord;
+  deduplicated: boolean;
+  // 管理员开启自动通过时为 true，此时 submission.status 已经是 approved。
+  autoApproved: boolean;
+}
+// 补录模型：vendor 必须是已有厂商，slug 已存在时服务端返回 409 MODEL_EXISTS。
+export interface CreateAgentModelRequest {
+  slug: string;
+  vendor: string;
+  name: string;
+  description: string;
+}
+export type CreateAgentStationResponse = AgentSubmitResponse;
+export type CreateAgentPostResponse = AgentSubmitResponse;
+export type CreateAgentModelResponse = AgentSubmitResponse;
+// 站内补录模型：和 Agent 通道同一套字段，走 web 渠道进同一个队列。
+export interface SuggestModelRequest {
+  slug: string;
+  vendor: string;
+  name: string;
+  description: string;
+}
+/** 模型补录没有文章实体可回，返回入队结果即可。 */
+export interface SuggestModelResponse {
+  id: string;
+  slug: string;
+  status: SubmissionStatus;
+  deduplicated: boolean;
+}
+/**
+ * 推荐一个新中转站。
+ *
+ * 在这之前站内用户**根本无法推荐站点**：网页投稿只有文章和补录模型两种，
+ * 站点只能由飞书同步或 Agent 送来。结果是站点供给完全依赖外部通道——
+ * 一个刚开的中转站读者无从提交，站方也收不到任何信号。
+ *
+ * 字段取「知道多少填多少」：网址必填（站点身份由 hostname 决定），
+ * 名称必填，报价、最低充值、支付方式都是可选的。管理员审核时再补全，
+ * 与飞书同步走同一个投稿队列和同一套物化逻辑。
+ */
+export interface SuggestStationRequest {
+  name: string;
+  url: string;
+  description?: string;
+  /** 每行一个「模型slug=倍率」，由前端拆分后按模型提交。 */
+  offers?: { modelSlug: string; rate: number; basis?: RateBasis; quotedAt?: ISODateTime | null }[];
+  rechargeThreshold?: number | null;
+  paymentMethods?: string[];
+}
+/** 站点推荐同样没有实体可回，返回入队结果。 */
+export interface SuggestStationResponse {
+  id: string;
+  status: SubmissionStatus;
+  deduplicated: boolean;
+}
+export interface GetAgentStatusRequest {
+  // 默认最近 20 条，最多 50 条。
+  limit?: number;
+}
+export interface AgentPendingQuota { limit: number; remaining: number }
+export interface AgentRateQuota extends AgentPendingQuota { retryAfter: number }
+export interface GetAgentStatusResponse {
+  handle: string;
+  pendingCount: number;
+  quotas: {
+    token: AgentRateQuota;
+    account: AgentRateQuota;
+    ip: AgentRateQuota;
+    pending: AgentPendingQuota;
+    globalPending: AgentPendingQuota;
+    // 本人待审内容涉及的 hostname；remaining 计入所有渠道关联该 hostname 的待审记录。
+    hostnames: (AgentPendingQuota & { hostname: string; pendingCount: number })[];
+  };
+  // originKey 必须带上：批量提交后收到一条 rejected + 理由「报价不准确」，
+  // 只有 id 的话提交方（尤其 Agent）不知道被拒的是哪个站。
+  submissions: Pick<SubmissionRecord, 'id' | 'kind' | 'status' | 'createdAt' | 'reason' | 'originKey'>[];
+}
 // 未登录时 HTTP 401，错误码 UNAUTHENTICATED；我的收藏、我的分享和所有写接口同样如此。
 export type GetMeRequest = EmptyRequest;
 export type GetMeResponse = CurrentUser;
@@ -64,6 +256,27 @@ export type GetMyFavoritesRequest = PaginationQuery;
 export type GetMyFavoritesResponse = PaginatedResponse<FavoriteItem>;
 export type GetMyPostsRequest = PaginationQuery;
 export type GetMyPostsResponse = PaginatedResponse<Post>;
+
+/**
+ * 「我的投稿」的一条记录，覆盖文章、模型、站点三类。
+ *
+ * `getMyPosts` 只返回文章，作者补录了模型或推荐了站点就查不到结果——
+ * 那两条通道有自己的审核流程和驳回理由，但提交人在站内看不到任何反馈。
+ */
+export interface MySubmission {
+  id: string;
+  kind: 'station' | 'model' | 'post';
+  status: SubmissionStatus;
+  /** 驳回理由；通过或待审时为 null。 */
+  reason: string | null;
+  /** 人可读的标题：文章取标题，模型取名称，站点取站名。 */
+  title: string;
+  createdAt: ISODateTime;
+  reviewedAt: ISODateTime | null;
+  /** 已通过时指向物化后的实体，方便前端给出去看它的链接。 */
+  targetSlug: string | null;
+}
+export type GetMySubmissionsResponse = PaginatedResponse<MySubmission>;
 export type GetVendorsRequest = PaginationQuery;
 export type GetVendorsResponse = PaginatedResponse<VendorWithModels>;
 
@@ -93,7 +306,7 @@ export interface GetPostsRequest extends PaginationQuery {
   sort?: PostSort;
   q?: string;
 }
-export type GetPostsResponse = PaginatedResponse<Post>;
+export type GetPostsResponse = PaginatedResponse<PostSummary>;
 export interface GetPostRequest { id: string }
 export type GetPostResponse = Post;
 export interface CreatePostRequest {
@@ -142,7 +355,7 @@ export interface SearchResponse {
 export type GetHotSearchesRequest = PaginationQuery;
 export type GetHotSearchesResponse = PaginatedResponse<string>;
 
-// POST /api/admin/import 的全量导入内容（scripts/sync-feishu.ts → Worker）。
+// POST /api/admin/import 的通用全量导入内容。
 // 这是受保护的运维接口，不属于公开 API，所以不进 ApiContracts 和 API_ROUTES。
 export interface CatalogImportStation {
   slug: string;
@@ -151,7 +364,7 @@ export interface CatalogImportStation {
   url: string;
   rechargeThreshold: number | null;
   paymentMethods: string[];
-  offers: { modelSlug: string; rate: number }[];
+  offers: { modelSlug: string; rate: number; basis?: RateBasis; quotedAt?: ISODateTime | null }[];
 }
 export interface CatalogImportPost {
   recordId: string;
@@ -163,6 +376,8 @@ export interface CatalogImportPost {
   publishedAt: string;
 }
 export interface CatalogImportRequest {
+  // 为 true 时，offers 里未收录的 modelSlug 会自动建成待补全的占位模型；默认 false 时仍报错。
+  allowNewModels?: boolean;
   stations: CatalogImportStation[];
   posts: CatalogImportPost[];
 }
@@ -172,7 +387,45 @@ export interface CatalogImportResponse {
   stations: number;
   offers: number;
   posts: number;
+  // 本次自动创建的占位模型 slug，已收录的模型不会重复列出。
+  createdModels: string[];
 }
+
+// POST /api/admin/models。管理接口，同样不进 ApiContracts。
+export interface AdminCreateModelRequest {
+  slug: string;
+  vendor: string;
+  name: string;
+  description: string;
+}
+export type AdminCreateModelResponse = Model;
+
+// PATCH /api/admin/models/:slug。slug 是主键不可改，其余可编辑字段都要给全。
+export interface AdminUpdateModelRequest {
+  vendor: string;
+  name: string;
+  description: string;
+}
+
+// DELETE /api/admin/models/:slug，要求显式确认，避免误删。
+export interface AdminDeleteModelRequest { confirm: true }
+export interface AdminDeleteModelResponse {
+  slug: string;
+  deleted: true;
+}
+// 模型仍被站点报价或文章引用时返回 409，stationCount / postCount 分别是引用它的站点数和文章数。
+export interface AdminDeleteModelInUseResponse {
+  error: { code: 'MODEL_IN_USE'; message: string; stationCount: number; postCount: number };
+}
+
+// POST /api/admin/vendors。管理接口，同样不进 ApiContracts。
+export interface AdminCreateVendorRequest {
+  slug: string;
+  name: string;
+  // 缺省等于 slug；前端遇到不认识的图标会降级显示站内图标。
+  iconKey?: string;
+}
+export type AdminCreateVendorResponse = Vendor;
 
 // POST /api/admin/users/:handle/disable。管理接口，同样不进 ApiContracts。
 export interface AdminDisableUserRequest { disabled: boolean }
@@ -186,11 +439,21 @@ export interface ApiContracts {
   login: { request: LoginRequest; response: ApiResponse<LoginResponse> };
   logout: { request: LogoutRequest; response: ApiResponse<LogoutResponse> };
   changePassword: { request: ChangePasswordRequest; response: ApiResponse<ChangePasswordResponse> };
+  createAgentToken: { request: CreateAgentTokenRequest; response: ApiResponse<CreateAgentTokenResponse> };
+  getAgentTokens: { request: GetAgentTokensRequest; response: ApiResponse<GetAgentTokensResponse> };
+  revokeAgentToken: { request: RevokeAgentTokenRequest; response: ApiResponse<RevokeAgentTokenResponse> };
+  createAgentStation: { request: CreateAgentStationRequest; response: ApiResponse<CreateAgentStationResponse> };
+  createAgentPost: { request: CreateAgentPostRequest; response: ApiResponse<CreateAgentPostResponse> };
+  createAgentModel: { request: CreateAgentModelRequest; response: ApiResponse<CreateAgentModelResponse> };
+  suggestModel: { request: SuggestModelRequest; response: ApiResponse<SuggestModelResponse> };
+  suggestStation: { request: SuggestStationRequest; response: ApiResponse<SuggestStationResponse> };
+  getAgentStatus: { request: GetAgentStatusRequest; response: ApiResponse<GetAgentStatusResponse> };
   getMe: { request: GetMeRequest; response: ApiResponse<GetMeResponse> };
   updateMe: { request: UpdateMeRequest; response: ApiResponse<UpdateMeResponse> };
   checkIn: { request: CheckInRequest; response: ApiResponse<CheckInResponse> };
   getMyFavorites: { request: GetMyFavoritesRequest; response: ApiResponse<GetMyFavoritesResponse> };
   getMyPosts: { request: GetMyPostsRequest; response: ApiResponse<GetMyPostsResponse> };
+  getMySubmissions: { request: PaginationQuery; response: ApiResponse<GetMySubmissionsResponse> };
   getVendors: { request: GetVendorsRequest; response: ApiResponse<GetVendorsResponse> };
   getModels: { request: GetModelsRequest; response: ApiResponse<GetModelsResponse> };
   getModel: { request: GetModelRequest; response: ApiResponse<GetModelResponse> };
@@ -207,4 +470,7 @@ export interface ApiContracts {
   getBanners: { request: GetBannersRequest; response: ApiResponse<GetBannersResponse> };
   search: { request: SearchRequest; response: ApiResponse<SearchResponse> };
   getHotSearches: { request: GetHotSearchesRequest; response: ApiResponse<GetHotSearchesResponse> };
+  createInviteCode: { request: CreateInviteCodeRequest; response: ApiResponse<CreateInviteCodeResponse> };
+  getInviteCodes: { request: GetInviteCodesRequest; response: ApiResponse<GetInviteCodesResponse> };
+  revokeInviteCode: { request: RevokeInviteCodeRequest; response: ApiResponse<RevokeInviteCodeResponse> };
 }

@@ -1,0 +1,55 @@
+# 由 zhidedeng-sync.timer 定时触发，把飞书收集表同步进投稿队列。
+#
+# 为什么用 oneshot + timer 而不是长驻进程：同步是「拉一次、算一张计划、提交一个
+# 批次」，跑完就该退出。长驻进程反而要自己处理间隔、重叠执行和崩溃重启。
+#
+# 安装（服务器上）：
+# sudo cp deploy/zhidedeng-sync.service deploy/zhidedeng-sync.timer /etc/systemd/system/
+# sudo systemctl daemon-reload
+# sudo systemctl enable --now zhidedeng-sync.timer
+#
+# 前置条件（缺一个这条 timer 就是在空转）：
+# 1. /etc/zhidedeng/zhidedeng.env里有 FEISHU_BASE_TOKEN、FEISHU_TABLE_ID、
+# LARKSUITE_CLI_CONFIG_DIR、SYNC_TOKEN、SITE_URL；
+# 2.服务器装了 lark-cli并且只读权限够读那张表；
+# 3.发布目录里有 sync-feishu.mjs ——它是 pnpm build的产物（和 server.mjs一起
+# 打进 release/），已经 bundle 了 @zhidedeng/shared，所以这里**不需要仓库、
+# 不需要 node_modules**，只要 node 本身。原先写成直接跑 scripts/sync-feishu.ts，
+# 而 deploy.sh 只 rsync release/，那个文件根本不存在，timer 每半小时报一次
+# MODULE_NOT_FOUND。
+#
+# 排查：journalctl -u zhidedeng-sync.service -n100
+# 同步脚本对任何非 2xx 都会中止并打印原因，默认不会半途写坏数据——表格为空时它
+# 会以退出码 2 拒绝执行，免得一次读空把在架站点全规划成下架。
+#
+# 运维约定：**下架要在飞书表格里做，不要只点审核台。**表格里还留着记录时，
+# 下一轮同步会把该站点按正常投稿重新上架（既有设计：群友填错后重新提交就该恢复）。
+[Unit]
+Description=zhidedeng Feishu table sync
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=zhidedeng
+Group=zhidedeng
+WorkingDirectory=/opt/zhidedeng
+EnvironmentFile=/etc/zhidedeng/zhidedeng.env
+# HOME 必须指向可写目录：真 lark-cli 是 Node CLI，常按惯例写 $HOME/.cache 或日志。
+# 不设的话 HOME 来自用户库（/home/zhidedeng），而下面 ProtectHome=true 会把它封掉。
+Environment=HOME=/var/lib/zhidedeng
+# 默认只提交待审批次，不会自作主张上线；自动通过是服务端设置
+# （PUT /api/admin/settings 的 autoApprove），不是这里的开关。
+ExecStart=/usr/bin/env node sync-feishu.mjs
+# 单次运行的上限：正常情况下几秒到几十秒；卡住时别把下次触发一起堵住。
+# 30分钟一次的调度减去15分钟上限，不会两次叠在一起。
+TimeoutStartSec=900
+UMask=0077
+StateDirectory=zhidedeng
+StateDirectoryMode=0700
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+# 仓库与发布目录只读；StateDirectory 给的 /var/lib/zhidedeng 可写，给 lark-cli 用。
+ReadWritePaths=/var/lib/zhidedeng
