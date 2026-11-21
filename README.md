@@ -215,6 +215,7 @@ curl -X POST -H "Authorization: Bearer $SYNC_TOKEN" -H 'Content-Type: applicatio
 export LARKSUITE_CLI_CONFIG_DIR=...  # lark-cli 配置目录，必填，不回落到默认的 ~/.lark-cli
 export FEISHU_BASE_TOKEN=... FEISHU_TABLE_ID=...
 export SITE_URL=http://127.0.0.1:8787 # 服务器本机地址
+#容器部署时这里是发布到宿主机的端口（compose里是8788），不是容器内的8787。
 export SYNC_TOKEN=...                 # 与服务环境文件相同，完整 dry-run 计划也需要
 
 pnpm sync:feishu --dry-run           # 只读 GET，打印计划或中止原因
