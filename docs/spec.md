@@ -141,6 +141,8 @@ channel 是队列的来源渠道，source 是物化内容的展示来源，二�
 | 方法 | 路径 | 当前用途 |
 |---|---|---|
 | POST | /api/admin/import | 运维全量导入，直接替换 submission 来源集合；输入同 slug 的 agent/user 站点会跳过 |
+导入是**替换 submission来源集合**：先删掉所有 `source = submission`且未下架的实体，再按快照重建。所以快照里没有的站点会被删掉——包括经审核队列上架的那些。这是「运维灌一份完整目录」的语义，不是增量合并；只想补几条就用队列或 `pnpm sync:feishu`。agent/user来源与已下架的站不受影响（前者受同 slug保护跳过，后者需要人工恢复）。`server/src/catalog.ts`的 `importCatalog`。
+
 | POST | /api/admin/models | 新增模型，厂商必须已存在，重名 409 MODEL_EXISTS |
 | PATCH | /api/admin/models/:slug | slug 不变，vendor/name/description 要给全，tags 保留 |
 | DELETE | /api/admin/models/:slug | 请求 confirm=true；站点报价或文章引用时 409 MODEL_IN_USE，含 stationCount/postCount |

@@ -104,3 +104,14 @@ describe('httpUrl 入库归一', () => {
     }
   });
 });
+ it.each(['https://a.com.:/', 'https://a.com.:', 'https://a.com..:/'])(
+  '空端口写法 %s被拒绝，库里不会留下 `.:`这种第二种写法',
+  value => {
+  expect(httpUrl.safeParse(value).success).toBe(false);
+  },
+ );
+ 
+ it('带端口的正常地址照旧接受，尾点仍然去掉', () => {
+  expect(httpUrl.parse('https://a.com.:8080/')).toBe('https://a.com:8080/');
+  expect(httpUrl.parse('https://a.com./')).toBe('https://a.com/');
+ });

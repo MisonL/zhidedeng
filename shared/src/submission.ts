@@ -52,6 +52,12 @@ export const httpUrl = z.string().max(300).refine(value => {
     // 全是点的 host（`https://./`、`https://../`）能被 URL 解析器接受，但把尾点删掉
     // 就是空 host，归一后得到 `https:///` 这种非法串——下游 `new URL(...)` 会抛
     // TypeError，入队变成 500、历史待审则永远审不掉。这类输入直接拒绝。
+
+    // 空端口的写法（`https://a.com.:/`、`https://a.com..:/`）URL解析器照收：
+    // 那个 `:`让「去尾点」看不出尾点，归一结果里留下 `.:`，同一站在库里又多了
+    // 一种写法。端口要么是数字、要么整个不写，这类输入直接拒绝。
+    const authority = value.slice(value.indexOf('://') + 3).split(/[/?#\\]/)[0];
+    if (authority.endsWith(':')) return false;
     if (url.hostname.replace(/\.+$/, '').length === 0) return false;
     return !isPrivateHostname(url.hostname);
   } catch {
