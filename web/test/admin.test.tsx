@@ -401,3 +401,22 @@ describe('待审卡片的变更提示', () => {
     expect(await screen.findByText(/最低倍率 0\.9x → 0\.3x/)).toBeInTheDocument();
   });
 });
+
+describe('Hook顺序', () => {
+ it('锁定态和解锁态渲染的 hook数量一致，不触发 React的 Hooks警告', async () => {
+ //回归：`useCatalog()`曾经被放在 `if (!token) return ...`之后。锁定态渲染到
+ //useEffect就结束，解锁态多出一个 useContext，React直接报
+ //「change in the order of Hooks」——这是硬性规则，不是可以忽略的警告。
+ const errors: string[] = [];
+ const spy = vi.spyOn(console, 'error').mockImplementation((...args: unknown[]) => {
+ errors.push(args.map(String).join(' '));
+ });
+ try {
+ await unlock();
+ await screen.findByRole('heading', { name: '审核台' });
+ expect(errors.filter(line => /order of Hooks/.test(line))).toEqual([]);
+ } finally {
+ spy.mockRestore();
+ }
+ });
+});
