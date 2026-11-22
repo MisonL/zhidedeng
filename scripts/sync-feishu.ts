@@ -519,7 +519,7 @@ function batchResult(body: unknown, items: AdminBatchSubmitRequest['items']): Ad
   return body as unknown as AdminBatchSubmitResponse;
 }
 
-async function main(dryRun: boolean, allowSkipped: boolean, allowRemoval: boolean, config: Config) {
+async function main(dryRun: boolean, allowSkipped: boolean, allowRemoval: boolean, allowBulkRemoval: boolean, config: Config) {
   const records = await readAllRecords(config);
   const models = await readModels(config.site);
   const { payload: batch, skipped, notes, validStations } = buildBatch(records, models);
@@ -538,13 +538,23 @@ async function main(dryRun: boolean, allowSkipped: boolean, allowRemoval: boolea
   if (validStations === 0 && state !== null && state.stations.length > 0) {
     throw new UnsafeBatchError(`成功解析的站点数为 0，线上仍有 ${state.stations.length} 个站点，为避免误下架已中止。请确认表格内容和读取结果后重试`);
   }
-  // 只拦「0 个」不够：读表只读到一小部分时，剩余站点会被当成已删除。
-  // 线上规模足够大时，解析出的站点数不足一半就停下来让人确认。
-  if (state !== null && state.stations.length >= 10 && validStations * 2 < state.stations.length) {
-    throw new UnsafeBatchError(
-      `本次只解析出 ${validStations} 个站点，线上有 ${state.stations.length} 个，差距过大，为避免批量误下架已中止。`
-      + '请核对表格内容与分页读取结果；确认无误后可用 --no-removal 只同步新增和更新',
-    );
+  //两道闸门，缺一不可：
+  //① 解析出的站点不到线上的一半就停。原判据是 strict <：线上12个站、只读到6个时
+  //   `validStations * 2 < state.stations.length`正好不成立，于是静默规划6个下架；
+  //   也去掉了「线上规模≥10才检查」的前置条件——9个站只读到1个同样危险。
+  //② 一次计划下架超过 max(3, 在架数的一半)要求显式 --allow-bulk-removal。
+  //   零星下线不该被拦，读表出问题不该静默删掉半张表。
+  if (state !== null && allowRemoval && !allowSkipped && state.stations.length > 0 && validStations * 2 <= state.stations.length) {
+    throw new UnsafeBatchError(`本次只解析出 ${validStations} 个站点，线上有 ${state.stations.length} 个，不到一半，为避免批量误下架已中止。`
+      + '请核对表格内容与分页读取结果；确认无误后可用 --no-removal 只同步新增和更新');
+  }
+  if (state !== null && allowRemoval && !allowSkipped && !allowBulkRemoval) {
+    const planned = planBatch(batch, state, allowSkipped, allowRemoval).removals.length;
+    const limit = Math.max(3, Math.floor(state.stations.length * 0.5));
+    if (planned > limit) {
+      throw new UnsafeBatchError(`本次计划下架 ${planned} 个站点，超过上限 ${limit} 个（在架 ${state.stations.length}），已中止。`
+        + '请确认表格里确实删了这些站；确认无误后加 --allow-bulk-removal 重跑，或用 --no-removal 只同步新增和更新');
+    }
   }
   const { payload, removals, added, updated } = planBatch(batch, state, allowSkipped, allowRemoval);
   console.log(state === null
@@ -595,9 +605,11 @@ if (process.argv[1] && realpathSync(process.argv[1]) === realpathSync(fileURLToP
   const allowSkipped = process.argv.includes('--allow-skipped');
   // 默认自动下架；--no-removal 只同步新增和更新。
   const allowRemoval = !process.argv.includes('--no-removal');
+  //批量下架要显式确认：解析数正常、但表格里真删了一大片时才会用到。
+  const allowBulkRemoval = process.argv.includes('--allow-bulk-removal');
   const secrets = () => ['FEISHU_BASE_TOKEN', 'SYNC_TOKEN'].map(name => process.env[name]).filter((value): value is string => Boolean(value));
   try {
-    await main(dryRun, allowSkipped, allowRemoval, readConfig(dryRun));
+    await main(dryRun, allowSkipped, allowRemoval, allowBulkRemoval, readConfig(dryRun));
   } catch (error) {
     // lark-cli 的错误输出可能回显命令行参数，打印前抹掉 token。
     const message = secrets().reduce((text, secret) => text.replaceAll(secret, '***'), error instanceof Error ? error.message : String(error));

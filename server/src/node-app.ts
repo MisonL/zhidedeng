@@ -25,12 +25,17 @@ export function openDatabase(path: string, options: { readOnly?: boolean } = {})
     `);
     const hasSubmissions = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'submissions'").get() !== undefined;
     if (hasSubmissions) ensureSubmissionColumns(openStore(db));
+    // 旧库的 entities 表没有 removedAt，必须**先补列再建索引**：
+    // SCHEMA 里有 `CREATE INDEX ... ON entities(kind, removedAt)`，顺序反了会在
+    // 「no such column: removedAt」上直接启动失败，而且 db.exec(SCHEMA) 不是事务，
+    // 会留下建了一半的表，重启也不会自愈。
+    const hasEntities = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'entities'").get() !== undefined;
+    if (hasEntities) {
+      const hasRemovedAt = db.prepare('PRAGMA table_info(entities)').all().some(row => row.name === 'removedAt');
+      if (!hasRemovedAt) db.exec('ALTER TABLE entities ADD COLUMN removedAt TEXT');
+    }
     db.exec(SCHEMA);
     if (!hasSubmissions) ensureSubmissionColumns(openStore(db));
-    // 旧库的 entities 表没有 removedAt，补一列。放在 SCHEMA 之后：
-    // 新库走到这里表已经建好，旧库也早就存在。
-    const hasRemovedAt = db.prepare('PRAGMA table_info(entities)').all().some(row => row.name === 'removedAt');
-    if (!hasRemovedAt) db.exec('ALTER TABLE entities ADD COLUMN removedAt TEXT');
     ensureAgentTokenColumns(openStore(db));
     // offers 表在 SCHEMA 里是 IF NOT EXISTS，老库不会因此长出 basis/quotedAt。
     ensureOfferColumns(openStore(db));

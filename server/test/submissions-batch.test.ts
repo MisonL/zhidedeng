@@ -235,7 +235,7 @@ describe('批次入队与审核', () => {
     await submit([{ ...stationItem('other.example.com'), payload: { ...(stationItem('other.example.com').payload as object), name: '第二版·新' } }], 'dep-order');
     await submit([depPost], 'dep-order');
     const reviewed = await batchReview('dep-order');
-    expect(reviewed.results.every(item => item.status === 'approved')).toBe(true);
+    expect(reviewed.results.every(item => item.status === 'approved' || item.status === 'superseded')).toBe(true);
     // 新版赢（组内倒序）
     expect(store.all('station').find(station => station.url === 'https://other.example.com/')?.name).toBe('第二版·新');
     // 文章关联到了那个站点（站点先物化）
@@ -1241,4 +1241,27 @@ describe('按 ids审核也满足物化依赖', () => {
    const published = rows.find(row => row.id.startsWith('sub-'));
    expect(published?.stationSlug).toBe('sub-ids-order-example-com');
  });
+
+  it('ids模式下先审新版把旧版标成 superseded 时，不把旧版报成失败', async () => {
+    //列表里同一站点常有新旧两版（都是 pending），审核台从上往下点「全部通过」时
+    //先审到新版，supersedePending 会把旧版标成 superseded。这行如果照实回
+    //ALREADY_REVIEWED，前端会把整批标成「N 条未通过」，管理员会一直重试。
+    const host = 'self-supersede.example.com';
+    const first = await submit([stationItem(host)]);
+    const second = await submit([stationItem(host)], 'batch-second');
+    const ids = [...first.results, ...second.results].map(result => result.id);
+    expect(ids).toHaveLength(2);
+    //新版（batch-second）排在前面，先审它；旧版会被本次运行替代。
+    const ordered = [ids[1], ids[0]];
+    const response = await send('/api/admin/submissions/batch-review', { ids: ordered, status: 'approved' });
+    expect(response.status).toBe(200);
+    const body = await response.json() as ReviewResponse;
+    //两行都按成功处理：新版 approved，旧版被替代不算失败，前端不报错。
+    expect(body.results).toHaveLength(2);
+    expect(body.results.filter(result => result.error)).toEqual([]);
+    const statuses = body.results.map(result => result.status).sort();
+    //被替代的那行如实回 superseded：前端看到的是「这条已是终态」而不是报错。
+    const rows = store.db.prepare('SELECT id, status FROM submissions WHERE id IN (?, ?)').all(ids[0]!, ids[1]!) as { id: string; status: string }[];
+    expect(rows.map(row => row.status).sort()).toEqual(['approved', 'superseded']);
+  });
 });

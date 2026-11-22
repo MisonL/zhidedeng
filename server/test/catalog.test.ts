@@ -281,18 +281,29 @@ describe('allowNewModels 自动收录', () => {
 });
 
 describe('删除模型', () => {
-  it('待审投稿引用模型时拒绝删除，否则那条投稿永远过不了审核', async () => {
-    const store = newStore();
-    // 先建一个没有任何引用的模型，再让一条待审站点投稿引用它。
-    store.put('model', 'temp-model', { slug: 'temp-model', vendor: 'anthropic', name: '临时模型', description: '', tags: [] });
-    // 走真实的投稿入队路径（全量导入不产生 submissions 行，它是直接物化的）。
-    enqueueSubmission(store, {
-      kind: 'station', channel: 'agent', originKey: 'pending.example.com', ip: '1.2.3.4', now: new Date('2026-11-06T03:00:00Z'),
-      payload: { name: '站', description: 'd', url: 'https://pending.example.com/', rechargeThreshold: null, paymentMethods: [], offers: [{ modelSlug: 'temp-model', rate: 0.5 }] },
-    }, { globalPendingBreaker: false });
-    expect(Number(store.db.prepare("SELECT count(*) AS c FROM submissions WHERE status = 'pending'").get()!.c)).toBe(1);
+ it('待审投稿引用模型时拒绝删除，否则那条投稿永远过不了审核', async () => {
+ const store = newStore();
+ //先建一个没有任何引用的模型，再让一条待审站点投稿引用它。
+ store.put('model', 'temp-model', { slug: 'temp-model', vendor: 'anthropic', name: '临时模型', description: '', tags: [] });
+ //走真实的投稿入队路径（全量导入不产生 submissions 行，它是直接物化的）。
+ enqueueSubmission(store, {
+ kind: 'station', channel: 'agent', originKey: 'pending.example.com', ip: '1.2.3.4', now: new Date('2026-11-06T03:00:00Z'),
+ payload: { name: '站', description: 'd', url: 'https://pending.example.com/', rechargeThreshold: null, paymentMethods: [], offers: [{ modelSlug: 'temp-model', rate:0.5 }] },
+ }, { globalPendingBreaker: false });
+ expect(Number(store.db.prepare("SELECT count(*) AS c FROM submissions WHERE status = 'pending'").get()!.c)).toBe(1);
+ //删除会被拒绝并说明是待审投稿占着。
+ expect(() => deleteModel(store, 'temp-model')).toThrow(/待审投稿/);
+ });
 
-    // 删除会被拒绝并说明是待审投稿占着。
-    expect(() => deleteModel(store, 'temp-model')).toThrow(/待审投稿/);
-  });
+ it('已下架文章引用模型时同样拒绝删除：文章恢复后 modelSlug 要有处可寻', async () => {
+ const store = newStore();
+ store.put('model', 'temp-model', { slug: 'temp-model', vendor: 'anthropic', name: '临时模型', description: '', tags: [] });
+ store.put('post', 'post-w', { id: 'post-w', kind: 'review', title: 't', summary: 's', body: 'b', authorHandle: 'demo-pedal', modelSlug: 'temp-model', stationSlug: null, cover: null, publishedAt: '2026-11-01T00:00:00Z', status: 'approved' } as never);
+ store.markRemoved('post', 'post-w', '2026-11-02T00:00:00Z');
+ expect(store.db.prepare("SELECT removedAt FROM entities WHERE kind = 'post' AND id = 'post-w'").get()!.removedAt).toBe('2026-11-02T00:00:00Z');
+ expect(() => deleteModel(store, 'temp-model')).toThrow(/文章/);
+ //恢复后同样拒绝（口径一致，不随下架状态变化）。
+ store.restore('post', 'post-w');
+ expect(() => deleteModel(store, 'temp-model')).toThrow(/文章/);
+ });
 });

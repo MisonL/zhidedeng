@@ -168,8 +168,19 @@ export async function hashPassword(password: string) {
 }
 
 export async function verifyPassword(password: string, stored: string) {
-  const [, salt, hash] = stored.split('$');
-  return timingSafeEqual(await derive(password, Buffer.from(salt, 'base64url')), Buffer.from(hash, 'base64url'));
+ //stored 由 scrypt生成，恒为 'scrypt$salt$hash' 三段 base64url。库被污染或
+//迁移出错时可能出现畸形串：不校验就 decode，timingSafeEqual 会因长度不匹配
+//抛 RangeError，该账号的登录/改密全部变成500。这里按「密码不匹配」处理。
+ const parts = stored.split('$');
+ if (parts.length !==3 || parts.some(part => part.length ===0 || !/^[A-Za-z0-9_-]+$/.test(part))) return false;
+ const [, salt, hash] = parts;
+ const saltBuf = Buffer.from(salt, 'base64url');
+ const hashBuf = Buffer.from(hash, 'base64url');
+ //scrypt 的 N=16384, r=8, p=1 →输出恒为64 字节、标准 salt16 字节；
+ //长度不对的串解不出正确哈希，直接按不匹配处理，不给 timingSafeEqual
+ //抛 RangeError 的机会（超长 salt会让两个 buffer长度必然不等）。
+ if (saltBuf.length !==16 || hashBuf.length !==32) return false;
+ return timingSafeEqual(await derive(password, saltBuf), hashBuf);
 }
 
 /** 用户名不存在时也算一次哈希，响应时间不暴露用户名是否存在。 */

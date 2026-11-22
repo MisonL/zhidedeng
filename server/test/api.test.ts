@@ -56,6 +56,14 @@ async function ok<K extends ApiRouteName>(name: K, input?: ApiContracts[K]['requ
 }
 
 describe('seed and read endpoints', () => {
+ it('公开读接口下发 no-store：响应体含登录态，不能被共享缓存保存', async () => {
+ for (const path of ['/api/stations', '/api/models', '/api/posts', '/api/rankings?tab=model', '/api/banners']) {
+ const response = await server.app.request(path);
+ expect(response.status).toBe(200);
+ expect(response.headers.get('cache-control')).toBe('no-store');
+ }
+ });
+
   it('GET vendors returns the ordered eleven vendors with 2–4 models each', async () => {
     const vendors = await ok('getVendors');
     expect(vendors.items.map(v => v.name)).toEqual(['OpenAI', 'Anthropic', 'Google', 'DeepSeek', 'xAI', 'Meta', '阿里通义', '字节豆包', '月之暗面', '智谱AI', 'MiniMax']);
@@ -171,6 +179,21 @@ describe('seed and read endpoints', () => {
     for (const items of Object.values(await ok('search', { q: 'a' }))) expect(items.length).toBeLessThanOrEqual(10);
     expect(await ok('search', { q: "' OR 1=1 --" })).toEqual({ models: [], stations: [], posts: [] });
   });
+
+ it('putVote/putFavorite 共享每用户滑窗，超限429 且响应带 retryAfter', async () => {
+ await signIn();
+ for (let index =0; index <30; index++) {
+ clock = new Date(clock.getTime() +1500);
+ await ok('putVote', { targetType: 'post', targetId: 'post-1', value: index %2 ===0 ? 'up' : 'down' });
+ }
+ clock = new Date(clock.getTime() +1500);
+ const blocked = await request('putVote', { targetType: 'post', targetId: 'post-1', value: 'up' });
+ expect(blocked.status).toBe(429);
+ expect((blocked.data as { error: { code: string; details?: { retryAfter?: number } } }).error.code).toBe('RATE_LIMITED');
+ //收藏与投票共享同一只桶：刚刚打满的是投票，收藏立即429。
+ const favBlocked = await request('putFavorite', { targetType: 'post', targetId: 'post-1', favorited: true });
+ expect(favBlocked.status).toBe(429);
+ });
 
   it('ranks live user-earned votes and community discussion after writes', async () => {
     await signIn();

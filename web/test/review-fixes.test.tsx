@@ -14,8 +14,21 @@ describe('模型比价表', () => {
     expect(await row('a')).toHaveClass('is-best');
     expect(await row('b')).toHaveClass('is-best');
     expect(await row('c')).not.toHaveClass('is-best');
+ });
+
+
+ it('跨口径不标「最低」：input 更便宜也抢不了 blended 的展示位', async () => {
+ //服务端 sortOffersForDisplay 保证 blended 组在前（组内 rate升序），input 组
+ //即使 rate 更低也排在后面。offers[0]是展示口径的代表，is-best 只发给与它
+ //同 rate 同口径的行；跨口径守卫改坏时这条会红。
+ const offer = (stationSlug: string, rate: number, basis: string) => ({ stationSlug, modelSlug: 'deepseek-v4', rate, basis, station: { ...station, slug: stationSlug, name: stationSlug } });
+ stubApi({ 'GET /api/models/deepseek-v4': { ...vendors[0].models[0], offers: [offer('bl-a',0.5, 'blended'), offer('in-b',0.5, 'input')] } });
+ renderApp('/models/deepseek-v4');
+ const row = async (name: string) => (await screen.findByRole('link', { name })).closest('tr');
+ expect(await row('bl-a')).toHaveClass('is-best');
+ expect(await row('in-b')).not.toHaveClass('is-best');
+ });
   });
-});
 
 describe('头像与封面取字', () => {
   const glyph = (nickname: string) => {

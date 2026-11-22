@@ -10,7 +10,7 @@ AI 模型中转站的导购与点评社区：比较相对倍率，看社区评�
 - 账户设置中签发、查看和吊销 AI Agent 凭证；明文仅签发时显示一次
 - AI Agent 使用 Bearer 凭证提交站点和评价，查询本人的审核状态与配额
 - 评论登录后发布即公开，有频率限制；投稿先审后发
-- 管理接口：投稿队列、整批审核、隐藏评论、禁用账号。网页端有审核台 `/admin`（填 `SYNC_TOKEN` 进入）：待审投稿/文章、批量通过、驳回理由、已下架站点恢复。默认只在服务器本机或内网访问，见下文「审核台怎么进」。
+- 管理接口：投稿队列、整批审核、隐藏评论、禁用账号、文章撤回与恢复（`/api/admin/posts/:id/withdraw`、`/restore` 与已下架文章列表）。网页端有审核台 `/admin`（填 `SYNC_TOKEN` 进入）：待审投稿/文章、批量通过、驳回理由、已下架站点恢复。默认只在服务器本机或内网访问，见下文「审核台怎么进」。
 - 飞书多维表格收集表同步（确定性脚本，不调用 LLM）
 
 ## 技术栈
@@ -140,6 +140,18 @@ sudo systemctl start zhidedeng-docker-backup.service #立刻验证一次
 **这一条必须做**：没有备份时，一次误操作、磁盘故障或 `VACUUM` 中断就是全站数据丢失，
 而库里是用户投稿、审核记录和账号。定时器默认 04:00 触发、带 10 分钟随机延迟、
 `Persistent=true`（关机错过的会在开机后补跑）。
+
+### 从备份恢复（必须先演练过才算有备份）
+
+备份的价值取决于恢复是否可执行。容器部署下按下面步骤演练（先在测试机走通一遍，别等事故现场第一次试）：
+
+1. `docker stop zhidedeng`——SQLite 不允许恢复时还有并发写入者。
+2. 校验备份文件本体：`sqlite3 /var/backups/zhidedeng/app-<时间戳>.db 'PRAGMA integrity_check; SELECT COUNT(*) FROM entities;'`，要求 `ok` 且行数大于0（脚本写入时已验过，恢复前再验一次是为了排除备份文件在盘上损坏）。
+3. 把当前库改名留底，再把备份换进去，删掉 `-wal`/`-shm`伴生文件（它们属于旧库）：
+ `docker run --rm -v zhidedeng_zhidedeng-data:/data -v /var/backups/zhidedeng:/bak:ro node:22-slim sh -c 'mv /data/zhidedeng.db /data/zhidedeng.db.bak-<时间戳> && cp /bak/app-<时间戳>.db /data/zhidedeng.db && rm -f /data/zhidedeng.db-wal /data/zhidedeng.db-shm'`（卷名以 `docker volume ls`实际输出为准）。
+4. `docker start zhidedeng`，`curl -s http://127.0.0.1:8787/api/health` 应返回 database ok，再抽查前台站点数。
+5. 版本方向：旧备份加当前代码可以直接启动（启动迁移自动补列）；反过来「新备份配旧代码」不行，恢复要用与备份 schema 相同或更新的代码。
+6. 直跑形态（`zhidedeng.service`）同理：`systemctl stop` 后把备份放到 `DB_PATH`，清理同名 `-wal`/`-shm`，再启动。
 
 之后每次发布，在本地：
 

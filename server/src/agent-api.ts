@@ -251,10 +251,11 @@ export class AgentApi {
     const rateQuota = (limiter: AttemptLimiter, key: string, max: number): AgentRateQuota => ({
       limit: max, remaining: limiter.remaining(key, time), retryAfter: limiter.retryAfter(key, time),
     });
-    // 这里全是读操作（rateQuota 只是读计数）。用 BEGIN DEFERRED 而不是
-    // store.transaction() 的 BEGIN IMMEDIATE：后者会先抢写锁，让「查一下还剩多少额度」
-    // 和别人的投稿互相排隊——而这个接口是 Agent 每次提交前都会打的。
-    // 开启读事务只为让下面几条查询看到同一个快照（pendingCount 与 hostnames 要自洽）。
+ // 这里全是同步读（rateQuota 只是读计数）。单进程、单连接下，语句之间没有
+ // 并发写能插进来，pendingCount 与 hostnames 天然自洽，不需要事务；开读事务
+ // 反而危险：外部写入（定时清理、备份、另一实例）恰好落在事务中途时，
+ // node:sqlite 会把快照判为失效并直接报 BUSY——已沿真实 HTTP路径复现——
+ //而这个接口是 Agent每次提交前都会打的。
     const read = () => {
       const pendingCount = this.pendingCount(request.handle);
       const hostnames = this.store.db.prepare(`SELECT DISTINCT (${HOSTNAME_SQL}) AS hostname FROM submissions
@@ -283,15 +284,8 @@ export class AgentApi {
         submissions: rows as unknown as GetAgentStatusResponse['submissions'],
       };
     };
-    if (this.store.inTransaction()) return read();
-    this.store.db.prepare('BEGIN DEFERRED').run();
-    try {
-      const result = read();
-      this.store.db.prepare('COMMIT').run();
-      return result;
-    } catch (error) {
-      try { this.store.db.prepare('ROLLBACK').run(); } catch { /* 已经结束就不用再回滚 */ }
-      throw error;
-    }
+ // 不开事务：见上。每条查询各自走隐式读事务，几条计数之间最多相差一次
+ // 相邻提交，对状态接口无关紧要；换来的是外部写入永远打不断它。
+ return read();
   }
 }

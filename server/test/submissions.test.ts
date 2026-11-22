@@ -359,7 +359,16 @@ describe('投稿管理接口', () => {
     const approved = await review(submission.id);
     expect(approved.status).toBe(200);
     expect(await approved.json()).toMatchObject({ id: submission.id, status: 'approved', reason: '已检查材料' });
-    const again = await review(submission.id);
+    //批量审核里传「请求前已终态」的 id：逐条回409 ALREADY_REVIEWED，
+ //而不是静默跳过——静默会让陈旧列表看起来像全部成功。
+ const batch = await server.app.request('/api/admin/submissions/batch-review', {
+ method: 'POST', headers: admin,
+ body: JSON.stringify({ ids: [submission.id], status: 'approved' }),
+ });
+ expect(batch.status).toBe(200);
+ const batchBody = await batch.json() as { results: { id: string; error?: { code: string } }[] };
+ expect(batchBody.results[0]!.error?.code).toBe('ALREADY_REVIEWED');
+ const again = await review(submission.id);
     expect(again.status).toBe(409);
     expect(await again.json()).toMatchObject({ error: { code: 'ALREADY_REVIEWED' } });
     expect((await review('missing-id')).status).toBe(404);
@@ -375,7 +384,7 @@ describe('投稿管理接口', () => {
     expect(await response.json()).toMatchObject({ results: [
       // 厂商缺失是可重试的（补回厂商就能审），所以错误码独立且记录保持 pending。
       { id: invalid.id, error: { status: 400, code: 'VENDOR_MISSING' } },
-      { id: 'missing-id', error: { status: 404, code: 'NOT_FOUND' } },
+ { id: 'missing-id', error: { status:404, code: 'NOT_FOUND' } }, //不存在的行回逐条404，调用方知道列表陈旧了。
       { id: valid.id, status: 'approved' },
     ] });
     expect(record(invalid.id).status).toBe('pending');

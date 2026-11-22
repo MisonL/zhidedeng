@@ -231,8 +231,11 @@ export function deleteModel(store: Store, slug: string): AdminDeleteModelRespons
     if (!store.get('model', slug)) throw new ApiError(404, 'NOT_FOUND', `模型不存在：${slug}`);
     const offers = store.db.prepare('SELECT COUNT(DISTINCT stationSlug) AS count FROM offers WHERE modelSlug = ?').get(slug)!;
     const stationCount = Number(offers.count);
-    // 文章也会关联模型，直接删会留下指向不存在模型的引用。
-    const posts = store.db.prepare("SELECT COUNT(*) AS count FROM entities WHERE kind = 'post' AND removedAt IS NULL AND json_extract(data,'$.modelSlug') = ?").get(slug)!;
+    // 文章也会关联模型，直接删会留下指向不存在模型的引用。已下架的文章也算：
+ // 它们可以被管理员恢复，恢复后 modelSlug必须有处可寻（wa-data实测：删除
+ // 被「已下架文章」引用的模型后，恢复的文章查不到模型、也不出现在任何 vendor
+ // 过滤组里——引用计数里漏掉它们就是这个缺口）。
+    const posts = store.db.prepare("SELECT COUNT(*) AS count FROM entities WHERE kind = 'post' AND json_extract(data,'$.modelSlug') = ?").get(slug)!;
     const postCount = Number(posts.count);
     // 待审投稿也算引用：站点投稿在入队时就校验过模型，删掉模型之后它再也没法
     // 通过审核，会变成一条永远拒绝的记录——而管理员并不知道自己刚删的模型

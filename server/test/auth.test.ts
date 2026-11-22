@@ -128,6 +128,21 @@ describe('登录与登出', () => {
     expect(await wrong.json()).toEqual(await missing.json());
   });
 
+ it('库里的畸形密码哈希按「密码错误」处理，登录/改密不再500', async () => {
+ await browser().register('alice');
+ const taint = (hash: string) => server.db.prepare('UPDATE accounts SET passwordHash = ?').run(hash);
+ //多轮循环会撞登录限流桶，畸形串的判定改走 verifyPassword直测；
+ //路由级只在首个畸形串上验一次真实行为（500→401）。
+ const { verifyPassword } = await import('../src/auth.ts');
+ for (const hash of ['scrypt$notb64!$alsonotb64!', 'scrypt$', 'scrypt$$', 'garbage', 'scrypt$ ok$ok',
+ 'scrypt$AAAAAAAAAAAAAAAAAAAAAA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+ 'scrypt$MesCDR4o1MebTvVJNdBbxw$L-LVMr9F7FzgB8gYSOByFZc2nA7BIvfjhbvRa4TAxd4aaa']) {
+ expect(await verifyPassword('right-horse-9', hash)).toBe(false);
+ }
+ taint('scrypt$notb64!$alsonotb64!');
+ expect((await browser().login('alice', 'right-horse-9')).status).toBe(401);
+ });
+
   it('种子里的虚构用户没有密码，不能登录', async () => {
     expect((await browser().login('demo-pedal', 'anything-at-all')).status).toBe(401);
   });

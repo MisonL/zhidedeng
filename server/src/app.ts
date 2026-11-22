@@ -63,6 +63,11 @@ const AGENT_TOKEN_PER_IP = 30;
 const CHECKIN_WINDOW_MS = 60 * 60_000;
 const CHECKIN_PER_USER = 5;
 
+//投票与收藏按用户滑窗限流：主键去重挡不住「反复切换值」的刷量写事务，
+//每次调用都全表扫描互动数据，不设闸会被低成本压库。
+const VOTE_WINDOW_MS =60_000;
+const VOTE_PER_USER = 30;
+
 // 这些读接口只有本人的数据，未登录直接 401。
 const PERSONAL_READS = new Set<ApiRouteName>(['getMe', 'getMyFavorites', 'getMyPosts']);
 
@@ -173,9 +178,17 @@ export function isTrustedProxy(remote: string | undefined, trusted: string): boo
 
 /** 是否是合法 IP 字面量（v4 或 v6）。用来把伪造头里的垃圾段直接丢掉。 */
 function isIpLiteral(value: string): boolean {
-  if (ipv4ToInt(value) !== null) return true;
-  // v6 至少要有一个冒号且只含十六进制、冒号、点和百分号作用域。
-  return value.includes(':') && /^[0-9a-fA-F:.%]+$/.test(value);
+ if (ipv4ToInt(value) !== null) return true;
+ //到这里不是纯 v4。带端口后缀的 v4（203.0.113.5:9999）含冒号、其余字符
+ //都在十六进制/点集合里，会被下面的正则误判成 v6 字面量——透传型反代下
+ //攻击者每次换端口就铸造一个新限流桶。段必须是 IP 本体，含端口直接丢。
+ if (/^\d{1,3}(\.\d{1,3}){3}:\d+$/.test(value)) return false;
+ //v6判据收紧：只含冒号和十六进制还不够（`a:999`、`deadbeef:88888888` 这类
+ //「一个冒号+数字尾巴」的段也会被放行，透传反代下换个尾巴就铸造新限流桶）。
+ //真正的 v6 要么有 ≥2 组冒号，要么含 ::（零压缩）。
+ if (!value.includes(":")) return false;
+ const colons = value.split(":").length -1;
+ return (colons >=2 || value.includes("::")) && /^[0-9a-fA-F:.%]+$/.test(value);
 }
 
 /**
@@ -227,6 +240,7 @@ export function buildApp(store: Store, now: () => Date, options: AppOptions = {}
   const agentApi = new AgentApi(store);
   // 签到是唯一「不限频 + 有写入 + 有奖励」的接口，之前完全没有闸门。
   const checkInByUser = new AttemptLimiter(CHECKIN_PER_USER, CHECKIN_WINDOW_MS, store, 'checkin-user');
+ const voteByUser = new AttemptLimiter(VOTE_PER_USER, VOTE_WINDOW_MS, store, 'vote-user');
 
   const app = new Hono<{ Bindings: Bindings }>();
   // 压缩必须在这里注册——Hono 按注册顺序匹配，注册晚了就只覆盖之后的路由。
@@ -448,10 +462,19 @@ function orderByMaterializeDependency(store: Store, ids: string[]): string[] {
     // 只回 {id, status}，不回整条 SubmissionRecord。
     // 500 条时整条记录让响应体到 295KB，而前端只用到「哪些失败、失败原因」；
     // 单条详情本来就有 /api/admin/submissions 可查。
-    const results: ({ id: string; status: string; reason: string | null } | { id: string; error: { status: number; code: string; message: string } })[] = [];
+ const results: ({ id: string; status: string; reason: string | null } | { id: string; error: { status: number; code: string; message: string } })[] = [];
     for (const id of ids) {
-      // 同批次的其他版本可能刚被前一条审核替代，这些已经不是待审条目。
-      if ('batchId' in input && store.db.prepare('SELECT status FROM submissions WHERE id = ?').get(id)?.status !== 'pending') continue;
+      // 无论按 ids 还是按 batchId，都跳过「已不是 pending」的行：ids模式下
+      // 同站的新旧两版都常在列表里，先审新版会把旧版 supersede掉；这行若照实
+      //报 ALREADY_REVIEWED，管理员会看到「N 条未通过」却无从修起——它本来就是
+      // 本次审核的正常结果，与 batchId模式一样静默跳过即可。
+      const row = store.db.prepare('SELECT status FROM submissions WHERE id = ?').get(id) as { status: string } | undefined;
+ //本次运行自己 supersede 的行（pending被前面条目的审核替代）是审核的正常
+ //结果，静默跳过；不存在或请求前已是终态的行，说明调用方拿到的是陈旧列表，
+ //必须报错让它刷新，静默吞掉会掩盖真实失败。
+ if (row?.status === 'superseded') { results.push({ id, status: 'superseded', reason: null }); continue; }
+ if (row === undefined) { results.push({ id, error: { status:404, code: 'NOT_FOUND', message: '投稿不存在' } }); continue; }
+ if (row.status !== 'pending') { results.push({ id, error: { status:409, code: 'ALREADY_REVIEWED', message: '投稿已审核或被新版本替代' } }); continue; }
       try {
         // reason 一并回：审核员需要知道「为什么被写成这个状态」
         // （例如下架目标不存在时写的是「站点已不存在，视为已下架」）。
@@ -459,7 +482,7 @@ function orderByMaterializeDependency(store: Store, ids: string[]): string[] {
         results.push({ id, status: reviewed.status, reason: reviewed.reason });
       } catch (error) {
         if (isDatabaseBusyError(error)) throw error;
-        if (error instanceof ApiError) results.push({ id, error: { status: error.status, code: error.code, message: error.message, ...error.details } });
+ if (error instanceof ApiError) results.push({ id, error: { status: error.status, code: error.code, message: error.message, ...error.details } });
         else {
           console.error(error);
           results.push({ id, error: { status: 500, code: 'INTERNAL_ERROR', message: '服务暂时不可用' } });
@@ -500,6 +523,9 @@ function orderByMaterializeDependency(store: Store, ids: string[]): string[] {
       // 被 strictObject 拒成 400，而调用方完全看不出是自己多带了一个参数；
       // `?vendor=` 这种空值同理（前端靠过滤空值绕过去了，外部调用方不会）。
       const raw: unknown = method === 'GET' ? normalizeQuery(schema, { ...c.req.query(), ...c.req.param() }) : JSON.parse(body || '{}');
+ //公开读接口的响应体含登录态（currentUserVote/favorited），是按 Cookie变体的：
+ //不下 no-store的话，前面一旦加 CDN/代理缓存，A用户的投票状态会被发给 B用户。
+ c.header('cache-control', 'no-store');
       return c.json(handler(new Service(store, now, handle), schema.parse(raw), clientIp(c, trustedProxies)));
     });
   }
@@ -806,8 +832,16 @@ function orderByMaterializeDependency(store: Store, ids: string[]): string[] {
     return { id: result.submission.id, status: result.submission.status, deduplicated: result.deduplicated };
   });
   route('getMySubmissions', z.strictObject(pagination), (service, input) => service.getMySubmissions(input));
-  route('putVote', z.strictObject({ ...target, value: z.enum(['up', 'down']).nullable() }), (service, input) => service.putVote(input));
-  route('putFavorite', z.strictObject({ ...target, favorited: z.boolean() }), (service, input) => service.putFavorite(input));
+ //投票与收藏共用同一道滑窗（429语义与签到一致）：两者都是登录后的
+ //高频可重复写，不设闸时同一会话每秒能打几百次全表扫描式写事务。
+ const voteGuard = (service: { handle: string | null }): void => {
+ const key = service.handle ?? '';
+ const wait = voteByUser.retryAfter(key, now().getTime());
+ if (wait > 0) throw new ApiError(429, 'RATE_LIMITED', '操作太频繁了，请稍后再试', { retryAfter: wait });
+ voteByUser.record(key, now().getTime());
+ };
+ route('putVote', z.strictObject({ ...target, value: z.enum(['up', 'down']).nullable() }), (service, input) => { voteGuard(service); return service.putVote(input); });
+ route('putFavorite', z.strictObject({ ...target, favorited: z.boolean() }), (service, input) => { voteGuard(service); return service.putFavorite(input); });
   route('getComments', z.strictObject({ ...pagination, ...target }), (service, input) => service.getComments(input));
   route('createComment', z.strictObject({ ...target, content: z.string().trim().min(1).max(2000), parentId: identifier.optional() }), (service, input) => service.createComment(input));
   route('getRankings', z.strictObject({ ...pagination, tab: z.enum(['model', 'community', 'expert']) }), (service, input) => service.getRankings(input));

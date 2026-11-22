@@ -8,7 +8,7 @@ Slogan：我们的 AI 中转指南。
 ## 技术栈与布局
 
 - pnpm workspace，Node 22，TypeScript 严格模式
-- `shared/`：`@zhidedeng/shared`，领域类型、API 类型、路由表、倍率常量与站点 slug 派生规则，作为前后端契约
+- `shared/`：`@zhidedeng/shared`，领域类型、API 类型、路由表、倍率常量（含计价口径 `RateBasis` 与报价时间 `quotedAt`契约字段）与站点 slug 派生规则，作为前后端契约
 - `server/`：Hono + `node:sqlite`，端口 8787，测试用 vitest；启动时自动建表，空库自动灌种子；生产环境同时托管前端
 - `web/`：Vite + React 19 + react-router，端口 5173，`/api` 代理到 8787；测试用 vitest + testing-library
 

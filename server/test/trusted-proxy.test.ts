@@ -24,6 +24,32 @@ function attempt(remote: string, forwarded: string) {
 }
 
 describe('可信反向代理', () => {
+ it('十六进制主体+端口尾巴的段也不是 v6：换尾巴不铸造新桶', async () => {
+ //`a:999`、`deadbeef:88888888` 只有一个冒号、不含 ::，不是任何 v6 地址；
+ //旧判据会把它们当 v6放行，normalizeIp归一成 a:999::/64 这类假桶。
+ const { server } = attempt('172.17.0.9', 'a:999');
+ for (let index =0; index <12; index++) {
+ clock = new Date(clock.getTime() +60_000);
+ const segment = `a:${1000 + index}`;
+ const response = await server.app.request('/api/auth/register', { method: 'POST', headers: { ...json, 'x-forwarded-for': segment }, body: JSON.stringify({ username: `hex${index}`, password: PASSWORD }) }, { incoming: { socket: { remoteAddress: '172.17.0.9' } } });
+ expect(response.status).toBe(index <10 ?200 :429);
+ }
+ });
+
+ it('XFF段必须是 IP 本体：带端口后缀的段被丢弃，不铸造新桶', async () => {
+ //段写成203.0.113.X:PORT（地址+端口都在换）。修正前 isIpLiteral 把这种
+ //段当 v6放行，normalizeIp剥掉端口后每个地址各得一个桶，12次注册全200；
+ //现在段不是 IP 本体就直接弃用，限流键退回直连地址，第11次起429。
+ const { server } = attempt('172.17.0.9', '203.0.113.5:1234');
+ for (let index =0; index <12; index++) {
+ clock = new Date(clock.getTime() +60_000);
+ const seg = `203.0.113.${index}:${1000 + index}`;
+ const response = await server.app.request('/api/auth/register', { method: 'POST', headers: { ...json, 'x-forwarded-for': seg }, body: JSON.stringify({ username: `probe${index}`, password: PASSWORD }) }, { incoming: { socket: { remoteAddress: '172.17.0.9' } } });
+ expect(response.status).toBe(index <10 ?200 :429);
+ }
+ });
+
+
   it('回环始终可信', () => {
     expect(isTrustedProxy('127.0.0.1', '')).toBe(true);
     expect(isTrustedProxy('::1', '')).toBe(true);

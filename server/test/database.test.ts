@@ -124,4 +124,22 @@ describe('offers 计价口径迁移', () => {
     // 再开一次不应报错（ALTER 只在缺列时执行）
     expect(() => openDatabase(path).close()).not.toThrow();
   });
+
+  it('旧库没有 removedAt时也能启动：补列必须发生在建索引之前', () => {
+    // SCHEMA 里有 `CREATE INDEX ... ON entities(kind, removedAt)`。原来的顺序是
+    // 先 exec(SCHEMA)再 ALTER，旧库（origin/main的 entities只有 kind/id/data）
+    // 直接报「no such column: removedAt」启动失败；而 exec(SCHEMA)不是事务，
+    // 半套表已经建好，重启也修不回来。
+    const path = join(mkdtempSync(join(tmpdir(), 'zdd-legacy-')), 'old.db');
+    const legacy = new DatabaseSync(path);
+    legacy.exec(`CREATE TABLE entities (kind TEXT NOT NULL, id TEXT NOT NULL, data TEXT NOT NULL, PRIMARY KEY (kind, id));
+      INSERT INTO entities (kind, id, data) VALUES ('station','sub-legacy','{"slug":"sub-legacy","name":"旧站","description":"d","url":"https://legacy.example.com/","rechargeThreshold":null,"paymentMethods":[],"offers":[]}');`);
+    legacy.close();
+    const db = openDatabase(path);
+    expect(db.prepare('PRAGMA table_info(entities)').all().map(row => row.name)).toContain('removedAt');
+    expect(db.prepare("SELECT id FROM entities WHERE kind = 'station'").all()).toEqual([{ id: 'sub-legacy' }]);
+    db.close();
+    // 再开一次不应报错（迁移幂等）
+    expect(() => openDatabase(path).close()).not.toThrow();
+  });
 });

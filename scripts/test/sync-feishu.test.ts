@@ -447,6 +447,53 @@ process.stdout.write(fs.readFileSync(${JSON.stringify(dir)} + '/' + fixture + '.
     expect(imports[0].body.items[0].action).toBe('upsert');
   });
 
+  it('线上站点只解析出不到一半时中止，避免读表出错静默规划大批下架', async () => {
+    online = { stations: Array.from({ length: 12 }, (index: number) => ({ slug: 'sub-live-' + index, submissionId: 'live-' + index, originKey: 'live-' + index + '.example.com', url: 'https://live-' + index + '.example.com/', name: '在架站点' })) };
+    const records = Array.from({ length: 6 }, (_, index) => goodRecord('record-' + index, 'station-' + index + '.example.com'));
+    const { code, output } = await runRecords(records);
+    expect(code).toBe(2);
+    expect(output).toContain('不到一半');
+    expect(imports).toEqual([]);
+    expect(requests.filter(request => request.method === 'POST')).toEqual([]);
+  });
+
+  it('一次计划下架超过在架数一半的上限时中止，不静默删掉半张表', async () => {
+    online = { stations: Array.from({ length: 4 }, (index: number) => ({ slug: 'sub-live-' + index, submissionId: 'live-' + index, originKey: 'live-' + index + '.example.com', url: 'https://live-' + index + '.example.com/', name: '在架站点' })) };
+    const records = Array.from({ length: 3 }, (_, index) => goodRecord('record-' + index, 'station-' + index + '.example.com'));
+    const { code, output } = await runRecords(records);
+    expect(code).toBe(2);
+    expect(output).toContain('超过上限');
+    expect(output).toContain('--allow-bulk-removal');
+    expect(imports).toEqual([]);
+  });
+
+  it('--allow-bulk-removal 显式确认后才按计划批量下架', async () => {
+    online = { stations: Array.from({ length: 4 }, (index: number) => ({ slug: 'sub-live-' + index, submissionId: 'live-' + index, originKey: 'live-' + index + '.example.com', url: 'https://live-' + index + '.example.com/', name: '在架站点' })) };
+    const records = Array.from({ length: 3 }, (_, index) => goodRecord('record-' + index, 'station-' + index + '.example.com'));
+    const { code } = await runRecords(records, ['--allow-bulk-removal']);
+    expect(code).toBe(0);
+    expect(imports).toHaveLength(1);
+    expect(imports[0].body.items.filter(item => item.action === 'remove')).toHaveLength(4);
+  });
+
+  it('--no-removal 只解析出一半也不触发批量下架闸门', async () => {
+    online = { stations: Array.from({ length:12 }, (index: number) => ({ slug: 'sub-live-' + index, submissionId: 'live-' + index, originKey: 'live-' + index + '.example.com', url: 'https://live-' + index + '.example.com/', name: '在架站点' })) };
+    const records = Array.from({ length:6 }, (_, index) => goodRecord('record-' + index, 'station-' + index + '.example.com'));
+    const { code } = await runRecords(records, ['--no-removal']);
+    expect(code).toBe(0);
+    expect(imports[0].body.items.filter(item => item.action === 'remove')).toEqual([]);
+    expect(imports[0].body.items).toHaveLength(6);
+  });
+
+  it('--no-removal 只同步新增更新，不受批量下架闸门影响', async () => {
+    online = { stations: Array.from({ length: 4 }, (index: number) => ({ slug: 'sub-live-' + index, submissionId: 'live-' + index, originKey: 'live-' + index + '.example.com', url: 'https://live-' + index + '.example.com/', name: '在架站点' })) };
+    const records = Array.from({ length: 3 }, (_, index) => goodRecord('record-' + index, 'station-' + index + '.example.com'));
+    const { code } = await runRecords(records, ['--no-removal']);
+    expect(code).toBe(0);
+    expect(imports[0].body.items.filter(item => item.action === 'remove')).toEqual([]);
+    expect(imports[0].body.items).toHaveLength(3);
+  });
+
   it.each([[[]], [['--dry-run']], [['--allow-skipped']]])('空记录且线上有站点时 %j 退出 2，零 POST', async args => {
     const { code, output } = await runRecords([], args);
     expect(code).toBe(2);

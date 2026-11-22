@@ -17,7 +17,7 @@ mkdir -p "$BACKUP_DIR"
 stamp="$(date +%Y%m%d-%H%M%S)"
 target="$BACKUP_DIR/app-$stamp.db"
 tmp_in_container="/data/.backup-$stamp.db"
-trap 'docker exec "$container" rm -f "$tmp_in_container" 2>/dev/null || true' EXIT
+trap 'rm -f "$BACKUP_DIR"/*.partial 2>/dev/null || true; docker exec "$container" rm -f "$tmp_in_container" 2>/dev/null || true' EXIT
 
 # 只读连接 + VACUUM INTO：不改动线上库，也不会阻塞它太久（库只有几百 KB）。
 docker exec "$container" node -e "
@@ -25,11 +25,10 @@ const { DatabaseSync } = require('node:sqlite');
 const db = new DatabaseSync('/data/zhidedeng.db', { readOnly: true });
 db.exec(\"VACUUM INTO '${tmp_in_container}'\");
 db.close();
-"
-if [ $? -ne 0 ]; then
+" || {
  echo "备份失败：容器内 VACUUM INTO没成功（容器 ${container}存在吗？镜像里有 node:sqlite吗？）" >&2
  exit 1
-fi
+}
 
 docker cp "$container:$tmp_in_container" "$target.partial"
 # docker cp 会沿用容器内文件的权限（node 以默认 umask 建的，644），

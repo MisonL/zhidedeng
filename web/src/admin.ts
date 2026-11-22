@@ -82,7 +82,7 @@ export interface AdminPostRow {
 
 export interface BatchReviewResult {
   id: string;
-  /** 审核后的状态。只回这两个字段，不回整条记录（500 条时那是 295KB 的无用载荷）。 */
+ /**审核后的状态：approved/rejected/superseded（被同批其他版本替代，不算失败）。只回这两个字段，不回整条记录（500条时那是295KB 的无用载荷）。 */
   status?: string;
   /** 服务端写入的审核理由，例如「站点已不存在，视为已下架」。 */
   reason?: string | null;

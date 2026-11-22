@@ -128,6 +128,8 @@ export default function Admin() {
     setSubmissions(undefined);
     setPosts(undefined);
     setRemoved(undefined);
+ setRemovedPosts(undefined);
+ setPublished(undefined);
     void load(tab, controller.signal);
     return () => controller.abort();
     // 只在密钥或页签变化时重取；load 每次渲染都是新函数，不参与依赖。
@@ -139,6 +141,8 @@ export default function Admin() {
     setSubmissions(undefined);
     setPosts(undefined);
     setRemoved(undefined);
+ setRemovedPosts(undefined);
+ setPublished(undefined);
     setError(undefined);
     setMessage(undefined);
   }

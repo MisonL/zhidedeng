@@ -13,7 +13,7 @@ WorkingDirectory=/opt/zhidedeng
 # 兜底：环境文件漏写时也按生产环境运行，Cookie 带 Secure。环境文件里的同名变量优先。
 Environment=NODE_ENV=production
 EnvironmentFile=/etc/zhidedeng/zhidedeng.env
-ExecStart=/usr/bin/node /opt/zhidedeng/server.mjs
+ExecStart=/usr/bin/env node /opt/zhidedeng/server.mjs
 Restart=on-failure
 RestartSec=3
 
