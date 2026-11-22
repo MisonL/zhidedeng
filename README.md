@@ -78,7 +78,7 @@ curl --connect-timeout 5 --max-time 30 -X POST \
 | 单 hostname 的站点及关联评价 pending，计入所有渠道 | 2 条 |
 | 全局队列 pending，计入所有渠道和类型 | 200 条 |
 
-速率使用进程内滑动窗口，只计成功新增的投稿；失败和幂等重试退还或不占用额度，状态查询不扣提交额度。速率超限返回 `429 RATE_LIMITED` 和 `retry-after` 秒数；待审数量超限返回 `409 TOO_MANY_PENDING`，消息说明维度。status 的 quotas 包含 token、account、ip 的 limit/remaining/retryAfter，pending/globalPending 的 limit/remaining，以及本人待审内容涉及的 hostnames 的 pendingCount/limit/remaining。待审余量基于 submissions 队列，审核或替代记录后释放。
+速率使用进程内滑动窗口，只计成功新增的投稿；失败和幂等重试退还或不占用额度，状态查询不扣提交额度。速率超限返回 `429 RATE_LIMITED` 和 `retry-after` 秒数；待审数量超限返回 `409 TOO_MANY_PENDING`，消息说明维度；站内 web 投稿的待审条数另有上限，超限返回 `429 PENDING_LIMIT`。status 的 quotas 包含 token、account、ip 的 limit/remaining/retryAfter，pending/globalPending 的 limit/remaining，以及本人待审内容涉及的 hostnames 的 pendingCount/limit/remaining。待审余量基于 submissions 队列，审核或替代记录后释放。
 
 内容规则：name 最多 60 字、description 最多 300 字；评价 title 最多 100 字、summary 最多 200 字、authorName 最多 30 字、body 最多 5000 字。报价使用已有模型，最多 100 项且不得重复，rate 遵循共享常量的 0.05~20 区间。根字段之外的投稿元数据不能由客户端指定。任意层级出现 uptime、firstTokenLatencyMs、foundedAt、status、score、lowestRate、authorHandle 或 apiKey、api_key、token、password、secret、accessToken、refreshToken、clientSecret、privateKey、authorization、credentials 等敏感字段都返回 `400 FORBIDDEN_FIELD` 并指明字段，字段名大小写及下划线/连字符变体同样拒绝。
 
@@ -96,7 +96,10 @@ pnpm build   # 产出 release/：server.mjs（单文件）、web/、backup-sqlit
 
 1. 安装 Node 22、nginx、sqlite3、rsync，创建运行用户 `zhidedeng`。
 2. 创建目录 `/opt/zhidedeng`（部署用户可写，运行用户可读）。数据目录 `/var/lib/zhidedeng` 由 systemd 的 `StateDirectory` 创建，权限 0700。
-3. 按 `.env.example` 写 `/etc/zhidedeng/zhidedeng.env`，权限 640。`DB_PATH` 放在 `/var/lib/zhidedeng` 下。`SYNC_TOKEN` 用 `openssl rand -hex 32` 生成，不足 32 位视为未配置。生产环境 Cookie 带 Secure，站点必须走 HTTPS。
+3. 按 `.env.example` 写 `/etc/zhidedeng/zhidedeng.env`，权限 640。`DB_PATH` 放在 `/var/lib/zhidedeng` 下。`SYNC_TOKEN` 用 `openssl rand -hex 32` 生成，不足 32 位视为未配置。
+ **Cookie 的 Secure 只在 `TLS_ENABLED=1` 时加**：这是运维在显式断言「本站对外是 HTTPS」。
+ 不设这个变量时（包括当前容器部署），cookie 不带 Secure——浏览器在 https 页面上仍会接受它，
+ 但一旦有 http 请求路径，会话就会跟着明文发出去。走反代终止 TLS 的部署必须设 `TLS_ENABLED=1`。
 4. 安装 `deploy/zhidedeng.service`、`deploy/zhidedeng-backup.service`、`deploy/zhidedeng-backup.timer`，启用服务和备份定时器。
 5. 替换 `deploy/nginx-site.conf.template` 的占位符后启用，并删掉发行版自带的 default 站点（两个 `default_server` 会冲突）。模板只监听 IPv4，Host 不是本站的请求直接断开，`/api/admin/` 默认只允许本机（IP 白名单，见「管理接口」一节）。
 6. 给部署用户配置免密 sudo，只授权 `deploy.sh` 用到的两条命令（`sudo visudo -f /etc/sudoers.d/zhidedeng`，`deploy` 换成实际用户）：
@@ -147,10 +150,19 @@ sudo systemctl start zhidedeng-docker-backup.service #立刻验证一次
 
 1. `docker stop zhidedeng`——SQLite 不允许恢复时还有并发写入者。
 2. 校验备份文件本体：`sqlite3 /var/backups/zhidedeng/app-<时间戳>.db 'PRAGMA integrity_check; SELECT COUNT(*) FROM entities;'`，要求 `ok` 且行数大于0（脚本写入时已验过，恢复前再验一次是为了排除备份文件在盘上损坏）。
-3. 把当前库改名留底，再把备份换进去，删掉 `-wal`/`-shm`伴生文件（它们属于旧库）：
- `docker run --rm -v zhidedeng_zhidedeng-data:/data -v /var/backups/zhidedeng:/bak:ro node:22-slim sh -c 'mv /data/zhidedeng.db /data/zhidedeng.db.bak-<时间戳> && cp /bak/app-<时间戳>.db /data/zhidedeng.db && rm -f /data/zhidedeng.db-wal /data/zhidedeng.db-shm'`（卷名以 `docker volume ls`实际输出为准）。
-4. `docker start zhidedeng`，`curl -s http://127.0.0.1:8787/api/health` 应返回 database ok，再抽查前台站点数。
-5. 版本方向：旧备份加当前代码可以直接启动（启动迁移自动补列）；反过来「新备份配旧代码」不行，恢复要用与备份 schema 相同或更新的代码。
+3. 把当前库改名留底，再把备份换进去，删掉 `-wal`/`-shm`伴生文件（它们属于旧库）。
+ **必须带 `--user`**：`docker run` 默认以 root 执行，`cp` 出来的库属主是 root；而应用以 `USER node`（uid 1000）运行、启动还要 `PRAGMA journal_mode=WAL` 写库，属主不对会直接 `attempt to write a readonly database`。
+ ```sh
+ docker run --rm --user 1000:1000 \
+   -v zhidedeng_zhidedeng-data:/data \
+   -v /var/backups/zhidedeng:/bak:ro \
+   node:22-slim sh -c 'mv /data/zhidedeng.db /data/zhidedeng.db.bak-<时间戳> && cp /bak/app-<时间戳>.db /data/zhidedeng.db && rm -f /data/zhidedeng.db-wal /data/zhidedeng.db-shm'
+ ```
+ 卷名以 `docker volume ls` 的实际输出为准。若已用 root 跑过，补一句 `chown 1000:1000 /data/zhidedeng.db` 也行。
+4. `docker start zhidedeng`，`curl -s http://<服务器地址>:<映射端口>/api/health` 应返回 database ok，再抽查前台站点数。
+ **别用 `127.0.0.1:8787`**：容器部署是端口映射（本仓库 compose 是 `172.16.81.4:8788->8787`），宿主 `127.0.0.1:8787` 并没有监听，照抄会误判成恢复失败。端口以 `docker inspect` 的 `PortBindings` 为准。
+5. 版本方向：旧备份加当前代码可以直接启动（启动迁移自动补列），这是**推荐方向**。
+ 反过来「新备份配旧代码」实测也能启动（迁移只加带默认值的列，旧二进制读得动），但旧代码不认新列，行为会退化，所以恢复时仍应使用与备份 schema 相同或更新的代码。
 6. 直跑形态（`zhidedeng.service`）同理：`systemctl stop` 后把备份放到 `DB_PATH`，清理同名 `-wal`/`-shm`，再启动。
 
 之后每次发布，在本地：
@@ -165,7 +177,10 @@ DEPLOY_HOST=user@your-server deploy/deploy.sh
 
 ## 管理接口
 
-不对公网开放：nginx 对 `/api/admin/` 返回 404，要在服务器本机直连。都要 `Authorization: Bearer $SYNC_TOKEN`，未配置密钥时一律拒绝。写接口要求 `Content-Type: application/json`。
+不对公网开放。两种形态的门不同，别混：
+ - **容器形态（当前生产）**：`docker-compose.yml` 直接映射端口（`172.16.81.4:8788->8787`），前面没有 nginx，管理接口对**整个可路由网段**可达。唯一的门是 32+ 位的 `SYNC_TOKEN`，未配置时一律 403「管理接口未启用」。别假设「只有本机能访问」。
+ - **直跑形态（nginx 反代）**：`/api/admin/` 走 `allow` + `deny all` 白名单，非白名单地址返回 **403**（不是 404），默认只放行 `127.0.0.1`。
+ 两种形态都要 `Authorization: Bearer $SYNC_TOKEN`，写接口要求 `Content-Type: application/json`。
 
 ### 让管理台用起来不那么麻烦
 
@@ -210,7 +225,7 @@ curl -X POST -H "Authorization: Bearer $SYNC_TOKEN" -H 'Content-Type: applicatio
 # 自动通过仅作用于 upsert：上架、更新和评价；下架始终等待人工确认
 curl -X POST -H "Authorization: Bearer $SYNC_TOKEN" -H 'Content-Type: application/json' \
   -d '{"autoApprove":true}' "$ADMIN/api/admin/settings"
-# 通过或拒绝用户文章（status: approved | rejected）。已上线的群友文章在此返回 409，待审飞书内容用投稿队列审核
+# 通过或拒绝用户文章（status: approved | rejected）。已上线的群友文章在此直接下架（软删除，可恢复），待审飞书内容用投稿队列审核
 curl -X POST -H "Authorization: Bearer $SYNC_TOKEN" -H 'Content-Type: application/json' \
   -d '{"status":"approved"}' "$ADMIN/api/admin/posts/<id>/review"
 # 隐藏或恢复评论（回复随父评论一起隐藏）

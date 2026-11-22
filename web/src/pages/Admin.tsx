@@ -162,7 +162,14 @@ export default function Admin() {
    * 只把错误放进 results[].error——不看它就会把部分失败报成全部成功。
    */
   async function approveAll() {
-    const ids = (submissions ?? []).map(item => item.id);
+    // 站点/模型必须排在文章前面：文章物化时要靠 hostname 反查站点 slug，
+    // 站点还没通过的话 stationSlug 会落成 null。服务端只在单次请求内排序，
+    // 超过 BATCH_REVIEW_LIMIT 时分块会把这个保证切断——所以在这里先排好，
+    // 再按顺序切块，块间也保持依赖顺序（与服务端 orderByMaterializeDependency 同规则）。
+    const ordered = [...(submissions ?? [])].sort(
+      (a, b) => Number(a.kind === 'post') - Number(b.kind === 'post'),
+    );
+    const ids = ordered.map(item => item.id);
     if (ids.length === 0) return;
     setBusy(true);
     setError(undefined);

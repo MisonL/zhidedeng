@@ -6,7 +6,7 @@ import { safeNext } from '../format';
 import { useMe } from '../state';
 
 const USERNAME = /^[A-Za-z0-9_]{3,20}$/;
-const MIN_PASSWORD = 8;
+const MIN_PASSWORD =10;
 
 /** 回跳地址只接受站内路径；已登录时不停留在表单页。 */
 function useAuthPage() {
@@ -129,7 +129,7 @@ export function Register() {
       <form onSubmit={submit} noValidate>
         <Field id="register-username" label="用户名" autoComplete="username" maxLength={20} value={form.username} onChange={change('username')} error={errors.username} hint="3~20 位字母、数字或下划线，注册后不能修改" />
         <Field id="register-nickname" label="昵称（可选，可以用中文）" autoComplete="nickname" maxLength={20} value={form.nickname} onChange={change('nickname')} />
-        <Field id="register-password" label="密码" type="password" autoComplete="new-password" maxLength={128} value={form.password} onChange={change('password')} error={errors.password} hint={`至少 ${MIN_PASSWORD} 位`} />
+        <Field id="register-password" label="密码" type="password" autoComplete="new-password" maxLength={128} value={form.password} onChange={change('password')} error={errors.password} hint={`至少 ${MIN_PASSWORD} 位，别用常见词或连续字符`} />
         <Field id="register-confirm" label="确认密码" type="password" autoComplete="new-password" maxLength={128} value={form.confirm} onChange={change('confirm')} error={errors.confirm} />
         {serverError && <p className="form-error" role="alert">{serverError}</p>}
         <button type="submit" className="btn btn-red submit-btn" disabled={submitting}>{submitting ? '注册中…' : '注册'}</button>

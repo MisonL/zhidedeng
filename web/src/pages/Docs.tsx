@@ -49,6 +49,13 @@ const GROUPS: { title: string; routes: Partial<Record<ApiRouteName, { summary: s
     },
   },
   {
+    title: '投稿与推荐（需登录，审核通过后才会出现在公开列表）',
+    routes: {
+      suggestStation: { summary: '推荐新中转站，进待审队列，可只填名称与地址；重复推荐同一站会合并', params: 'body: name（1~60 字）, url（1~300 字）, description?, offers?, rechargeThreshold?, paymentMethods?' },
+      suggestModel: { summary: '补录缺失的模型，进待审队列；模型已存在返回 409 MODEL_EXISTS', params: 'body: slug, vendor, name, description' },
+    },
+  },
+  {
     title: '互动',
     routes: {
       putVote: { summary: '投票，每人每对象一票，可改可撤，返回最新汇总', params: 'body: targetType=post|station, targetId, value=up|down|null' },
@@ -64,6 +71,15 @@ const GROUPS: { title: string; routes: Partial<Record<ApiRouteName, { summary: s
       getBanners: { summary: '首页 Banner' },
       search: { summary: '跨模型、中转站、文章搜索，每组最多 10 条', params: 'query: q' },
       getHotSearches: { summary: '热门搜索词' },
+    },
+  },
+  {
+    title: 'Agent 通道（请求头 authorization: Bearer <Agent 凭证>，非会话 Cookie）',
+    routes: {
+      getAgentStatus: { summary: '凭证身份、配额余量、名下最近投稿与已认领的域名', params: 'query: limit（1~50）' },
+      createAgentStation: { summary: '提交中转站与报价，URL 归一化后作为去重键', params: 'body: name, url, offers[{ modelSlug, rate, basis?, quotedAt? }], description?, rechargeThreshold?, paymentMethods?' },
+      createAgentModel: { summary: '补录模型，进待审队列', params: 'body: slug, vendor, name, description' },
+      createAgentPost: { summary: '提交评测文章，可关联已有站点与模型', params: 'body: title, summary, body, modelSlug?, stationSlug?, kind?' },
     },
   },
 ];

@@ -3,7 +3,7 @@
 定位：AI API 中转站的导购与点评社区，用值/不值投票、排行榜和信息流帮人选站。
 Slogan：我们的 AI 中转指南。
 
-本文按本分支代码核对（Agent 提交接口自 `ec0ad86` 起落地）。为避免行号随提交漂移，引用一律给出文件加函数或常量名。公开契约以 [`shared/src/api.ts`](../shared/src/api.ts) 和 [`shared/src/routes.ts`](../shared/src/routes.ts) 为准。CLI 与 Skill 位于前置分支 `feat/zd-cli`、`feat/zd-submit-skill`，尚未合入本分支。设计过程见 [方案 v2](plan-agent-submission-v2.md)，历史结论的修复状态见 [交叉审阅记录](review-summary.md)。
+本文按本分支代码核对（Agent 提交接口自 `ec0ad86` 起落地）。为避免行号随提交漂移，引用一律给出文件加函数或常量名。公开契约以 [`shared/src/api.ts`](../shared/src/api.ts) 和 [`shared/src/routes.ts`](../shared/src/routes.ts) 为准。CLI（`scripts/zdd.ts`）与 Skill（`.claude/skills/zdd-submit/`）已在本分支内。设计过程见 [方案 v2](plan-agent-submission-v2.md)，历史结论的修复状态见 [交叉审阅记录](review-summary.md)。
 
 ## 技术栈与布局
 
@@ -41,6 +41,7 @@ Slogan：我们的 AI 中转指南。
 
 - 用户名 + 密码注册，不要邮箱和手机号。用户名 3~20 位字母数字下划线，大小写不敏感唯一；昵称可中文；密码至少 8 位，scrypt 加随机盐。暂不支持找回密码；可在账户设置改密码，成功后其他会话失效
 - 会话是随机 token，HttpOnly、SameSite=Lax、生产环境 Secure，30 天；库里只存 SHA-256；可登出
+- 其余写接口的滑窗（都在 `server/src/app.ts` 顶部常量，进程内、重启清零）：签到 5 次/小时；投票与收藏**共用一只每用户滑窗** 30 次/分钟（同一个桶，刷投票和刷收藏互相占额度），超限 429 RATE_LIMITED 带 retryAfter；评论 5 次/分钟；改密 5 次/15 分钟。X-Forwarded-For 只在直连方属于 `TRUSTED_PROXIES` 时采信，取最右一段并做 IP 字面量校验（带端口后缀、映射 IPv4 数值非法、单冒号十六进制尾巴这几种段都丢弃），避免换一个写法就铸造出一个新限流桶。
 - 登录和注册进程内限流（IP + 用户名、用户名、IP 三层，失败次数在校验密码前预占），错误文案不区分用户名不存在、密码错和账号被禁用；拒绝常见弱密码；写接口要求 Content-Type: application/json
 - 未登录只读，写接口和个人接口返回 401 UNAUTHENTICATED。新用户初始 120 Token
 - AI Agent 凭证由本人使用会话 Cookie 管理。注册满 7 天、已有至少一篇审核通过的本人站内投稿、持有有效邀请码三选一；贡献准入只认 source=user 或未写 source 的文章，演示、飞书和 Agent 文章不计入，anonymous-submission 占位账号被拒绝。邀请码从环境变量 INVITE_CODES 读取，逗号分隔、去首尾空白、精确匹配，可重复使用（`server/src/agent-tokens.ts` 的 `requireEligibility`、`server/src/node-app.ts` 的邀请码解析）
@@ -49,7 +50,7 @@ Slogan：我们的 AI 中转指南。
 - 禁用账号会删除会话并阻止登录，已有公开内容保留；不会更新 agent_tokens.revokedAt，但 Agent 鉴权查询同时校验 accounts.disabledAt，禁用后已签发凭证立即失效。每次成功鉴权更新 lastUsedAt 并递增 useCount，提交与状态查询都计入（`server/src/moderation.ts` 的 `setAccountDisabled`、`server/src/agent-auth.ts` 的 `activeAgentHandle` 与 `agentHandle`）
 - Agent 提交另有独立配额：单凭证 10 条/小时、单账号 20 条/小时、单 IP 20 条/小时、单账号待审 5 条、单 hostname 待审 2 条（所有渠道合计）、全站待审 200 条。速率超限 429 RATE_LIMITED 带等待秒数，待审超限 409 TOO_MANY_PENDING 不带 retryAfter。公开 Agent 入口强制 pendingOnly，即使开启自动通过也不物化，响应固定 autoApproved: false（`server/src/agent-api.ts` 顶部常量与 `reserve`、`enqueue`）
 - 投票数和收藏数对所有人公开累计；评论登录后发布即公开，每账号每分钟 5 条
-- 投稿每账号每小时 10 篇、待审最多 20 篇。提交后是 pending，只有作者能在我的分享和详情页看到，通过后才公开。种子文章公开；飞书内容先进入投稿队列，默认待人工审核
+- 投稿每账号每小时 10 篇、待审最多 20 篇（统计窗口是站内 web 渠道的 post/model/station 三类一起算，不只是文章；Agent 通道另有自己的配额）。提交后是 pending，只有作者能在我的分享和详情页看到，通过后才公开。种子文章公开；飞书内容先进入投稿队列，默认待人工审核
 
 ## 投稿渠道与审核
 
@@ -136,7 +137,7 @@ channel 是队列的来源渠道，source 是物化内容的展示来源，二�
 
 ## 管理接口
 
-用 `Authorization: Bearer $SYNC_TOKEN` 校验，未配置或不足 32 字符时关闭；普通会话和 Agent 凭证不能代替。部署在 127.0.0.1，由 nginx 对公网 /api/admin/ 返回 404。写接口要求 Content-Type: application/json，普通请求体上限 512 KiB，import 和 submissions/batch 为 8 MiB。管理接口不进 API_ROUTES 或公开 /docs（`server/src/app.ts` 的管理路由段与 body limit 常量、`server/src/node-app.ts` 的 `SYNC_TOKEN` 处理、`deploy/nginx-site.conf.template`）。
+用 `Authorization: Bearer $SYNC_TOKEN` 校验，未配置或不足 32 字符时关闭；普通会话和 Agent 凭证不能代替。直跑形态部署在 127.0.0.1，由 nginx 对非白名单来源返回 403；容器形态没有 nginx，靠端口暴露范围与 SYNC_TOKEN 本身把关（见 README「管理接口」）。写接口要求 Content-Type: application/json，普通请求体上限 512 KiB，import 和 submissions/batch 为 8 MiB。管理接口不进 API_ROUTES 或公开 /docs（`server/src/app.ts` 的管理路由段与 body limit 常量、`server/src/node-app.ts` 的 `SYNC_TOKEN` 处理、`deploy/nginx-site.conf.template`）。
 
 | 方法 | 路径 | 当前用途 |
 |---|---|---|
@@ -160,6 +161,11 @@ channel 是队列的来源渠道，source 是物化内容的展示来源，二�
 | POST | /api/admin/posts/:id/withdraw | 下架一篇已发布文章（软删除），前台立刻不可见；演示数据 409 |
 | POST | /api/admin/posts/:id/restore | 恢复已下架文章，只清软删除标记 |
 | GET | /api/admin/posts/removed | 已下架文章列表，含下架时间 |
+| POST | /api/admin/stations/:slug/restore | 恢复已下架的站点，只清软删除标记 |
+| GET | /api/admin/stations/removed | 已下架站点列表，含下架时间 |
+| POST | /api/admin/accounts/reset-password | username + newPassword；同时清掉该账号全部会话与 Agent 凭证 |
+| POST / GET | /api/admin/invite-codes | 创建邀请码（note?、maxUses?、expiresAt?）/ 列出元数据，明文只在创建响应里出现一次 |
+| POST | /api/admin/invite-codes/:id/revoke | 吊销邀请码，重复调用保留首次吊销时间 |
 | POST | /api/admin/comments/:id/hide | hidden=true/false，隐藏父评论时回复也不公开 |
 | POST | /api/admin/users/:handle/disable | disabled=true/false，按用户名查账号；禁用时删除会话，公开内容保留 |
 
@@ -180,7 +186,7 @@ channel 是队列的来源渠道，source 是物化内容的展示来源，二�
 
 ## Agent 提交接口
 
-`POST /api/agent/stations`、`POST /api/agent/posts`、`GET /api/agent/status` 已注册在 `shared/src/routes.ts` 的 `API_ROUTES`，并在 `server/src/app.ts` 挂载。请求体是扁平 JSON，站点与评价各用 strict schema，任意层级的禁字段优先返回 400 FORBIDDEN_FIELD，其余校验失败返回 400 INVALID_INPUT；凭证缺失、吊销或账号禁用一律 401 UNAUTHENTICATED。提交强制待审，幂等与配额规则见上文「投稿渠道与审核」和「账号与权限」。完整字段、示例和配额表见 README 的「用 AI Agent 提交数据」。CLI 与 Skill 属于前置分支 `feat/zd-cli`、`feat/zd-submit-skill`，本分支不含它们的实现。
+`POST /api/agent/stations`、`POST /api/agent/posts`、`GET /api/agent/status` 已注册在 `shared/src/routes.ts` 的 `API_ROUTES`，并在 `server/src/app.ts` 挂载。请求体是扁平 JSON，站点与评价各用 strict schema，任意层级的禁字段优先返回 400 FORBIDDEN_FIELD，其余校验失败返回 400 INVALID_INPUT；凭证缺失、吊销或账号禁用一律 401 UNAUTHENTICATED。提交强制待审，幂等与配额规则见上文「投稿渠道与审核」和「账号与权限」。完整字段、示例和配额表见 README 的「用 AI Agent 提交数据」。CLI（`scripts/zdd.ts`）与 Skill（`.claude/skills/zdd-submit/`）都在本分支内，用法见 README。
 
 ## API（全部 JSON，前缀 /api）
 

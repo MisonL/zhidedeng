@@ -154,7 +154,9 @@ describe('注册页', () => {
   it.each([
     ['ab', 'correct-horse', 'correct-horse', '用户名须为 3~20 位字母、数字或下划线'],
     ['爱丽丝', 'correct-horse', 'correct-horse', '用户名须为 3~20 位字母、数字或下划线'],
-    ['alice', '1234567', '1234567', '密码至少 8 位'],
+    // 长度门槛与后端 isWeakPassword 的 MIN_LENGTH 一致（10），
+    // 前端只是提前拦一道；'1234567' 太短，服务端也会以 WEAK_PASSWORD 拒。
+    ['alice', '1234567', '1234567', '密码至少 10 位'],
     ['alice', 'correct-horse', 'different-horse', '两次输入的密码不一致'],
   ])('校验 %s / %s', async (username, password, confirm, message) => {
     const fetchMock = stubApi(signedOut);

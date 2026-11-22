@@ -140,6 +140,9 @@ export class AgentApi {
     // 厂商必须已存在。物化时才校验的话，一条注定失败的投稿会先占掉待审配额，
     // 提交方却看不到任何反馈。
     if (!this.store.get('vendor', payload.vendor)) throw new ApiError(400, 'INVALID_INPUT', `厂商不存在：${payload.vendor}`);
+    // 模型已存在就别入队了：这条投稿必然在物化时 MODEL_EXISTS 落 rejected，
+    // 白占一次待审配额，提交方也要等一次人工审核才知道。和厂商校验同理。
+    if (this.store.get('model', payload.slug)) throw new ApiError(409, 'MODEL_EXISTS', `模型 ${payload.slug} 已存在`);
     return this.enqueue('model', payload, `model:${payload.slug}`, null, request);
   }
 

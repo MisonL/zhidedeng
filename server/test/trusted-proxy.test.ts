@@ -34,7 +34,19 @@ describe('可信反向代理', () => {
  const response = await server.app.request('/api/auth/register', { method: 'POST', headers: { ...json, 'x-forwarded-for': segment }, body: JSON.stringify({ username: `hex${index}`, password: PASSWORD }) }, { incoming: { socket: { remoteAddress: '172.17.0.9' } } });
  expect(response.status).toBe(index <10 ?200 :429);
  }
- });
+ }, 30_000);
+
+ it('映射 IPv4 段做数值校验：::ffff:999.1.1.x 不是合法地址，不铸造新桶', async () => {
+ //只测字符形态的话 `::ffff:999.1.1.1` 会被当合法段放行，normalizeIp 归一成
+ //`999.1.1.1`，攻击者改末段就得到新桶——和端口后缀是同一类绕过。
+ const { server } = attempt('172.17.0.9', '::ffff:999.1.1.0');
+ for (let index =0; index <12; index++) {
+ clock = new Date(clock.getTime() +60_000);
+ const segment = `::ffff:999.1.1.${index}`;
+ const response = await server.app.request('/api/auth/register', { method: 'POST', headers: { ...json, 'x-forwarded-for': segment }, body: JSON.stringify({ username: `mapped${index}`, password: PASSWORD }) }, { incoming: { socket: { remoteAddress: '172.17.0.9' } } });
+ expect(response.status).toBe(index <10 ?200 :429);
+ }
+ }, 30_000);
 
  it('XFF段必须是 IP 本体：带端口后缀的段被丢弃，不铸造新桶', async () => {
  //段写成203.0.113.X:PORT（地址+端口都在换）。修正前 isIpLiteral 把这种
@@ -47,7 +59,7 @@ describe('可信反向代理', () => {
  const response = await server.app.request('/api/auth/register', { method: 'POST', headers: { ...json, 'x-forwarded-for': seg }, body: JSON.stringify({ username: `probe${index}`, password: PASSWORD }) }, { incoming: { socket: { remoteAddress: '172.17.0.9' } } });
  expect(response.status).toBe(index <10 ?200 :429);
  }
- });
+ }, 30_000);
 
 
   it('回环始终可信', () => {

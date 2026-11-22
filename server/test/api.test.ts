@@ -292,6 +292,19 @@ describe('writes and boundary validation', () => {
     expect(server.db.prepare("SELECT count(*) AS c FROM submissions WHERE channel = 'web' AND kind = 'station'").get()).toEqual({ c: 0 });
   });
 
+ it('推荐站的倍率越界当场 400，不进 pending 等人工发现', async () => {
+ await signIn();
+ // 放行 99999 的话这条会通过路由校验、在物化时被 stationSchema 拒掉，
+ // 整条记录停在 pending，审核台只看到一条「改不了也审不过」的坏行。
+ for (const rate of [99999, -5]) {
+ const result = await request('suggestStation', {
+ name: '越界站', url: 'https://out-of-range.example.com/', offers: [{ modelSlug: 'gpt-4-1', rate }],
+ });
+ expect(result.status).toBe(400);
+ }
+ expect(server.db.prepare("SELECT count(*) AS c FROM submissions WHERE channel = 'web' AND kind = 'station'").get()).toEqual({ c: 0 });
+ });
+
   it('报价带计价口径与来源时间，缺省按综合倍率读', async () => {
     // 回归：rate 只说「相对官方价多少」，不说这个数字怎么来的。输入按量、
     // 输出按量、打包价、综合四种口径下同一个数字含义完全不同，而榜单把

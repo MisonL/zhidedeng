@@ -6,7 +6,7 @@ import { compress } from 'hono/compress';
 import type { Context } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
 import { z, ZodError } from 'zod';
-import { API_ROUTES, PROFILE_LIMITS } from '@zhidedeng/shared';
+import { API_ROUTES, MAX_RATE, MIN_RATE, PROFILE_LIMITS } from '@zhidedeng/shared';
 import type { ApiContracts, ApiRouteName, ChangePasswordRequest, LoginRequest, RegisterRequest } from '@zhidedeng/shared';
 import { modelSchema, rateBasis } from '@zhidedeng/shared/submission';
 import { AttemptLimiter, burnPasswordCheck, clearedSessionCookie, createSession, deleteOtherSessions, deleteSession, hashPassword, INITIAL_TOKENS, isWeakPassword, sessionCookie, sessionHandle, USERNAME, verifyPassword } from './auth.ts';
@@ -178,14 +178,17 @@ export function isTrustedProxy(remote: string | undefined, trusted: string): boo
 
 /** 是否是合法 IP 字面量（v4 或 v6）。用来把伪造头里的垃圾段直接丢掉。 */
 function isIpLiteral(value: string): boolean {
+ //映射 IPv4（::ffff:1.2.3.4）必须做数值校验：只测字符形态的话
+ //`::ffff:999.1.1.1` 会被放行，normalizeIp 归一出 `999.1.1.1`，攻击者
+ //改末段就得到新桶——和端口后缀是同一类绕过。非法地址直接丢弃。
+ const mapped = value.match(/^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/i);
+ if (mapped) return ipv4ToInt(mapped[1]) !== null;
  if (ipv4ToInt(value) !== null) return true;
- //到这里不是纯 v4。带端口后缀的 v4（203.0.113.5:9999）含冒号、其余字符
- //都在十六进制/点集合里，会被下面的正则误判成 v6 字面量——透传型反代下
- //攻击者每次换端口就铸造一个新限流桶。段必须是 IP 本体，含端口直接丢。
+ //到这里不是纯 v4 也不是映射 v4。带端口后缀的 v4（203.0.113.5:9999）含冒号、
+ //其余字符都在十六进制/点集合里，会被下面的正则误判成 v6 字面量；段必须是 IP 本体。
  if (/^\d{1,3}(\.\d{1,3}){3}:\d+$/.test(value)) return false;
- //v6判据收紧：只含冒号和十六进制还不够（`a:999`、`deadbeef:88888888` 这类
- //「一个冒号+数字尾巴」的段也会被放行，透传反代下换个尾巴就铸造新限流桶）。
- //真正的 v6 要么有 ≥2 组冒号，要么含 ::（零压缩）。
+ //v6 判据：真正合法的 v6 要么 ≥2 组冒号，要么含 ::（零压缩），否则
+ //`a:999`、`deadbeef:88888888` 这类「一个冒号+数字尾巴」也会被放行。
  if (!value.includes(":")) return false;
  const colons = value.split(":").length -1;
  return (colons >=2 || value.includes("::")) && /^[0-9a-fA-F:.%]+$/.test(value);
@@ -800,7 +803,9 @@ function orderByMaterializeDependency(store: Store, ids: string[]): string[] {
     // 让用户随手写个「输入」以外的自由文本，等于把口径变成没人能比的字符串。
     offers: z.array(z.strictObject({
       modelSlug: z.string().trim().min(1).max(200),
-      rate: z.number(),
+      // 倍率范围与投稿契约同一套常量：放行 99999 会让这条推荐通过校验、
+      // 却在物化时被 stationSchema 拒掉，整条记录停在 pending 等人工发现。
+      rate: z.number().min(MIN_RATE).max(MAX_RATE),
       basis: rateBasis.optional(),
       quotedAt: z.iso.datetime({ offset: true }).nullish(),
     })).max(100).optional(),

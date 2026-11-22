@@ -71,7 +71,7 @@ server {
   proxy_set_header X-Forwarded-For $remote_addr;
   proxy_set_header X-Forwarded-Proto $scheme;
 
-  # 管理接口（含导入）。默认一律从服务器本机直连 127.0.0.1，对公网返回 404。
+  # 管理接口（含导入）。默认只放行服务器本机 127.0.0.1，其余来源返回 403（deny all 的默认状态码，不是 404）。
   #
   # 要走网页管理台又在服务器上开 SSH 隧道嫌麻烦时，在下面 allow 里加自己的出口 IP
   # 或办公网段（例如 allow 203.0.113.7; 或 allow 10.8.0.0/16;），再跑 nginx -s reload。
@@ -88,6 +88,10 @@ server {
   # 结果就是白名单被绕开、只剩 SYNC_TOKEN 一道门——和上面「第二道」的意图相反。
   # 正则里 `/api/admin(/|$)` 覆盖了后缀带斜杠和恰好等于 `/api/admin` 两种形态。
   location ~ ^/api/admin(/|$) {
+    # 应用侧 import / submissions/batch 的上限是 8 MiB（server/src/app.ts 的
+    # IMPORT_BODY_BYTES），而 server 级写的是 1 MiB——不覆盖的话 nginx 先回 413，
+    # 请求根本到不了应用，运维只会看到一句「请求太大」。留一倍余量承载 multipart 头部。
+    client_max_body_size 16m;
     # 只允许本机时保留这一行即可。
     allow 127.0.0.1;
     # 需要从外部访问时在下面这行之前追加 allow 条目。

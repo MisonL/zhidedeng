@@ -835,6 +835,14 @@ describe('Agent 补录模型', () => {
     expect(rows).toBe(1);
   });
 
+ it('模型 slug 已存在时直接 409，不入队占待审配额', async () => {
+ const key = credential();
+ // 已存在的模型在物化时必然 MODEL_EXISTS 落 rejected；入队只是让提交方
+ // 多等一次人工审核，还把一条注定失败的记录塞进待审队列。
+ await error(await submitModel(key, model({ slug: 'gpt-4-1' })), 409, 'MODEL_EXISTS', 'gpt-4-1');
+ expect(server.db.prepare("SELECT count(*) AS c FROM submissions WHERE kind = 'model'").get()).toEqual({ c: 0 });
+ });
+
   it('厂商不存在时拒绝', async () => {
     const key = credential();
     await error(await submitModel(key, model({ vendor: 'no-such-vendor' })), 400, 'INVALID_INPUT', 'no-such-vendor');
@@ -854,11 +862,13 @@ describe('Agent 补录模型', () => {
     expect(created?.tags).toEqual([]);
   });
 
-  it('slug 与已有模型冲突时落 rejected 终态，不卡在待审', async () => {
-    const key = credential();
-    const result = await submitted(await submitModel(key, model({ slug: store.all('model')[0]!.slug })));
-    expect(() => reviewSubmission(store, clock, result.submission.id, { status: 'approved' })).toThrow();
-    // MODEL_EXISTS 是永久失败，必须落终态，否则永久占配额。
-    expect(store.db.prepare('SELECT status FROM submissions WHERE id = ?').get(result.submission.id)!.status).toBe('rejected');
-  });
+ it('slug 与已有模型冲突时提交阶段就 409，不把注定失败的记录塞进队列', async () => {
+ const key = credential();
+ const existing = store.all('model')[0]!.slug;
+ // 早先的实现入队、等人工审核，物化时 MODEL_EXISTS 落 rejected——审核员
+ // 白审一次，提交方还要等一轮才知道。厂商不存在也是同样的道理，已在
+ // 提交阶段挡；模型重复一并挡，队列里不再出现注定失败的投稿。
+ await error(await submitModel(key, model({ slug: existing })), 409, 'MODEL_EXISTS', existing);
+ expect(server.db.prepare("SELECT count(*) AS c FROM submissions WHERE kind = 'model'").get()).toEqual({ c: 0 });
+ });
 });
