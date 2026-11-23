@@ -7,10 +7,11 @@
   },
   "scripts": {
     "dev": "pnpm -r --if-present dev",
-    "build": "pnpm -r --if-present build && rm -rf release && mkdir -p release && cp server/dist/server.mjs deploy/backup-sqlite.sh release/ && cp -R web/dist release/web && pnpm -F @zhidedeng/server exec esbuild ../scripts/sync-feishu.ts --bundle --platform=node --format=esm --target=node22 --outfile=../release/sync-feishu.mjs",
+    "build": "pnpm -r --if-present build && rm -rf release && mkdir -p release && cp server/dist/server.mjs deploy/backup-sqlite.sh release/ && cp -R web/dist release/web && pnpm -F @zhidedeng/server exec esbuild ../scripts/sync-feishu.ts --bundle --platform=node --format=esm --target=node22 --outfile=../release/sync-feishu.mjs && pnpm -F @zhidedeng/server exec esbuild ../scripts/purge-demo.ts --bundle --platform=node --format=esm --target=node22 --outfile=../release/purge-demo.mjs",
     "test": "pnpm -r --if-present test",
     "typecheck": "pnpm -r --if-present typecheck",
     "sync:feishu": "node scripts/sync-feishu.ts",
-    "backfill:submissions": "node scripts/backfill-submissions.ts"
+    "backfill:submissions": "node scripts/backfill-submissions.ts",
+    "purge:demo": "node scripts/purge-demo.ts"
   }
 }

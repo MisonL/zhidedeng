@@ -183,7 +183,14 @@ DEPLOY_HOST=user@your-server deploy/deploy.sh
 两条约束值得记住：
 
 - **拼错的值直接启动失败**（`SITE_MODE 只能是 demo 或 production`），不会静默退回默认模式。生产里拼成 `prod` 却按演示模式灌一批假站点，是不可逆的事故。
-- **切模式不会清理已有数据**。生产库一旦跑过演示模式，之后改成 `production` 也不会删掉那批虚构站——只会停止继续灌。要真正清干净，换一个空库（新卷）或手工删除 `source='demo'` 的条目。
+- **切模式不会清理已有数据**。生产库一旦跑过演示模式，之后改成 `production` 也不会删掉那批虚构站——只会停止继续灌。要清干净用下面这条，默认 dry-run，确认后加 `--apply`：
+
+  ```sh
+  pnpm purge:demo --db=<库路径>            # 只打印要删什么
+  pnpm purge:demo --db=<库路径> --apply    # 真删
+  ```
+
+  它按来源标记删除，不猜名字：`source='demo'` 的站点与文章、`demo-` 前缀的用户、仅有的三条横幅，以及它们的报价、投票、收藏、评论。真实投稿和真实账号一条不动，重跑幂等。容器部署直接在容器里跑：`docker exec zhidedeng node /app/release/purge-demo.mjs --db=/data/zhidedeng.db`（`pnpm build` 会把它和 `sync-feishu.mjs` 一起打进 `release/`）。
 
 当前模式会随启动日志（`{"event":"site.mode","mode":"production"}`）和 `/api/health` 的 `mode` 字段一起播报，运维不用翻环境变量就能确认。
 
