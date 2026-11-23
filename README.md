@@ -286,6 +286,8 @@ pnpm sync:feishu --allow-skipped     # 显式跳过坏记录，本次只提交 u
 
 ### 定时同步
 
+> **当前生产未部署。** 172.16.81.4 上只有 `zhidedeng-backup.{service,timer}`，没有 `zhidedeng-sync.*`；宿主也没有 lark-cli 和 `/opt/zhidedeng`。所以生产库里飞书渠道的投稿停在 2026-11-14，之后没有新的同步。要启用按本节装单元即可，不启用则内容只能靠 Agent 通道和站内投稿。
+
 手工跑一次只适合试水。长期运行用仓库里的 systemd 单元：
 
 ```sh
