@@ -9,17 +9,18 @@ Slogan：我们的 AI 中转指南。
 
 - pnpm workspace，Node 22，TypeScript 严格模式
 - `shared/`：`@zhidedeng/shared`，领域类型、API 类型、路由表、倍率常量（含计价口径 `RateBasis` 与报价时间 `quotedAt`契约字段）与站点 slug 派生规则，作为前后端契约
-- `server/`：Hono + `node:sqlite`，端口 8787，测试用 vitest；启动时自动建表，空库自动灌种子；生产环境同时托管前端
+- `server/`：Hono + `node:sqlite`，端口 8787，测试用 vitest；启动时自动建表，空库按 `SITE_MODE` 初始化（见「数据诚信」）；生产环境同时托管前端
 - `web/`：Vite + React 19 + react-router，端口 5173，`/api` 代理到 8787；测试用 vitest + testing-library
 
 ## 数据诚信（硬约束）
 
-- 种子里的中转站都是虚构样例，名称、倍率、可用率、延迟、评论、评测均为演示数据，严禁在种子里使用真实中转站名称
+- **演示模式与生产模式**：`SITE_MODE` 决定空库初始化写什么，只在空库时生效一次，不影响已有数据。`production`（`NODE_ENV=production` 时的默认值）只写厂商与模型目录——站点、文章、用户、横幅一律为空，必须来自真实投稿或飞书同步；`demo` 额外写 12 个虚构站、48 篇虚构文章和演示互动数据。非法取值直接启动失败而不是退回默认值，因为生产里拼错会灌入不可逆的假数据。当前模式随 `/api/health` 的 `mode` 字段播报（`server/src/node-app.ts` 的 `resolveSiteMode`、`server/src/seed.ts` 的 `seed`）
+- 种子里的中转站都是虚构样例（且只在 `demo` 模式写入），名称、倍率、可用率、延迟、评论、评测均为演示数据，严禁在种子里使用真实中转站名称
 - 飞书表单只采集审核状态严格等于「通过」的记录，再走平台投稿审核；物化后标明「群友提交，未经平台核实」。agent 渠道新建内容标明「AI 采集，未经平台核实」。这两种来源的评价正文按纯文本显示，用户站内投稿仍按 Markdown 渲染（`web/src/format.ts` 的 `sourceLabel`、`web/src/pages/PostDetail.tsx`）
 - 没有实测数据的可用率、延迟等指标一律为 null，页面显示「暂无」，不当 0 分也不编造。队列创建或更新站点时，`uptime`、`firstTokenLatencyMs`、`foundedAt`、`status` 都显式写 null；综合得分在 uptime 为 null 时同为 null，按得分或可用率排序时缺失值在后；同一分（或同一可用率）的站点按 slug 定序，保证全序稳定、翻页不重复不丢失（`server/src/submissions.ts` 的 `materialize`、`server/src/service.ts` 的 `station` 与排序分支）
 - Agent 入口在任意嵌套层级拒绝 `uptime`、`firstTokenLatencyMs`、`foundedAt`、`status`、`score`、`lowestRate` 和凭证类字段，返回 `400 FORBIDDEN_FIELD`，字段名忽略大小写、下划线和连字符。没有探测机制就不接受自报实测指标；score 和 lowestRate 由服务端算，凭证只用于鉴权（`server/src/agent-api.ts` 的 `forbidden` 与 `rejectForbiddenFields`）
 - 已有站点更新保留最初 source，不能把飞书站点改标成 Agent（站点被下架后重新同步也保留，物化用 `getWithRemoved` 取旧值——`store.get` 看不见已下架行，会把它当新站并清空四个指标）。队列下架拒绝 **demo** 来源，返回 `409 STATION_SOURCE_CONFLICT`；agent 与 user 来源允许下架（只认 submission 会让 Agent 自动上架的站点永远删不掉）。版本不符返回 `409 STALE_REMOVAL`，站点和报价不变。站点身份按 hostname 认领，飞书渠道按 `www`/裸域分组认领，**已下架的站点也参与认领**，否则换写法再同步会另建一条指标全空的新实体（`server/src/submissions.ts` 的 `removeStation`、`findStation`、`stationSlug`）
-- 全站页脚常驻声明，当前 `SITE_NOTICE` 文案仍只说明演示数据和群友提交；站点详情及内容标签已覆盖 agent。页脚缺少 Agent 来源说明是当前界面缺口（`web/src/format.ts` 的 `SITE_NOTICE`、`web/src/components/Layout.tsx`、`web/src/pages/Stations.tsx`）
+- 全站页脚常驻声明，`SITE_NOTICE` 分别点名三种来源：演示数据（demo）、群友表单提交（submission）、AI Agent 提交（agent）。三者性质不同——演示是虚构样例、群友是人工投稿、agent 是程序写入——少写一类会让读者把它归到另外两类里。站点详情与内容标签另有各自的来源标注（`web/src/format.ts` 的 `SITE_NOTICE`/`sourceLabel`、`web/src/components/Layout.tsx`、`web/src/pages/Stations.tsx`）
 - 价格只用「相对官方价的倍率」（如 0.6x），不写任何官方绝对价格。新写入倍率校验为闭区间 `0.05~20`；数据库 CHECK 仍为 `rate > 0`，历史异常数据不会自动修正（`shared/src/domain.ts` 的 `MIN_RATE`/`MAX_RATE`、`server/src/catalog.ts` 的 `offerRate`、`server/src/database.ts` 的 offers 表）
 - 模型榜至少有 3 个站点报**综合口径**（`basis = blended`）才启用最低倍率加成，且达标模型优先；不足 3 个仍返回 lowestRate 供展示。站点按倍率排序也先排列综合口径至少 3 个的站点——门槛与最低倍率的统计口径必须一致，否则会出现「够格参与加成却算不出可比最低价」的自相矛盾。没有综合口径报价的站 `lowestRate` 为 `null`，在 `?sort=rate` 里无条件排在最后，两站都为 `null` 时按 slug 兜底（严格全序，避免分页重复）。详情仍展示现有报价，先按口径分组、组内按倍率升序，认不出的口径排最后（`server/src/service.ts` 的 `getRankings`、`hasEnoughOffersForRate`、`sortOffersForDisplay`）
 - 厂商名和模型名可用真实名称，只作分类用途

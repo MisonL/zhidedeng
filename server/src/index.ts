@@ -8,7 +8,9 @@ const port = Number(process.env.PORT ?? 8787);
 if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('PORT 必须是 1～65535 的整数');
 // 打包后 web/ 和 server.mjs 同目录；开发时没有这个目录，前端由 Vite 提供。
 const webRoot = process.env.WEB_ROOT ?? fileURLToPath(new URL('./web', import.meta.url));
-const { app, db, store } = createApp({ webRoot: existsSync(webRoot) ? webRoot : undefined });
+const { app, db, store, siteMode } = createApp({ webRoot: existsSync(webRoot) ? webRoot : undefined });
+// 启动即播报模式：运维一眼能确认这个环境是演示还是生产，不用翻环境变量。
+console.log(JSON.stringify({ event: 'site.mode', mode: siteMode }));
 // 默认只监听本机，公网流量经 nginx 反代进来；X-Forwarded-For 的信任也依赖这一点。
 // 容器里没有宿主机的 nginx 同网段可达性，必须显式设 HOST=0.0.0.0 才能被反向代理访问。
 // 放宽监听面等于放弃「只有本机能直连」这层保护，所以要么设 HOST，要么保持默认。

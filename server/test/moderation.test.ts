@@ -306,7 +306,9 @@ describe('GET /api/health', () => {
     const response = await server.app.request('/api/health');
     expect(response.status).toBe(200);
     // checks 里会逐项列出检查了什么，方便排障时判断是哪一层坏了。
-    expect(await response.json()).toEqual({ status: 'ok', checks: { database: 'ok' } });
+    // mode 也一并返回：运维不翻环境变量就能确认这个环境是演示还是生产。
+    // 测试环境 NODE_ENV=test，按「非生产即 demo」的默认规则落到 demo。
+    expect(await response.json()).toEqual({ status: 'ok', checks: { database: 'ok' }, mode: 'demo' });
     expect(response.headers.get('set-cookie')).toBeNull();
   });
 });

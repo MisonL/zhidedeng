@@ -10,7 +10,8 @@ const now = () => new Date('2026-11-06T01:00:00Z');
 
 function newStore() {
   const store = openStore(openDatabase(':memory:'));
-  seed(store, new Date('2026-11-05T00:00:00Z'));
+  // 这个文件要演示站的报价做对照，显式要 demo；生产模式只剩目录。
+  seed(store, new Date('2026-11-05T00:00:00Z'), 'demo');
   return store;
 }
 

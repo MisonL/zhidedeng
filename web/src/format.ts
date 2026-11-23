@@ -7,7 +7,15 @@ export const KIND_LABEL: Record<PostKind, string> = {
 export const DISCLAIMER = '当前为演示数据，不构成消费建议';
 export const SUBMISSION_LABEL = '群友提交，未经平台核实';
 export const AGENT_LABEL = 'AI 采集，未经平台核实';
-export const SITE_NOTICE = '带「虚构」字样的站点与内容是演示数据；标注「群友提交」的内容来自群友表单，未经平台核实。两者均不构成消费建议';
+/**
+ * 页脚总声明。三种来源必须各自点名：
+ * - demo：种子数据，但界面上会和真实内容混在一起；
+ * - submission：群友表单提交；
+ * - agent：AI Agent 通过公开接口提交。
+ * 少写 agent 一类时，页脚只说「演示数据」和「群友提交」，读者会把 AI 采集的内容
+ * 当成这两者之一——而它是程序写的，性质既不是演示也不是人工提交。
+ */
+export const SITE_NOTICE = '带「虚构」字样的站点与内容是演示数据；标注「群友提交」的内容来自群友表单、标注「AI 采集」的内容来自 AI Agent 提交，两类均为用户或程序提供、未经平台核实。以上均不构成消费建议';
 
 export function sourceLabel(source: ContentSource | 'user' | undefined): string | null {
   if (source === 'submission') return SUBMISSION_LABEL;

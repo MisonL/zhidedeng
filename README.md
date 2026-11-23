@@ -39,7 +39,7 @@ pnpm dev
 | 前端（Vite，`/api` 代理到后端） | http://localhost:5173 |
 | 后端 API | http://127.0.0.1:8787 |
 
-数据库默认在 `server/data/app.db`，空库自动写入演示数据。启动时会幂等补齐投稿表的 `batchId` 和 `action` 列，并建立批次索引，保留已有投稿和业务数据。
+数据库默认在 `server/data/app.db`。启动时会幂等补齐投稿表的 `batchId` 和 `action` 列，并建立批次索引，保留已有投稿和业务数据。空库灌哪些数据由 `SITE_MODE` 决定（见下）。
 
 Agent 凭证表由启动建表流程自动创建，已有库不需要另行迁移。凭证以 `zd_` 加 32 字节随机数的 base64url 编码组成，数据库只保留 SHA-256 和前八字符展示前缀，完整明文无法取回。注册满 7 天、有至少一篇审核通过的非演示投稿，或填写有效邀请码即可签发。邀请码在库里管理：`POST /api/admin/invite-codes` 创建（可设次数上限、有效期、备注），明文只在创建响应里返回一次，库里只存 SHA-256 与前缀；`GET /api/admin/invite-codes` 列出用量，`POST /api/admin/invite-codes/:id/revoke` 吊销。同一账号对同一个码只核销一次，已核销过的账号即使码后来用完或吊销也仍可续签。环境变量 `INVITE_CODES`（逗号分隔）作为兼容保留，用于还没建码的老部署。每账号最多 5 个活跃凭证，吊销后可补发；`lastUsedAt` 在尚未使用时为 null，`useCount` 从 0 开始。签发和吊销通过现有服务日志记录不含秘密的结构化事件。`/api/account/agent-tokens` 管理接口使用登录会话，下面的 Agent 提交接口使用签发的凭证。命令行工具 `zdd` 把整套接口包装成给 Agent 用的八个命令（`login` / `whoami` / `catalog` / `station` / `match` / `validate` / `submit` / `status`），见「Agent 提交接口」一节。
 
@@ -173,7 +173,19 @@ DEPLOY_HOST=user@your-server deploy/deploy.sh
 
 它会跑测试、构建、rsync、重启服务并做健康检查（`GET /api/health`）。可选变量见脚本开头。
 
-演示数据只在空库时写入。改了 `server/src/seed.ts` 不会影响已有数据库。
+空库初始化由 `SITE_MODE` 决定，只在**空库时生效一次**（改了 `server/src/seed.ts` 也不会影响已有数据库）：
+
+| `SITE_MODE` | 空库写入什么 | 用在哪 |
+|---|---|---|
+| `production`（`NODE_ENV=production` 时的默认值） | 只写厂商与模型目录。站点、文章、用户、横幅全部为空，必须由真实投稿或飞书同步产生 | 生产 |
+| `demo`（非生产环境的默认值） | 目录 + 12 个虚构站、48 篇虚构文章、演示用户与互动数据 | 本地开发、演示站 |
+
+两条约束值得记住：
+
+- **拼错的值直接启动失败**（`SITE_MODE 只能是 demo 或 production`），不会静默退回默认模式。生产里拼成 `prod` 却按演示模式灌一批假站点，是不可逆的事故。
+- **切模式不会清理已有数据**。生产库一旦跑过演示模式，之后改成 `production` 也不会删掉那批虚构站——只会停止继续灌。要真正清干净，换一个空库（新卷）或手工删除 `source='demo'` 的条目。
+
+当前模式会随启动日志（`{"event":"site.mode","mode":"production"}`）和 `/api/health` 的 `mode` 字段一起播报，运维不用翻环境变量就能确认。
 
 ## 管理接口
 

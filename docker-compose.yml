@@ -33,6 +33,9 @@ services:
       # 前面必须挂 HTTPS 反代并透传 X-Forwarded-Proto，否则登录态不被浏览器保存。
       # 纯本机试用（http://127.0.0.1）保持默认 0 即可。
       TLS_ENABLED: ${TLS_ENABLED:-0}
+      # 演示数据只在空库时灌。生产库不该凭空出现虚构站点与虚构文章；
+      # 想在测试机上演示，显式设 demo 并配一个新的数据卷。
+      SITE_MODE: ${SITE_MODE:-production}
       INVITE_CODES: ${INVITE_CODES:-}
     volumes:
       - zhidedeng-data:/data

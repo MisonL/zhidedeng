@@ -96,6 +96,11 @@ export interface AppOptions {
    * deploy.sh 会报告「部署完成」，而用户打开是白屏。
    */
   webRoot?: string;
+  /**
+   * 站点模式，仅用于对外播报（健康检查）和前端提示。
+   * 数据侧的影响在 seed 里：演示模式才灌虚构站点与文章。
+   */
+  siteMode?: 'demo' | 'production';
 }
 
 interface Bindings {
@@ -297,16 +302,17 @@ export function buildApp(store: Store, now: () => Date, options: AppOptions = {}
   app.get('/api/health', c => {
     // 数据库可达是底线；配了静态目录时再确认前端入口还在。
     store.db.prepare('SELECT 1').get();
+    // mode 一并播报：运维不用翻环境变量就能确认这个环境是演示还是生产。
     const checks: Record<string, string> = { database: 'ok' };
     if (options.webRoot) {
       const index = join(options.webRoot, 'index.html');
       if (!existsSync(index)) {
         checks.frontend = 'missing';
-        return c.json({ status: 'degraded', checks }, 503);
+        return c.json({ status: 'degraded', checks, mode: options.siteMode ?? 'production' }, 503);
       }
       checks.frontend = 'ok';
     }
-    return c.json({ status: 'ok', checks });
+    return c.json({ status: 'ok', checks, mode: options.siteMode ?? 'production' });
   });
 
   // 管理接口：导入、审核投稿、隐藏评论。不进公开契约和 /docs，普通登录用户也没有权限。

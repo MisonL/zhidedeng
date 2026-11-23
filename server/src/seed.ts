@@ -48,13 +48,27 @@ const topics = [
   ['新手避坑：截图不能代替自己的测试', '别人的测速截图只反映某个时间点。选中转站还是要按自己的模型、地区和请求模式做一轮小规模验证。', '把测试步骤写下来，隔几天再复测。遇到无条件稳定、永久最低这类话术，我会多问一句证据在哪里。'],
 ] as const;
 
-export function seed(store: Store, now: Date) {
+/**
+ * 空库初始化。
+ *
+ * 两种模式：
+ * - production（默认）：只灌厂商与模型目录。目录是分类用的公共词典，
+ *   真实模型名称可以入库；站点与文章必须由真实投稿/飞书同步产生。
+ * - demo：额外灌 12 个虚构站、48 篇虚构文章和一批演示互动数据，
+ *   供本地开发与展示用。**绝不能在生产库上用这个模式**。
+ *
+ * 模式是「空库时的一次性决定」：已有数据的库不会被回填、也不会被清空。
+ * 切换模式要先换库或先清库，避免把演示数据悄悄混进生产库。
+ */
+export function seed(store: Store, now: Date, mode: 'production' | 'demo' = 'production') {
   store.transaction(() => {
-    if (store.all('vendor').length === 0) writeSeed(store, now);
+    if (store.all('vendor').length > 0) return;
+    writeCatalog(store);
+    if (mode === 'demo') writeDemo(store, now);
   });
 }
 
-function writeSeed(store: Store, now: Date) {
+function writeCatalog(store: Store) {
   const models: Model[] = [];
   for (const [slug, name, entries] of catalog) {
     store.put('vendor', slug, { slug, name, iconKey: slug });
@@ -64,6 +78,11 @@ function writeSeed(store: Store, now: Date) {
       store.put('model', model.slug, model);
     });
   }
+}
+
+function writeDemo(store: Store, now: Date) {
+  // 目录由 writeCatalog 先写入；这里按 rowid 取回，顺序与写入时一致。
+  const models = store.all('model');
   users.forEach(user => store.put('user', user.handle, user));
   stationNames.forEach(([slug, name], index) => {
     store.put('station', slug, {

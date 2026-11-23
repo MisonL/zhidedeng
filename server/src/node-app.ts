@@ -90,13 +90,39 @@ export function openStore(db: DatabaseSync) {
   return store;
 }
 
-export function createApp(options: { dbPath?: string; now?: () => Date; syncToken?: string; inviteCodes?: readonly string[]; webRoot?: string; trustedProxies?: string; secureCookie?: boolean } = {}) {
+/**
+ * 站点模式。
+ *
+ * - production：空库只灌厂商与模型目录，站点和文章必须来自真实投稿/同步。
+ *   这是生产部署的默认值——生产库不该凭空长出一批虚构站点。
+ * - demo：额外灌 12 个虚构站与 48 篇虚构文章（含互动），供本地开发和展示。
+ *
+ * 判据是 NODE_ENV 而不是「有没有配置」：忘了配就退回演示模式，
+ * 等于让一批假数据静默进入生产，事故不可逆。所以生产默认最保守的一侧，
+ * 想演示必须显式写 SITE_MODE=demo。
+ */
+export type SiteMode = 'demo' | 'production';
+
+function resolveSiteMode(explicit?: SiteMode): SiteMode {
+  const raw = explicit ?? process.env.SITE_MODE;
+  if (raw === 'demo' || raw === 'production') return raw;
+  if (raw !== undefined && raw !== '') {
+    // 拼错（如 "prod"、"Demo "）不能静默当默认值处理：生产里拼错会灌演示数据。
+    throw new Error(`SITE_MODE 只能是 demo 或 production，收到 ${JSON.stringify(raw)}`);
+  }
+  return process.env.NODE_ENV === 'production' ? 'production' : 'demo';
+}
+
+export function createApp(options: { dbPath?: string; now?: () => Date; syncToken?: string; inviteCodes?: readonly string[]; webRoot?: string; trustedProxies?: string; secureCookie?: boolean; siteMode?: SiteMode } = {}) {
   const production = process.env.NODE_ENV === 'production';
   if (production && !options.dbPath && !process.env.DB_PATH) throw new Error('生产环境必须设置 DB_PATH');
   const db = openDatabase(options.dbPath ?? process.env.DB_PATH ?? defaultDbPath);
   const now = options.now ?? (() => new Date());
   const store = openStore(db);
-  seed(store, now());
+  // 模式下只在空库时影响灌什么数据；已有数据一律不动。
+  // 播报交给 index.ts 这类真正的入口——createApp 是库函数，不该写 stdout。
+  const siteMode = resolveSiteMode(options.siteMode);
+  seed(store, now(), siteMode);
   const configured = options.syncToken ?? process.env.SYNC_TOKEN;
   const usable = configured && configured.length >= MIN_SYNC_TOKEN_LENGTH ? configured : undefined;
   if (configured && !usable) console.warn(`SYNC_TOKEN 不足 ${MIN_SYNC_TOKEN_LENGTH} 位，视为未配置，管理接口已关闭`);
@@ -106,7 +132,7 @@ export function createApp(options: { dbPath?: string; now?: () => Date; syncToke
     // 只在生产且显式开启 TLS 时要求 Secure；本机 http 试用不该被静默登不上。
   // 显式传入的选项优先（测试用），否则按生产 + TLS_ENABLED 决定。
   const cookieSecure = options.secureCookie ?? (production && process.env.TLS_ENABLED === '1');
-  const app = buildApp(store, now, { secureCookie: cookieSecure, syncToken: usable, inviteCodes, trustedProxies, webRoot: options.webRoot });
+  const app = buildApp(store, now, { secureCookie: cookieSecure, syncToken: usable, inviteCodes, trustedProxies, webRoot: options.webRoot, siteMode });
   if (options.webRoot) mountWeb(app, options.webRoot);
-  return { app, db, store };
+  return { app, db, store, siteMode };
 }

@@ -255,4 +255,16 @@ describe('补录模型', () => {
     fireEvent.click(screen.getByRole('button', { name: '提交审核' }));
     expect(await screen.findByText('模型已存在')).toBeInTheDocument();
   });
+  it('页脚声明点名 AI 采集，不能只提演示数据和群友提交', async () => {
+    // 页脚是读者判断「这条内容能不能信」的唯一全局提示。
+    // 少写 agent 一类时，AI 写入的内容会被读者归进「演示数据」或「群友提交」，
+    // 而它两者都不是。
+    stubApi({});
+    renderApp('/');
+    const notice = await screen.findByText(/未经平台核实/);
+    expect(notice.textContent).toContain('AI 采集');
+    expect(notice.textContent).toContain('群友提交');
+    expect(notice.textContent).toContain('演示数据');
+  });
+
 });
