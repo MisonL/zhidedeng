@@ -82,18 +82,28 @@ export default function Submit() {
         setServerError('请填写站点名称和网址');
         return;
       }
+      // 报价格式是「模型slug=倍率」。解析要在发请求前做完并给出人话提示：
+      // 直接 `Number(split("=")[1])` 在缺等号时得到 NaN，会被序列化成 null，
+      // 服务端只回一句「请求参数或 JSON 正文无效」，用户根本不知道是格式问题。
+      const rawRate = stationForm.rate.trim();
+      let offerInput: { modelSlug: string; rate: number; basis: RateBasis } | undefined;
+      if (rawRate) {
+        const [slugPart, ratePart] = rawRate.split('=');
+        const modelSlug = (slugPart ?? '').trim();
+        const rate = Number((ratePart ?? '').trim());
+        if (!modelSlug || !Number.isFinite(rate) || rate <= 0) {
+          setServerError('报价请写成「模型slug=倍率」，例如 deepseek-chat=0.35');
+          return;
+        }
+        offerInput = { modelSlug, rate, basis: stationForm.basis as RateBasis };
+      }
       setSubmitting(true);
       setServerError(undefined);
       try {
         await api.suggestStation({
           name, url,
           ...(stationForm.description.trim() ? { description: stationForm.description.trim() } : {}),
-          ...(stationForm.rate.trim() ? { offers: [{
-            modelSlug: stationForm.rate.trim().split('=')[0]!,
-            rate: Number(stationForm.rate.trim().split('=')[1]),
-            // 不带口径的报价会和别的口径混在一起比大小，推荐时能选就别留空。
-            basis: stationForm.basis as RateBasis,
-          }] } : {}),
+          ...(offerInput ? { offers: [offerInput] } : {}),
         });
         me.refreshMe();
         toast('已提交，审核通过后进入中转站库');

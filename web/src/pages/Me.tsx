@@ -58,7 +58,12 @@ function MySubmissions() {
                   {/* 驳回理由必须能看见：否则作者只知道没通过，不知道改什么。 */}
                   {reason && <p className="post-review-reason">未通过原因：{reason}</p>}
                   <p className="hint">
-                    {item.status === 'approved' && to ? '已上线，点标题查看' : item.status === 'approved' ? '已通过' : '审核后才会公开'}
+                    {item.status === 'approved' && to ? '已上线，点标题查看'
+                      : item.status === 'approved' ? '已通过'
+                      // superseded 说明线上已经是同站的新版本，这条不必再等也不必改。
+                      // 原先一律落到「审核后才会公开」，和上面的「已被新提交替代」互相矛盾。
+                      : item.status === 'superseded' ? '已被同站新版本替代，无需处理'
+                      : '审核后才会公开'}
                   </p>
                 </article>
               );
@@ -139,7 +144,7 @@ function Settings({ user }: { user: CurrentUser }) {
   );
 }
 
-const MIN_PASSWORD = 8;
+const MIN_PASSWORD = 10;
 
 function ChangePassword() {
   const empty = { current: '', next: '', confirm: '' };

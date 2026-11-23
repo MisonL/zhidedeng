@@ -89,7 +89,7 @@ describe('审核台', () => {
       'POST /api/admin/posts/post-1/review': { id: 'post-1', status: 'approved' },
     });
     await unlock();
-    fireEvent.click(await screen.findByRole('button', { name: /待审文章/ }));
+    fireEvent.click(await screen.findByRole('tab', { name: /待审文章/ }));
     expect(await screen.findByText('待审文章标题')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: '通过' }));
     expect(await screen.findByText('已通过')).toBeInTheDocument();
@@ -103,7 +103,7 @@ describe('审核台', () => {
       'POST /api/admin/stations/gone-example-com/restore': { slug: removed.slug, restored: true },
     });
     await unlock();
-    fireEvent.click(await screen.findByRole('button', { name: /已下架站点/ }));
+    fireEvent.click(await screen.findByRole('tab', { name: /已下架站点/ }));
     expect(await screen.findByText('gone-example-com')).toBeInTheDocument();
     // 下架时间是排障信息，必须显示出来。
     expect(screen.getByText(/下架于/)).toBeInTheDocument();
@@ -122,7 +122,7 @@ describe('审核台', () => {
       'POST /api/admin/posts/feishu-rec1/restore': { id: withdrawn.id, restored: true },
     });
     await unlock();
-    fireEvent.click(await screen.findByRole('button', { name: /已下架文章/ }));
+    fireEvent.click(await screen.findByRole('tab', { name: /已下架文章/ }));
     expect(await screen.findByText('feishu-rec1')).toBeInTheDocument();
     // 下架时间是排障信息：要能判断是哪次误操作。
     expect(screen.getByText(/下架于/)).toBeInTheDocument();
@@ -142,7 +142,7 @@ describe('审核台', () => {
       'POST /api/admin/posts/post-1/withdraw': { id: 'post-1', removed: true },
     });
     await unlock();
-    fireEvent.click(await screen.findByRole('button', { name: /已上线文章/ }));
+    fireEvent.click(await screen.findByRole('tab', { name: /已上线文章/ }));
     expect(await screen.findByText('待审文章标题')).toBeInTheDocument();
     fireEvent.click(await screen.findByRole('button', { name: '下架' }));
     expect(await screen.findByText(/已下架，可在/)).toBeInTheDocument();
@@ -159,7 +159,7 @@ describe('审核台', () => {
       'GET /api/admin/posts': { items: [post] },
     });
     await unlock();
-    fireEvent.click(await screen.findByRole('button', { name: /待审文章/ }));
+    fireEvent.click(await screen.findByRole('tab', { name: /待审文章/ }));
     expect(await screen.findByText('待审文章标题')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: '下架' })).toBeNull();
   });
@@ -214,7 +214,7 @@ describe('审核台的批量语义', () => {
         : { items: first, total: 100 }),
     });
     await unlock();
-    expect(await screen.findByRole('button', { name: '待审投稿 (100)' })).toBeInTheDocument();
+    expect(await screen.findByRole('tab', { name: '待审投稿 (100)' })).toBeInTheDocument();
     const pages = callsTo(fetchMock, 'GET', '/api/admin/submissions').map(call => call.url.searchParams.get('page'));
     expect(pages).toContain('2');
   });
@@ -235,6 +235,28 @@ describe('审核台的批量语义', () => {
     // 回到入口态，旧列表不再渲染。
     expect(await screen.findByLabelText('管理密钥')).toBeInTheDocument();
     expect(screen.queryByText('示例站 · https://a.example.com/')).not.toBeInTheDocument();
+  });
+  it('superseded 单独披露，不混进「已通过」', async () => {
+    // 被同站新版本替代的行线上是另一版；笼统算进「已通过」会让审核员
+    // 以为这批内容都按自己看到的版本上线了。
+    stubApi({ 'GET /api/admin/submissions': { items: [submission], total: 1 },
+      'POST /api/admin/submissions/batch-review': { results: [
+        { id: 'sub-1', status: 'superseded', reason: null },
+      ] } });
+    await unlock();
+    fireEvent.click(await screen.findByRole('button', { name: /全部通过/ }));
+    expect(await screen.findByText(/已被同站新版本替代/)).toBeInTheDocument();
+    expect(screen.queryByText(/^已通过 1 条$/)).not.toBeInTheDocument();
+  });
+
+  it('页签有 tablist/tab 语义，「退出」不冒充页签', async () => {
+    stubApi({ 'GET /api/admin/submissions': { items: [submission], total: 1 } });
+    await unlock();
+    expect(screen.getByRole('tablist')).toBeInTheDocument();
+    const tabs = screen.getAllByRole('tab');
+    expect(tabs.length).toBe(5);
+    expect(tabs.some(tab => tab.textContent?.includes('退出'))).toBe(false);
+    expect(screen.getByRole('tab', { name: /待审投稿/ })).toHaveAttribute('aria-selected', 'true');
   });
 });
 
@@ -272,7 +294,7 @@ describe('拒绝理由与时间兜底', () => {
       'GET /api/admin/stations/removed': { items: [{ slug: 'bad-time', removedAt: 'not-a-date' }] },
     });
     await unlock();
-    fireEvent.click(await screen.findByRole('button', { name: /已下架站点/ }));
+    fireEvent.click(await screen.findByRole('tab', { name: /已下架站点/ }));
     expect(await screen.findByText('下架于 时间未知')).toBeInTheDocument();
     expect(screen.queryByText(/Invalid Date/)).not.toBeInTheDocument();
   });

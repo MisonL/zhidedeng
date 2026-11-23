@@ -48,7 +48,7 @@ describe('账户设置里改密码', () => {
 
   it.each([
     ['', 'another-horse', 'another-horse', '请填写当前密码'],
-    ['old-password', '1234567', '1234567', '新密码至少 8 位'],
+    ['old-password', '1234567', '1234567', '新密码至少 10 位'],
     ['old-password', 'another-horse', 'different-horse', '两次输入的新密码不一致'],
   ])('校验 %s / %s', async (current, next, confirm, message) => {
     const fetchMock = stubApi();

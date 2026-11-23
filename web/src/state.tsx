@@ -116,14 +116,29 @@ function MeProvider({ children }: { children: ReactNode }) {
   return <MeContext.Provider value={{ ...state, setMe: setData, refreshMe, signIn, signOut, epoch }}>{children}</MeContext.Provider>;
 }
 
-/** 厂商与站点目录：导航、卡片标签和倍率高亮都依赖它把 slug 解析成名称。 */
+/** 取全部站点：pageSize 服务端封顶 50，按 total 翻页。 */
+async function listAllStations(signal: AbortSignal) {
+  const first = await api.getStations({ pageSize: 50 }, signal);
+  const all = [...first.items];
+  const pages = Math.ceil(first.total / 50);
+  for (let page = 2; page <= pages; page += 1) {
+    const next = await api.getStations({ pageSize: 50, page }, signal);
+    all.push(...next.items);
+  }
+  return all;
+}
+
 function CatalogProvider({ children }: { children: ReactNode }) {
   const state = useAsync(async (signal): Promise<Catalog> => {
     const [vendors, stations] = await Promise.all([
       api.getVendors(signal),
-      api.getStations({ pageSize: 50 }, signal),
+      // 只取前 50 个站是不够的：审核台靠这份索引判断投稿是「新建站点」还是
+      // 「覆盖已有站点」。站点超过 50 个之后，第 51 个起的已上架站点不在索引里，
+      // 界面会把「覆盖」显示成「新建」——方向恰好是更危险的那一边。
+      // 翻页取全量；pageSize 服务端封顶 50，所以按 total 算页数。
+      listAllStations(signal),
     ]);
-    return { vendors: vendors.items, stations: stations.items };
+    return { vendors: vendors.items, stations };
   }, []);
 
   const vendors = state.data?.vendors ?? EMPTY_VENDORS;

@@ -79,7 +79,9 @@ export default function Admin() {
   // 驳回理由会写进 submissions.reason，作者在 /me 能看到；不填就只显示「已驳回」。
   const [rejecting, setRejecting] = useState<string>();
   const [reasons, setReasons] = useState<Record<string, string>>({});
-  const { stationBySlug } = useCatalog();
+  // reload 用来在恢复/下架/审核通过后失效目录缓存：否则公开页要手动刷新浏览器
+  // 才看得到刚恢复的站点，用户会以为操作没生效。
+  const { stationBySlug, reload: reloadCatalog } = useCatalog();
 
   async function load(active: string, signal?: AbortSignal) {
     // 不在这里清错误：调用方可能刚设好一条操作结果，清掉就等于把它吞了。
@@ -184,17 +186,32 @@ export default function Admin() {
       }
       const failed = results.filter(result => result.error);
       const ok = results.length - failed.length;
-      if (failed.length === 0) setMessage(`已通过 ${ok} 条`);
+      // superseded 不是失败——它表示这条已被同站的新版本替代，线上是另一版。
+      // 但也不能笼统算进「已通过」：审核员会以为这批内容都按自己看到的版本
+      // 上线了。单独报出来，两者的差别对被替代的那几条是实质性的。
+      const superseded = results.filter(result => result.status === 'superseded').length;
+      const through = ok - superseded;
+      const parts: string[] = [];
+      if (through > 0) parts.push(`已通过 ${through} 条`);
+      if (superseded > 0) parts.push(`另有 ${superseded} 条已被同站新版本替代`);
+      if (failed.length === 0) setMessage(parts.join('，'));
       else {
-        setMessage(ok > 0 ? `已通过 ${ok} 条` : undefined);
+        setMessage(parts.length > 0 ? parts.join('，') : undefined);
         // 逐条原因要露出来：后端会把 MODEL_EXISTS 这类不可自愈的失败
         // 直接写成 rejected，不说清楚审核员根本不知道发生了什么。
         setError(`${failed.length} 条未通过：${failed.map(result => result.error!.message).join('；')}`);
       }
       await load(tab);
+      // 审核通过会让新站/新文章上线，目录缓存必须失效。
+      reloadCatalog();
     } catch (caught) {
+      // 分块中途炸了，前面几块其实已经审过：不刷新的话列表还显示全部待审，
+      // 审核员重试一次就会把「早已通过」的行报成「已审核或被新版本替代」，
+      // 越重试越乱。刷新拿真实状态，失败信息另说。
+      await load(tab).catch(() => undefined);
       if (caught instanceof AdminError && caught.unauthorized) {
         setToken('');
+        setError('管理密钥无效，请重新输入');
         return;
       }
       setError((caught as Error).message);
@@ -211,9 +228,14 @@ export default function Admin() {
       await run();
       setMessage(done);
       await load(tab);
+      // 单条通过/拒绝、下架、恢复都会改变「哪些站和文章在线」，目录缓存跟着失效。
+      reloadCatalog();
     } catch (caught) {
       if (caught instanceof AdminError && caught.unauthorized) {
         reset();
+        // reset() 会连着把 error 清掉，这里补回来：否则密钥失效后输入框
+        // 重现却没有任何说明，看着像操作没生效。
+        setError('管理密钥无效，请重新输入');
         return;
       }
       setError((caught as Error).message);
@@ -327,23 +349,27 @@ export default function Admin() {
   return (
     <section className="page">
       <h1 className="page-title">审核台</h1>
-      <div className="tags">
-        <button className={`btn btn-small ${tab === 'submissions' ? 'btn-red' : 'btn-ghost'}`} onClick={() => setTab('submissions')}>
+<div className="tags" role="tablist" aria-label="审核台">
+        <button type="button" role="tab" aria-selected={tab === 'submissions'} className={`btn btn-small ${tab === 'submissions' ? 'btn-red' : 'btn-ghost'}`} onClick={() => setTab('submissions')}>
           待审投稿 {submissions ? `(${pendingSubmissions.length})` : ''}
         </button>
-        <button className={`btn btn-small ${tab === 'posts' ? 'btn-red' : 'btn-ghost'}`} onClick={() => setTab('posts')}>
+        <button type="button" role="tab" aria-selected={tab === 'posts'} className={`btn btn-small ${tab === 'posts' ? 'btn-red' : 'btn-ghost'}`} onClick={() => setTab('posts')}>
           待审文章 {posts ? `(${pendingPosts.length})` : ''}
         </button>
-        <button className={`btn btn-small ${tab === 'published' ? 'btn-red' : 'btn-ghost'}`} onClick={() => setTab('published')}>
+        <button type="button" role="tab" aria-selected={tab === 'published'} className={`btn btn-small ${tab === 'published' ? 'btn-red' : 'btn-ghost'}`} onClick={() => setTab('published')}>
           已上线文章 {published ? `(${publishedPosts.length})` : ''}
         </button>
-        <button className={`btn btn-small ${tab === 'removed' ? 'btn-red' : 'btn-ghost'}`} onClick={() => setTab('removed')}>
+        <button type="button" role="tab" aria-selected={tab === 'removed'} className={`btn btn-small ${tab === 'removed' ? 'btn-red' : 'btn-ghost'}`} onClick={() => setTab('removed')}>
           已下架站点 {removed ? `(${removedStations.length})` : ''}
         </button>
-        <button className={`btn btn-small ${tab === 'removedPosts' ? 'btn-red' : 'btn-ghost'}`} onClick={() => setTab('removedPosts')}>
+        <button type="button" role="tab" aria-selected={tab === 'removedPosts'} className={`btn btn-small ${tab === 'removedPosts' ? 'btn-red' : 'btn-ghost'}`} onClick={() => setTab('removedPosts')}>
           已下架文章 {removedPosts ? `(${withdrawnPosts.length})` : ''}
         </button>
-        <button className="btn btn-small btn-ghost" onClick={() => { adminToken.clear(); reset(); }}>
+      </div>
+      {/* 退出不是页签：它不切换内容区，放在 tablist 外面，否则读屏会把它
+          念成一个「当前未选中」的页签。 */}
+      <div className="tags">
+        <button type="button" className="btn btn-small btn-ghost" onClick={() => { adminToken.clear(); reset(); }}>
           退出
         </button>
       </div>
