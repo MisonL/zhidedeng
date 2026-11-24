@@ -810,3 +810,19 @@ describe('举报频控', () => {
     expect((await a.call('POST', '/api/reports', { targetType: 'comment', targetId: commentIds[0], reason: 'x' })).status).toBe(200);
   });
 });
+
+describe('演示站点下的真实评论', () => {
+  it('可以举报，且管理员能隐藏它——虚构的是站，不是这条评论', async () => {
+    const a = await account('alice');
+    const b = await account('bobby');
+    // post-1 是演示文章，但评论是真实用户写的。
+    const comment = await (await b.call('POST', '/api/comments', { targetType: 'post', targetId: 'post-1', content: '真实用户写的评论' })).json() as { id: string };
+    const created = await a.call('POST', '/api/reports', { targetType: 'comment', targetId: comment.id, reason: '人身攻击或辱骂' });
+    expect(created.status).toBe(200);
+    // 有处置出口：隐藏这条评论。
+    const hide = await admin(`/api/admin/comments/${comment.id}/hide`, { hidden: true });
+    expect(hide.status).toBe(200);
+    const list = await a.get<{ items: Array<{ id: string }> }>('/api/comments?targetType=post&targetId=post-1');
+    expect(list.items.some(item => item.id === comment.id)).toBe(false);
+  });
+});

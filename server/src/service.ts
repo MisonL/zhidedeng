@@ -917,11 +917,9 @@ export class Service {
         ? this.readablePost(comment.targetId) !== undefined
         : this.store.get('station', comment.targetId) !== undefined;
       if (!ownerVisible) throw new ApiError(404, 'NOT_FOUND', '内容不存在');
-      // 演示数据同样没有处置路径（下架接口对 demo 一律 409），别给一个点了也没用的入口。
-      const ownerSource = comment.targetType === 'post'
-        ? this.readablePost(comment.targetId)?.source
-        : this.store.get('station', comment.targetId)?.source;
-      if (ownerSource === 'demo') throw new ApiError(400, 'INVALID_INPUT', '演示数据不需要举报');
+      // 注意这里**不看**所属对象是不是演示数据：演示站下面挂着的是真实用户评论，
+      // 而评论本身有处置路径（管理员可以隐藏它），所以举报是有出口的。
+      // 只有「举报的对象本身就是虚构内容」才拒绝（文章、站点）。
     }
     const reason = input.reason.trim();
     if (!reason) throw new ApiError(400, 'INVALID_INPUT', '请选择或填写举报原因');
