@@ -5,6 +5,7 @@ import type { Station, SubmissionRecord } from '@zhidedeng/shared';
 import { admin, adminToken, AdminError } from '../admin';
 import type { AdminPostRow, AdminReport, RemovedPost, RemovedStation } from '../admin';
 import { Skeleton } from '../components/AsyncView';
+import ConfirmButton from '../components/ConfirmButton';
 import { useCatalog } from '../state';
 
 /** 服务端 ids 模式的单批上限，与 submissions.ts 的 schema 保持一致。 */
@@ -421,17 +422,15 @@ export default function Admin() {
           : (
             <>
               <div className="tags">
-                <button
-                  className="btn btn-small btn-red" disabled={busy}
-                  onClick={() => {
-                    // 通过不可撤销：服务端对非 pending 一律 409 ALREADY_REVIEWED。
-                    // 站点以自动运行为主，但一次误点把几百条全放出去没有回退手段。
-                    if (!window.confirm(`确认通过全部 ${pendingSubmissions.length} 条待审投稿？此操作不可撤销。`)) return;
-                    void approveAll();
-                  }}
-                >
-                  全部通过
-                </button>
+                {/* 通过不可撤销：服务端对非 pending 一律 409 ALREADY_REVIEWED。
+                    站点以自动运行为主，但一次误点把几百条全放出去没有回退手段，
+                    所以这里必须二次确认，且和其它破坏性操作共用同一个组件。 */}
+                <ConfirmButton
+                  label="全部通过" busy={busy} tone="red"
+                  description={`确认通过全部 ${pendingSubmissions.length} 条待审投稿？此操作不可撤销。`}
+                  confirmLabel="确认全部通过"
+                  onConfirm={() => approveAll()}
+                />
               </div>
               <ul className="card-list">
                 {pendingSubmissions.map(item => (

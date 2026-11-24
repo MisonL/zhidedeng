@@ -28,9 +28,16 @@ async function unlock() {
 
 beforeEach(() => {
   sessionStorage.clear();
-  // 全部通过会先弹二次确认（通过不可撤销），默认点「确定」。
-  vi.stubGlobal('confirm', () => true);
 });
+
+/**
+ * 「全部通过」是不可撤销操作，现在走 ConfirmButton：点一次只是展开追问，
+ * 必须再点「确认全部通过」才真的提交。所有走批量审核的用例都从这里进。
+ */
+async function confirmApproveAll() {
+  fireEvent.click(await screen.findByRole('button', { name: '全部通过' }));
+  fireEvent.click(await screen.findByRole('button', { name: '确认全部通过' }));
+}
 
 describe('审核台', () => {
   it('没有密钥时只显示入口，不请求任何管理接口', () => {
@@ -76,7 +83,7 @@ describe('审核台', () => {
       },
     });
     await unlock();
-    fireEvent.click(await screen.findByRole('button', { name: '全部通过' }));
+    await confirmApproveAll();
     expect(await screen.findByText('已通过 2 条')).toBeInTheDocument();
     expect(callsTo(fetchMock, 'POST', '/api/admin/submissions/batch-review')[0].body)
       .toEqual({ ids: ['sub-1', 'sub-2'], status: 'approved' });
@@ -197,7 +204,7 @@ describe('审核台的批量语义', () => {
       },
     });
     await unlock();
-    fireEvent.click(await screen.findByRole('button', { name: '全部通过' }));
+    await confirmApproveAll();
     expect(await screen.findByText('1 条未通过：模型 m 已存在')).toBeInTheDocument();
   });
 
@@ -220,11 +227,14 @@ describe('审核台的批量语义', () => {
   });
 
   it('取消二次确认时不发批量请求', async () => {
-    vi.stubGlobal('confirm', () => false);
     const fetchMock = stubApi({ 'GET /api/admin/submissions': { items: [submission], total: 1 } });
     await unlock();
     fireEvent.click(await screen.findByRole('button', { name: '全部通过' }));
+    // 展开后点「取消」：不该发出任何批量请求。
+    expect(screen.getByText(/确认通过全部 1 条待审投稿/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '取消' }));
     expect(callsTo(fetchMock, 'POST', '/api/admin/submissions/batch-review')).toHaveLength(0);
+    expect(screen.queryByRole('button', { name: '确认全部通过' })).not.toBeInTheDocument();
   });
 
   it('退出后清空内存里的列表，不留残留数据', async () => {
@@ -244,7 +254,7 @@ describe('审核台的批量语义', () => {
         { id: 'sub-1', status: 'superseded', reason: null },
       ] } });
     await unlock();
-    fireEvent.click(await screen.findByRole('button', { name: /全部通过/ }));
+    await confirmApproveAll();
     expect(await screen.findByText(/已被同站新版本替代/)).toBeInTheDocument();
     expect(screen.queryByText(/^已通过 1 条$/)).not.toBeInTheDocument();
   });
