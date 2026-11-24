@@ -5,10 +5,10 @@ const GROUPS: { title: string; routes: Partial<Record<ApiRouteName, { summary: s
   {
     title: '账号',
     routes: {
-      register: { summary: '注册并登录，会话写入 HttpOnly Cookie', params: 'body: username（3~20 位字母数字下划线）, password（至少 8 位）, nickname?' },
+      register: { summary: '注册并登录，会话写入 HttpOnly Cookie', params: 'body: username（3~20 位字母数字下划线）, password（至少 10 位）, nickname?' },
       login: { summary: '登录，失败多次会被临时限制', params: 'body: username, password' },
       logout: { summary: '退出登录，当前会话立即失效' },
-      changePassword: { summary: '改密码，成功后该账号的其他会话全部失效', params: 'body: currentPassword, newPassword（至少 8 位）' },
+      changePassword: { summary: '改密码，成功后该账号的其他会话全部失效', params: 'body: currentPassword, newPassword（至少 10 位）' },
     },
   },
   {
