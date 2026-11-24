@@ -121,9 +121,10 @@ function assertBatchOpen(store: Store, batchId: string | null | undefined): void
   if (batchId === null || batchId === undefined) return;
   // 还有待审条目，说明这一批还没审完，继续追加是正常的重试/续块。
   if (store.db.prepare("SELECT 1 FROM submissions WHERE batchId = ? AND status = 'pending' LIMIT 1").get(batchId)) return;
-  // 自动通过的分块会把每条立即置为 approved，此时批次其实还在进行中；
-  // 若把它们当成「已审核」，开启自动通过后超过一块的同步就必然失败。
-  const reviewed = store.db.prepare("SELECT 1 FROM submissions WHERE batchId = ? AND NOT (status = 'approved' AND autoApproved = 1) LIMIT 1")
+  // 自动处理的分块会把每条立即定态（approved，或命中已下架文章时 rejected），
+  // 此时批次其实还在进行中；若把它们当成「已审核」，开启自动通过后超过一块的
+  // 同步就必然失败。判据是「这一行是不是自动处理过的」，不是具体定成哪个状态。
+  const reviewed = store.db.prepare("SELECT 1 FROM submissions WHERE batchId = ? AND NOT (autoApproved = 1) LIMIT 1")
     .get(batchId);
   if (reviewed) throw new ApiError(409, 'BATCH_ALREADY_REVIEWED', '批次已审核完成，不能追加新条目');
 }
@@ -260,7 +261,13 @@ export function enqueueSubmission(store: Store, input: {
     if (!approvedPostGone && existing && (existing.status === 'pending' || latest?.id === existing.id)) {
       const submission = submissionRecord(existing);
       if (auto && submission.status === 'pending') {
-        materialize(store, submission, reviewedAt);
+        // 物化可能被拦下（文章此前已被撤下/下架）。此时不能置 approved：
+        // 那会返回一只「approved 但详情 404」的幽灵，和上面 approvedPostGone 同一类问题。
+        const skipReason = materialize(store, submission, reviewedAt);
+        if (skipReason !== undefined && submission.kind === 'post') {
+          store.db.prepare("UPDATE submissions SET status = 'rejected', autoApproved = 1, reason = ?, reviewedAt = ? WHERE id = ?").run(skipReason, reviewedAt, submission.id);
+          return { submission: { ...submission, status: 'rejected', reason: skipReason, reviewedAt }, deduplicated: true, autoApproved: true };
+        }
         store.db.prepare("UPDATE submissions SET status = 'approved', autoApproved = 1, reason = ?, reviewedAt = ? WHERE id = ?").run(AUTO_APPROVE_REASON, reviewedAt, submission.id);
         supersedePending(store, submission, reviewedAt);
         return { submission: { ...submission, status: 'approved', reason: AUTO_APPROVE_REASON, reviewedAt }, deduplicated: true, autoApproved: true };

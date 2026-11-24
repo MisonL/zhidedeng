@@ -421,3 +421,36 @@ describe('撤下后同步（飞书/自动通过）', () => {
     expect(rows).toHaveLength(1);
   });
 });
+
+describe('自动通过 + 已下架文章的批次语义', () => {
+  it('同一批次可以分块追加：自动处理过的 rejected 行不算「批次已审完」', async () => {
+    // 云端同步会按 1000 条分块、重试时复用同一个 batchId。若把自动定的
+    // rejected 行当成「已审核」，重试和后续块都会 409 BATCH_ALREADY_REVIEWED。
+    expect((await server.app.request('/api/admin/settings', {
+      method: 'POST', headers: admin, body: JSON.stringify({ autoApprove: true }),
+    })).status).toBe(200);
+    const { enqueueBatch } = await import('../src/submissions.ts');
+    const store = openStore(server.db);
+    const station = { name: '分块站', description: 'd', url: 'https://chunk.example.com/', rechargeThreshold: 10, paymentMethods: ['支付宝'], offers: [{ modelSlug: 'gpt-4-1', rate: 0.5 }] };
+    const post = (recordId: string) => ({ recordId, hostname: 'chunk.example.com', authorName: '作者', title: '文章', summary: '摘要', body: '正文', publishedAt: '2026-11-01T00:00:00.000Z' });
+
+    const first = enqueueBatch(store, {
+      channel: 'feishu', batchId: 'chunk-1', now: clock(), ip: '127.0.0.1',
+      items: [{ kind: 'station', originKey: 'chunk.example.com', payload: station }, { kind: 'post', originKey: 'post-c1', payload: post('c1') }],
+    });
+    const postId = `sub-${first.results[1].id!}`;
+    // 管理员下架后，同一批次追加第二块：里面的同 originKey 条目会被拦下。
+    expect((await server.app.request(`/api/admin/posts/${postId}/withdraw`, { method: 'POST', headers: admin })).status).toBe(200);
+    const second = enqueueBatch(store, {
+      channel: 'feishu', batchId: 'chunk-1', now: clock(), ip: '127.0.0.1',
+      items: [{ kind: 'post', originKey: 'post-c1', payload: post('c1') }],
+    });
+    expect(second.results[0].status).toBe('rejected');
+    // 同一批次还能继续追加（不会 409）。
+    const third = enqueueBatch(store, {
+      channel: 'feishu', batchId: 'chunk-1', now: clock(), ip: '127.0.0.1',
+      items: [{ kind: 'post', originKey: 'post-c2', payload: post('c2') }],
+    });
+    expect(third.results[0].status).toBe('approved');
+  });
+});
