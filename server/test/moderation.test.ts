@@ -580,3 +580,62 @@ describe('评论自删', () => {
     expect(await (await a.call('DELETE', `/api/comments/${parent.id}`)).json()).toMatchObject({ deleted: 'removed' });
   });
 });
+
+describe('作者撤下自己的文章', () => {
+  async function published(who: Awaited<ReturnType<typeof account>>, title: string) {
+    const post = await submit(who, title);
+    await admin(`/api/admin/posts/${post.id}/review`, { status: 'approved' });
+    return post;
+  }
+
+  it('作者能撤下已发布文章，撤下后公开读不到、管理员仍可恢复', async () => {
+    const a = await account('alice');
+    const post = await published(a, '我想撤下的文章');
+    expect((await anonymous.get<Post>(`/api/posts/${post.id}`)).status).toBe('approved');
+
+    const removed = await a.call('DELETE', `/api/posts/${post.id}`);
+    expect(removed.status).toBe(200);
+    expect(await removed.json()).toMatchObject({ id: post.id, removed: true });
+    expect((await anonymous.call('GET', `/api/posts/${post.id}`)).status).toBe(404);
+    // 正文没被删，管理员能恢复回来。
+    expect((await admin(`/api/admin/posts/${post.id}/restore`)).status).toBe(200);
+    expect((await anonymous.get<Post>(`/api/posts/${post.id}`)).status).toBe('approved');
+  });
+
+  it('撤不掉别人的文章，也撤不掉不存在的文章（都是 404）', async () => {
+    const a = await account('alice');
+    const b = await account('bobby');
+    const post = await published(a, 'alice 的文章');
+    expect((await b.call('DELETE', `/api/posts/${post.id}`)).status).toBe(404);
+    expect((await b.call('DELETE', '/api/posts/never-existed')).status).toBe(404);
+    expect((await anonymous.get<Post>(`/api/posts/${post.id}`)).status).toBe('approved');
+  });
+
+  it('待审与被拒的文章不能撤下：它们还没上线', async () => {
+    const a = await account('alice');
+    const post = await submit(a, '还在待审');
+    const response = await a.call('DELETE', `/api/posts/${post.id}`);
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ error: { code: 'POST_NOT_PUBLISHED' } });
+  });
+
+  it('重复撤下报「已撤下」而不是「不存在」', async () => {
+    const a = await account('alice');
+    const post = await published(a, '撤两次');
+    expect((await a.call('DELETE', `/api/posts/${post.id}`)).status).toBe(200);
+    const again = await a.call('DELETE', `/api/posts/${post.id}`);
+    expect(again.status).toBe(409);
+    expect(await again.json()).toMatchObject({ error: { code: 'ALREADY_REMOVED' } });
+  });
+
+  it('撤下后收藏与评论数不再计入，恢复后回到原样', async () => {
+    const a = await account('alice');
+    const b = await account('bobby');
+    const post = await published(a, '会被撤下的');
+    await b.call('PUT', '/api/favorites', { targetType: 'post', targetId: post.id, favorited: true });
+    expect((await b.get<CurrentUser>('/api/me')).favoriteCount).toBe(1);
+    await a.call('DELETE', `/api/posts/${post.id}`);
+    expect((await b.get<CurrentUser>('/api/me')).favoriteCount).toBe(0);
+    expect((await b.get<GetPostsResponse>('/api/me/favorites')).total).toBe(0);
+  });
+});

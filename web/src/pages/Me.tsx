@@ -5,6 +5,7 @@ import type { CurrentUser } from '@zhidedeng/shared';
 import { PROFILE_LIMITS } from '@zhidedeng/shared';
 import { api } from '../api';
 import AsyncView, { Empty, LoadMore, Skeleton } from '../components/AsyncView';
+import ConfirmButton from '../components/ConfirmButton';
 import PostCard from '../components/PostCard';
 import StationCard from '../components/StationCard';
 import { Avatar } from '../components/visuals';
@@ -96,10 +97,50 @@ function Favorites() {
 
 function MyPosts() {
   const paged = usePaged((page, signal) => api.getMyPosts({ page, pageSize: 10 }, signal), []);
+  // 本地已撤下的 id。撤下后不整页重取：重取会让列表跳回第一页，
+  // 而作者往往是从第 2 页翻到某篇才决定撤的。
+  const [withdrawn, setWithdrawn] = useState<Set<string>>(new Set());
+  const [busy, setBusy] = useState<string>();
+  const [error, setError] = useState<string>();
+
+  async function withdraw(id: string) {
+    setBusy(id);
+    setError(undefined);
+    try {
+      await api.deletePost(id);
+      setWithdrawn((set) => new Set(set).add(id));
+    } catch (cause) {
+      setError((cause as Error).message);
+    } finally {
+      setBusy(undefined);
+    }
+  }
+
   return (
     <>
+      {error && <p className="form-error" role="alert">{error}</p>}
       <AsyncView state={paged} isEmpty={(items) => items.length === 0} empty={<Empty title="还没有分享" action={{ to: '/submit', label: '去投稿' }} />}>
-        {(items) => <div className="card-list">{items.map((post) => <PostCard key={post.id} post={post} />)}</div>}
+        {(items) => (
+          <div className="card-list">
+            {items.map((post) => (
+              <div key={post.id}>
+                <PostCard post={post} />
+                {post.status === 'approved' && (withdrawn.has(post.id)
+                  ? <p className="hint">已撤下。需要恢复请站内联系管理员。</p>
+                  : (
+                    <p className="hint">
+                      <ConfirmButton
+                        label="撤下这篇文章" tone="red" busy={busy === post.id}
+                        description="撤下后其他人立刻看不到，正文仍保留，可请管理员恢复。确定撤下？"
+                        confirmLabel="撤下"
+                        onConfirm={() => withdraw(post.id)}
+                      />
+                    </p>
+                  ))}
+              </div>
+            ))}
+          </div>
+        )}
       </AsyncView>
       <LoadMore paged={paged} />
     </>

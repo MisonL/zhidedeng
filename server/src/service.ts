@@ -863,6 +863,42 @@ export class Service {
   }
 
   /**
+   * 作者撤下自己发布过的文章（软删除）。
+   *
+   * 「投稿可以，撤稿不行」是不对称的：作者看到自己的字挂在那儿、发现写错了或
+   * 后悔了，唯一的出路是找管理员。撤下是软删除（removedAt），正文一直在库里，
+   * 管理员随时能恢复——所以给作者这个权力并不会造成不可挽回的损失。
+   *
+   * 恢复刻意只留给管理员：作者自己的撤下是「我想让它下线」，如果他自己又能
+   * 一键恢复，那就等于没有撤下。误操作靠确认弹窗拦截，真需要救回时找管理员。
+   */
+  withdrawOwnPost(id: string) {
+    // 用 getWithRemoved：已经撤下的要报「已撤下」而不是「不存在」，
+    // 否则作者会以为文章被人删了。
+    const post = this.store.getWithRemoved('post', id);
+    if (!post) {
+      // 站内投稿物化前只存在于队列里。作者在「我的分享」看到它、
+      // 想撤下时，回「文章不存在」会让人以为稿子丢了。
+      const queued = this.store.db.prepare(
+        "SELECT status FROM submissions WHERE id = ? AND kind = 'post' AND channel = 'web' AND actorHandle = ?",
+      ).get(id, this.user) as { status: string } | undefined;
+      if (queued) throw new ApiError(409, 'POST_NOT_PUBLISHED', '这条投稿还在队列里，没有上线也就没有「撤下」；审核通过后可以撤下');
+      throw new ApiError(404, 'NOT_FOUND', '文章不存在');
+    }
+    // 不是自己的文章一律 404：403 会承认「这篇存在但不是你的」。
+    if (post.authorHandle !== this.user) throw new ApiError(404, 'NOT_FOUND', '文章不存在');
+    if (post.source === 'demo') throw new ApiError(409, 'POST_SOURCE_CONFLICT', '演示数据不能撤下');
+    if (post.status !== 'approved') {
+      // 待审/被拒的还没上线，没有「撤下」可言；它们该被重投覆盖或不管。
+      throw new ApiError(409, 'POST_NOT_PUBLISHED', '只有已通过审核的文章才能撤下');
+    }
+    if (!this.store.markRemoved('post', id, this.now().toISOString())) {
+      throw new ApiError(409, 'ALREADY_REMOVED', '这篇文章已经撤下了');
+    }
+    return { id, removed: true as const };
+  }
+
+  /**
    * 作者删除自己的评论。
    *
    * 分两种情况：

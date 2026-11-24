@@ -28,6 +28,7 @@ export const API_ROUTES = {
   getPosts: { method: 'GET', path: '/api/posts' },
   getPost: { method: 'GET', path: '/api/posts/:id' },
   createPost: { method: 'POST', path: '/api/posts' },
+  deletePost: { method: 'DELETE', path: '/api/posts/:id' },
   putVote: { method: 'PUT', path: '/api/votes' },
   putFavorite: { method: 'PUT', path: '/api/favorites' },
   getComments: { method: 'GET', path: '/api/comments' },

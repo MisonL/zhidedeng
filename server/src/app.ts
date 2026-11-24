@@ -888,6 +888,8 @@ function orderByMaterializeDependency(store: Store, ids: string[]): string[] {
   route('createComment', z.strictObject({ ...target, content: z.string().trim().min(1).max(2000), parentId: identifier.optional() }), (service, input) => service.createComment(input));
   // 作者删除自己的评论。id 来自 path：route() 现在会把 c.req.param() 合并进输入。
   route('deleteComment', z.strictObject({ id: identifier }), (service, input) => service.deleteComment(input.id));
+  // 作者撤下自己已发布的文章。软删除，管理员仍可恢复。
+  route('deletePost', z.strictObject({ id: identifier }), (service, input) => service.withdrawOwnPost(input.id));
   route('getRankings', z.strictObject({ ...pagination, tab: z.enum(['model', 'community', 'expert']) }), (service, input) => service.getRankings(input));
   route('getBanners', z.strictObject(pagination), (service, input) => service.getBanners(input));
   route('search', z.strictObject({ q: z.string().trim().max(200) }), (service, input) => service.search(input.q));

@@ -363,3 +363,27 @@ describe('评论自删', () => {
     expect(screen.queryByRole('button', { name: '回复' })).not.toBeInTheDocument();
   });
 });
+
+describe('撤下自己的文章', () => {
+  it('已发布的文章才有撤下入口，确认后调用接口并显示已撤下', async () => {
+    const published = makePost('mine-1', { title: '我写的那篇', status: 'approved' });
+    const pending = makePost('mine-2', { title: '还在审的', status: 'pending' });
+    const fetchMock = stubApi({
+      'GET /api/me/posts': page([published, pending]),
+      'DELETE /api/posts/mine-1': { id: 'mine-1', removed: true },
+    });
+    renderApp('/me?tab=posts');
+
+    expect(await screen.findByText('我写的那篇')).toBeInTheDocument();
+    // 待审的那篇没有撤下入口：它还没上线。
+    expect(screen.getAllByRole('button', { name: '撤下这篇文章' })).toHaveLength(1);
+
+    fireEvent.click(screen.getByRole('button', { name: '撤下这篇文章' }));
+    expect(callsTo(fetchMock, 'DELETE', '/api/posts/mine-1')).toHaveLength(0);
+    expect(screen.getByText(/撤下后其他人立刻看不到/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '撤下' }));
+
+    await waitFor(() => expect(callsTo(fetchMock, 'DELETE', '/api/posts/mine-1')).toHaveLength(1));
+    expect(await screen.findByText(/已撤下。需要恢复请站内联系管理员/)).toBeInTheDocument();
+  });
+});
