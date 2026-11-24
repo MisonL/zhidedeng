@@ -781,3 +781,32 @@ describe('审查修复：举报与删除的证据边界', () => {
     expect(response.status).toBe(400);
   });
 });
+
+describe('举报频控', () => {
+  it('一小时内举报超过 20 条会被限流，不会把审核台淹掉', async () => {
+    const a = await account('alice');
+    const b = await account('bobby');
+    const post = await submit(a, '被反复举报的对象');
+    await admin(`/api/admin/posts/${post.id}/review`, { status: 'approved' });
+    // 同一对象有「重复举报 409」的部分唯一索引，同一作者发帖也有一小时 10 篇的配额，
+    // 所以刷满举报配额要靠多个作者的多条评论。
+    const commentIds: string[] = [];
+    for (let u = 0; u < 5; u++) {
+      const author = await account(`commenter${u}`);
+      for (let i = 0; i < 5; i++) {
+        const created = await author.call('POST', '/api/comments', { targetType: 'post', targetId: post.id, content: `${u}-${i} 号评论` });
+        expect(created.status).toBe(200);
+        commentIds.push((await created.json() as { id: string }).id);
+      }
+    }
+    for (let i = 0; i < 20; i++) {
+      const response = await b.call('POST', '/api/reports', { targetType: 'comment', targetId: commentIds[i], reason: `第 ${i} 次` });
+      expect(response.status).toBe(200);
+    }
+    const blocked = await b.call('POST', '/api/reports', { targetType: 'comment', targetId: commentIds[20], reason: '第 21 次' });
+    expect(blocked.status).toBe(429);
+    expect(await blocked.json()).toMatchObject({ error: { code: 'RATE_LIMITED' } });
+    // 别人不受影响：限流按人算。
+    expect((await a.call('POST', '/api/reports', { targetType: 'comment', targetId: commentIds[0], reason: 'x' })).status).toBe(200);
+  });
+});

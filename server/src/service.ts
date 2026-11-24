@@ -64,6 +64,9 @@ const PREFETCH_MIN_ROWS = 100;
 // 列表查询另走一套（hidden = 0），因为别人回复还挂在墓碑下面，得把它取出来才能渲染。
 const COMMENT_VISIBLE = 'hidden = 0 AND deletedAt IS NULL AND (parentId IS NULL OR parentId NOT IN (SELECT id FROM comments WHERE hidden = 1 AND targetType = comments.targetType AND targetId = comments.targetId))';
 const COMMENTS_PER_MINUTE = 5;
+// 举报是零成本动作：没有配额时一个人可以连发几百条，把审核台淹掉。
+// 一小时 20 条足够正常用户表达不满，又不足以刷屏。
+const REPORTS_PER_HOUR = 20;
 const POSTS_PER_HOUR = 10;
 const MAX_PENDING_POSTS = 20;
 const MIN_OFFERS_FOR_RATE = 3;
@@ -886,6 +889,10 @@ export class Service {
    * - 演示数据不能举报（虚构样例，运营侧清库，不归读者管）。
    */
   createReport(input: CreateReportRequest) {
+    // 先看配额再查目标：否则刷屏者的探测请求也会打到实体查找上。
+    const since = new Date(this.now().getTime() - 3_600_000).toISOString();
+    const recent = Number(this.store.db.prepare('SELECT count(*) AS count FROM reports WHERE reporterHandle = ? AND createdAt > ?').get(this.user, since)!.count);
+    if (recent >= REPORTS_PER_HOUR) throw new ApiError(429, 'RATE_LIMITED', '举报太频繁了，请稍后再试');
     const targetType = input.targetType;
     if (targetType === 'post') {
       const post = this.readablePost(input.targetId);
