@@ -503,3 +503,20 @@ describe('删除与头像的回归（审查修复）', () => {
     expect(avatar?.textContent).toBe('🦊');
   });
 });
+
+describe('删掉最后一条评论', () => {
+  it('列表回到空态，而不是留一片空白', async () => {
+    const mine = { handle: 'demo-pedal', nickname: '我自己', avatar: '' };
+    stubApi({
+      'GET /api/comments': page([{
+        id: 'only', targetType: 'post', targetId: 'p1', author: mine, content: '唯一的一条',
+        parentId: null, createdAt: '2026-11-03T08:00:00.000Z', replies: [],
+      }]),
+      'DELETE /api/comments/only': { id: 'only', deleted: 'removed' },
+    });
+    renderWithProviders(<Comments targetType="post" targetId="p1" />);
+    fireEvent.click(await screen.findByRole('button', { name: '删除' }));
+    fireEvent.click(await screen.findByRole('button', { name: '确认删除' }));
+    expect(await screen.findByText('还没有评论，来抢沙发')).toBeInTheDocument();
+  });
+});

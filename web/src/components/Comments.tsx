@@ -142,7 +142,8 @@ export default function Comments({ targetType, targetId }: { targetType: TargetT
       {deleteError && <p className="form-error" role="alert">{deleteError}</p>}
       <AsyncView
         state={paged}
-        isEmpty={(items) => items.length + added.length === 0}
+        // 本地删掉的要从计数里扣掉，否则删完最后一条会停在「有一堆空位但没有空态」的画面上。
+        isEmpty={(items) => items.filter((item) => !removedIds.has(item.id)).length + added.filter((item) => !removedIds.has(item.id)).length === 0}
         empty={<Empty title="还没有评论，来抢沙发" />}
       >
         {(items) => (
