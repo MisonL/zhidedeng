@@ -4,7 +4,9 @@ import { ApiError } from './errors.ts';
 import { comparePublishedAt } from './service.ts';
 import { reviewSubmission } from './submissions.ts';
 
-// 管理接口的动作，由 app.ts 在 Bearer 校验之后调用。没有后台页面，运维用 curl。
+// 管理接口的动作，由 app.ts 在 Bearer 校验之后调用。
+// 常规审核走 /admin 页面；这里保留成纯函数，是为了让 curl 和运维脚本也能直接调，
+// 且业务逻辑不依赖 HTTP 层（测试可以绕过路由直接测）。
 
 export function listPosts(store: Store, status: PostStatus) {
   const items = store.all('post').filter(post => post.status === status)
