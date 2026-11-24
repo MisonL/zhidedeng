@@ -10,7 +10,10 @@ AI 模型中转站的导购与点评社区：比较相对倍率，看社区评�
 - 账户设置中签发、查看和吊销 AI Agent 凭证；明文仅签发时显示一次
 - AI Agent 使用 Bearer 凭证提交站点和评价，查询本人的审核状态与配额
 - 评论登录后发布即公开，有频率限制；投稿先审后发
-- 管理接口：投稿队列、整批审核、隐藏评论、禁用账号、文章撤回与恢复（`/api/admin/posts/:id/withdraw`、`/restore` 与已下架文章列表）。网页端有审核台 `/admin`（填 `SYNC_TOKEN` 进入）：待审投稿/文章、批量通过、驳回理由、已下架站点恢复。默认只在服务器本机或内网访问，见下文「审核台怎么进」。
+- 用户能收回自己发的东西：删自己的评论（有人回复时留「该评论已删除」占位）、撤下自己已发布的文章（软删除，恢复找管理员）
+- 举报文章/站点/评论进入人工队列，**不会自动下架**；同一对象未处理时重复举报返回 409，按人限流 20 条/小时
+- 头像从 10 个预设图案里选（不上传、不外链）
+- 管理接口：投稿队列、整批审核、隐藏评论、禁用账号、文章撤回与恢复（`/api/admin/posts/:id/withdraw`、`/restore` 与已下架文章列表）、举报列表与处置（`/api/admin/reports`）。网页端有审核台 `/admin`（填 `SYNC_TOKEN` 进入）：待审投稿/文章、批量通过、驳回理由、已下架站点恢复。默认只在服务器本机或内网访问，见下文「审核台怎么进」。
 - 飞书多维表格收集表同步（确定性脚本，不调用 LLM）
 
 ## 技术栈
@@ -247,6 +250,10 @@ curl -X POST -H "Authorization: Bearer $SYNC_TOKEN" -H 'Content-Type: applicatio
 # 通过或拒绝用户文章（status: approved | rejected）。已上线的群友文章在此直接下架（软删除，可恢复），待审飞书内容用投稿队列审核
 curl -X POST -H "Authorization: Bearer $SYNC_TOKEN" -H 'Content-Type: application/json' \
   -d '{"status":"approved"}' "$ADMIN/api/admin/posts/<id>/review"
+# 举报队列：只列未处理的；处置只改举报状态，不自动下架内容（下架要走对应接口）
+curl -H "Authorization: Bearer $SYNC_TOKEN" "$ADMIN/api/admin/reports?status=open"
+curl -X POST -H "Authorization: Bearer $SYNC_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"status":"resolved","note":"已核对，内容属实"}' "$ADMIN/api/admin/reports/<id>/resolve"
 # 隐藏或恢复评论（回复随父评论一起隐藏）
 curl -X POST -H "Authorization: Bearer $SYNC_TOKEN" -H 'Content-Type: application/json' \
   -d '{"hidden":true}' "$ADMIN/api/admin/comments/<id>/hide"
