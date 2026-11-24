@@ -454,3 +454,37 @@ describe('自动通过 + 已下架文章的批次语义', () => {
     expect(third.results[0].status).toBe('approved');
   });
 });
+
+describe('命中已下架时不误伤待审投稿', () => {
+  it('被拦下记成 rejected 的自动投稿，不会把同 originKey 的待审版本清成 superseded', async () => {
+    const { enqueueBatch } = await import('../src/submissions.ts');
+    const store = openStore(server.db);
+    const post = (recordId: string) => ({ recordId, hostname: 'sup.example.com', authorName: '作者', title: '文章', summary: '摘要', body: '正文', publishedAt: '2026-11-01T00:00:00.000Z' });
+    const station = { name: '替代站', description: 'd', url: 'https://sup.example.com/', rechargeThreshold: 10, paymentMethods: ['支付宝'], offers: [{ modelSlug: 'gpt-4-1', rate: 0.5 }] };
+    // 先人工模式建一条待审（autoApprove 关），再开自动通过去同步同一条。
+    const pending = enqueueBatch(store, {
+      channel: 'feishu', batchId: 'sup-1', now: clock(), ip: '127.0.0.1',
+      items: [{ kind: 'station', originKey: 'sup.example.com', payload: station }, { kind: 'post', originKey: 'post-s1', payload: post('s1') }],
+    });
+    const pendingPostId = pending.results[1].id!;
+    expect(pending.results[1].status).toBe('pending');
+
+    expect((await server.app.request('/api/admin/settings', { method: 'POST', headers: admin, body: JSON.stringify({ autoApprove: true }) })).status).toBe(200);
+    // 让这条 pending 的实体「此前已被下架」：直接把 id 对应的实体写成下架状态。
+    server.db.prepare("INSERT INTO entities (kind, id, data, removedAt) VALUES ('post', ?, '{}', '2026-11-01T00:00:00.000Z')").run(`sub-${pendingPostId}`);
+    const auto = enqueueBatch(store, {
+      channel: 'feishu', batchId: 'sup-2', now: clock(), ip: '127.0.0.1',
+      items: [{ kind: 'post', originKey: 'post-s1', payload: post('s1') }],
+    });
+    expect(auto.results[0].status).toBe('rejected');
+    expect(auto.results[0].reason).toContain('已被下架');
+    // 命中的是那条待审本身：它被如实定成 rejected，而不是「approved 但详情 404」。
+    const row = server.db.prepare('SELECT status FROM submissions WHERE id = ?').get(pendingPostId) as { status: string };
+    expect(row.status).toBe('rejected');
+    // 关键回归：这条没有产生新版本，不能把别的待审版本清成 superseded。
+    const superseded = server.db.prepare("SELECT count(*) AS count FROM submissions WHERE status = 'superseded'").get() as { count: number };
+    expect(Number(superseded.count)).toBe(0);
+    // 实体仍然是下架状态，没有被复活。
+    expect(server.db.prepare("SELECT removedAt FROM entities WHERE kind = 'post' AND id = ?").get(`sub-${pendingPostId}`) as { removedAt: string | null }).toMatchObject({ removedAt: expect.any(String) });
+  });
+});

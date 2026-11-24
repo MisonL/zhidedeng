@@ -315,7 +315,9 @@ export function enqueueSubmission(store: Store, input: {
     store.db.prepare('INSERT INTO submissions (id, kind, channel, originKey, batchId, action, autoApproved, payload, payloadHash, actorHandle, ip, status, reason, reviewedAt, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
       .run(submission.id, submission.kind, submission.channel, submission.originKey, submission.batchId, submission.action, auto ? 1 : 0, serialized, payloadHash,
         submission.actorHandle, validated.ip, submission.status, submission.reason, submission.reviewedAt, submission.createdAt);
-    if (auto) supersedePending(store, submission, reviewedAt);
+    // 只有真的上线的才替代别人：命中「此前已下架」而记成 rejected 的那条没有产生新版本，
+    // 它去替代 pending 等于把别的待审投稿凭空清成 superseded。
+    if (auto && submission.status === 'approved') supersedePending(store, submission, reviewedAt);
     return { submission, deduplicated: false, autoApproved: auto };
   });
 }
