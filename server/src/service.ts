@@ -1,3 +1,4 @@
+import { AVATAR_PRESETS } from '@zhidedeng/shared';
 import type {
   Author, CheckInResponse, Comment, CommentReply, CreateCommentRequest,
   CreateReportRequest, CurrentUser, Favorite, FavoriteItem, GetCommentsRequest, GetModelsRequest, GetPostsRequest,
@@ -552,6 +553,12 @@ export class Service {
     return this.store.transaction(() => {
       const user = this.requireUser();
       const nickname = input.nickname;
+      // avatar 只认预设集合里的标识。库里的历史脏值（外链/任意串）在写入时被
+      // 这种校验挡住；读侧由前端兜底（认不出的按默认画）。
+      // 空串 = 恢复默认。预设集合外的任何值都拒绝。
+      if (input.avatar !== undefined && input.avatar !== '' && !AVATAR_PRESETS.some(preset => preset === input.avatar)) {
+        throw new ApiError(400, 'INVALID_INPUT', '头像必须是预设集合中的一项');
+      }
       if (nickname !== undefined) {
         // 列表和详情只渲染 nickname，不渲染 handle，所以「官方」「管理员」这类
         // 展示名一旦能随便取，就等于可以冒充平台身份做钓鱼。

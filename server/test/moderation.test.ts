@@ -708,3 +708,24 @@ describe('举报最小闭环', () => {
     expect((await anonymous.call('POST', '/api/reports', { targetType: 'comment', targetId: comment.id, reason: 'x' })).status).toBe(401);
   });
 });
+
+describe('预设头像', () => {
+  it('PATCH /api/me 可设置预设头像，服务器只认预设集合', async () => {
+    const a = await account('alice');
+    expect((await a.call('PATCH', '/api/me', { avatar: '🦊' })).status).toBe(200);
+    expect((await a.get<CurrentUser>('/api/me')).avatar).toBe('🦊');
+    const invalid = await a.call('PATCH', '/api/me', { avatar: 'https://evil.example/x.png' });
+    expect(invalid.status).toBe(400);
+    expect((await a.get<CurrentUser>('/api/me')).avatar).toBe('🦊');
+  });
+
+  it('设置头像不影响昵称去重与保留身份', async () => {
+    const a = await account('alice');
+    const b = await account('bobby');
+    expect((await a.call('PATCH', '/api/me', { avatar: '🐼', nickname: '管理员' })).status).toBe(400);
+    expect((await a.call('PATCH', '/api/me', { avatar: '🐼', nickname: 'bobby' })).status).toBe(409);
+    // 只有头像的更新能成功。
+    expect((await a.call('PATCH', '/api/me', { avatar: '🐼' })).status).toBe(200);
+    expect((await b.get<CurrentUser>('/api/me')).nickname).toBe('bobby');
+  });
+});

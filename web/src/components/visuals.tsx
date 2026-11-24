@@ -1,5 +1,6 @@
 import type { CSSProperties } from 'react';
 import type { Model, PostSummary, Station } from '@zhidedeng/shared';
+import { AVATAR_PRESETS } from '@zhidedeng/shared';
 import anthropic from '@lobehub/icons-static-svg/icons/anthropic.svg';
 import deepseek from '@lobehub/icons-static-svg/icons/deepseek-color.svg';
 import doubao from '@lobehub/icons-static-svg/icons/doubao-color.svg';
@@ -52,9 +53,29 @@ export function VendorIcon({ iconKey, size = 20 }: { iconKey: string; size?: num
 }
 
 export function Avatar({ nickname, size = 32 }: { nickname: string; size?: number }) {
+  // 预设头像优先。实际展示时不会带 emoji（nickname 是纯字），
+  // 这个分支保留给将来 Avatar 直接接收 preset 时用；现在入口统一走
+  // 「nickname 里有 emoji？」的近似判断，在 Settings 里由 AvatarPresetGlyph 负责。
+  const preset = AVATAR_PRESETS.find((value) => value === nickname);
+  if (preset) {
+    return (
+      <span className="avatar avatar-preset" aria-hidden="true" style={{ width: size, height: size, fontSize: size * 0.5 }}>
+        {preset}
+      </span>
+    );
+  }
   return (
     <span className="avatar" aria-hidden="true" style={{ width: size, height: size, fontSize: size * 0.45, background: accentOf(nickname) }}>
       {glyphOf(nickname)}
+    </span>
+  );
+}
+
+/** 头像选择器里的预设图案：白底 emoji，一眼看得出选的是哪个。 */
+export function AvatarPresetGlyph({ preset, size = 40 }: { preset: string; size?: number }) {
+  return (
+    <span className="avatar-preset" aria-hidden="true" style={{ width: size, height: size, fontSize: size * 0.6 }}>
+      {preset}
     </span>
   );
 }

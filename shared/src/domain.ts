@@ -253,3 +253,14 @@ export interface ExpertRanking {
  * 放在这里而不是 submission.ts：后者依赖 zod，前端只引常量时不该把 zod 带进产物。
  */
 export const PROFILE_LIMITS = { nickname: 20, bio: 500 } as const;
+
+/**
+ * 预设头像集合。
+ *
+ * 头像刻意**不提供上传/外链**：外链让运营彻底失控（隐私追踪、钓 鱼图、
+ * 整站变慢都来自第三方图片），上传要存文件、要管 Content-Type 与尺寸，
+ * 两个都远超「让个人主页不那么空」这个需求的成本。预设是表情符号，
+ * 由前端用昵称底色画出来，语义仍然是「换一个代表自己的图案」。
+ */
+export const AVATAR_PRESETS = ['🦊', '🐼', '🐯', '🦁', '🐸', '🐙', '🦄', '🐳', '🦉', '🐧'] as const;
+export type AvatarPreset = (typeof AVATAR_PRESETS)[number];

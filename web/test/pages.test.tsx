@@ -193,7 +193,7 @@ describe('我的', () => {
     const nickname = await screen.findByLabelText('昵称');
     fireEvent.change(nickname, { target: { value: '新昵称' } });
     fireEvent.click(screen.getByRole('button', { name: '保存' }));
-    await waitFor(() => expect(callsTo(fetchMock, 'PATCH', '/api/me')[0].body).toEqual({ nickname: '新昵称', bio: '蹬得开心' }));
+    await waitFor(() => expect(callsTo(fetchMock, 'PATCH', '/api/me')[0].body).toEqual({ nickname: '新昵称', bio: '蹬得开心', avatar: '' }));
     expect(await within(screen.getByRole('navigation', { name: '主导航' })).findByRole('button', { name: '新昵称' })).toBeInTheDocument();
   });
 });
@@ -385,5 +385,21 @@ describe('撤下自己的文章', () => {
 
     await waitFor(() => expect(callsTo(fetchMock, 'DELETE', '/api/posts/mine-1')).toHaveLength(1));
     expect(await screen.findByText(/已撤下。需要恢复请站内联系管理员/)).toBeInTheDocument();
+  });
+});
+
+describe('预设头像', () => {
+  it('设置页能选预设头像并保存，保存内容包含所选 preset', async () => {
+    const fetchMock = stubApi({
+      'PATCH /api/me': (input: { body: { nickname: string; bio: string; avatar: string } }) => ({
+        handle: 'demo-pedal', tokens: 1280, checkedInToday: false, streak: 3, favoriteCount: 2, shareCount: 1, ...input.body,
+      }),
+    });
+    renderApp('/me?tab=settings');
+    // 当前是默认（空），选中 🦊 后保存。
+    fireEvent.click(await screen.findByRole('radio', { name: /🦊/ }));
+    fireEvent.click(screen.getByRole('button', { name: '保存' }));
+    await waitFor(() => expect(callsTo(fetchMock, 'PATCH', '/api/me')[0].body).toMatchObject({ avatar: '🦊' }));
+    expect(await screen.findByText('已保存')).toBeInTheDocument();
   });
 });

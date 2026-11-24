@@ -263,6 +263,8 @@ export type GetMeResponse = CurrentUser;
 export interface UpdateMeRequest {
   nickname?: string;
   bio?: string;
+  /** 预设头像标识，取值见 shared/domain 的 AVATAR_PRESETS。空串 = 默认。 */
+  avatar?: string;
 }
 export type UpdateMeResponse = CurrentUser;
 export type CheckInRequest = EmptyRequest;

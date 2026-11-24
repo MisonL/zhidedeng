@@ -9,6 +9,7 @@ import ConfirmButton from '../components/ConfirmButton';
 import PostCard from '../components/PostCard';
 import StationCard from '../components/StationCard';
 import { Avatar } from '../components/visuals';
+import { AVATAR_PRESETS } from '@zhidedeng/shared';
 import { loginPath } from '../format';
 import { usePaged } from '../hooks';
 import { useHere, useMe } from '../state';
@@ -151,6 +152,7 @@ function Settings({ user }: { user: CurrentUser }) {
   const { setMe } = useMe();
   const [nickname, setNickname] = useState(user.nickname);
   const [bio, setBio] = useState(user.bio);
+  const [avatar, setAvatar] = useState(user.avatar ?? '');
   const [message, setMessage] = useState<{ ok: boolean; text: string }>();
   const [saving, setSaving] = useState(false);
 
@@ -160,7 +162,7 @@ function Settings({ user }: { user: CurrentUser }) {
     setSaving(true);
     setMessage(undefined);
     try {
-      setMe(await api.updateMe({ nickname: nickname.trim(), bio: bio.trim() }));
+      setMe(await api.updateMe({ nickname: nickname.trim(), bio: bio.trim(), ...(avatar ? { avatar } : { avatar: '' }) }));
       setMessage({ ok: true, text: '已保存' });
     } catch (error) {
       setMessage({ ok: false, text: (error as Error).message });
@@ -179,6 +181,28 @@ function Settings({ user }: { user: CurrentUser }) {
         <label className="field-label" htmlFor="me-bio">简介</label>
         <textarea id="me-bio" rows={3} maxLength={PROFILE_LIMITS.bio} value={bio} onChange={(event) => setBio(event.target.value)} />
       </div>
+      <fieldset className="field">
+        <legend className="field-label">头像</legend>
+        <div className="avatar-picker" role="radiogroup" aria-label="选择预设头像">
+          <button
+            type="button" role="radio" aria-checked={avatar === ''}
+            className={`avatar-option ${avatar === '' ? 'selected' : ''}`}
+            onClick={() => setAvatar('')}
+          >
+            <Avatar nickname={nickname} /> <span>默认</span>
+          </button>
+          {AVATAR_PRESETS.map((preset) => (
+            <button
+              key={preset} type="button" role="radio" aria-checked={avatar === preset}
+              className={`avatar-option ${avatar === preset ? 'selected' : ''}`}
+              onClick={() => setAvatar(preset)}
+            >
+              <span className="avatar-preset" aria-hidden="true">{preset}</span> <span>{preset}</span>
+            </button>
+          ))}
+        </div>
+        <p className="hint">头像是预设图案，不上传文件，也不读取第三方图片。</p>
+      </fieldset>
       {message && <p className={message.ok ? 'form-success' : 'form-error'} role={message.ok ? 'status' : 'alert'}>{message.text}</p>}
       <button type="submit" className="btn btn-red submit-btn" disabled={saving}>{saving ? '保存中…' : '保存'}</button>
     </form>

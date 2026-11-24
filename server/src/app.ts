@@ -790,7 +790,11 @@ function orderByMaterializeDependency(store: Store, ids: string[]): string[] {
   });
 
   route('getMe', z.strictObject({}), service => service.getMe());
-  route('updateMe', z.strictObject({ nickname: nickname.optional(), bio: z.string().trim().max(PROFILE_LIMITS.bio).optional() }).refine(input => Object.keys(input).length > 0), (service, input) => service.updateMe(input));
+  route('updateMe', z.strictObject({
+    nickname: nickname.optional(),
+    bio: z.string().trim().max(PROFILE_LIMITS.bio).optional(),
+    avatar: z.string().trim().max(200).optional(),
+  }).refine(input => Object.keys(input).length > 0), (service, input) => service.updateMe(input));
   route('checkIn', z.strictObject({}), service => {
     // 没限流时脚本可以循环打点；虽然一天只成功一次，
     // 但每次都要走一遍事务和写库，足以把库压住。
