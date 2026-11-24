@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { FormEvent } from 'react';
 import { feishuHostnameKey } from '@zhidedeng/shared';
 import type { Station, SubmissionRecord } from '@zhidedeng/shared';
@@ -83,6 +83,18 @@ export default function Admin() {
   // 共用一张 map 会让两个页签互相 prefetch 对方的输入。
   const [rejectingPost, setRejectingPost] = useState<string>();
   const [postReasons, setPostReasons] = useState<Record<string, string>>({});
+  // 理由必填错误要有就地播报，不能只写在页面顶部的通用错误里：
+  // 读屏用户停在输入框上，听不到别处的错误。
+  const [postReasonError, setPostReasonError] = useState<string>();
+  const postReasonRef = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    if (rejectingPost) postReasonRef.current?.focus();
+  }, [rejectingPost]);
+
+  function clearPostReason(id: string) {
+    setPostReasons((current) => { const { [id]: _removed, ...rest } = current; return rest; });
+    setPostReasonError(undefined);
+  }
   // reload 用来在恢复/下架/审核通过后失效目录缓存：否则公开页要手动刷新浏览器
   // 才看得到刚恢复的站点，用户会以为操作没生效。
   const { stationBySlug, reload: reloadCatalog } = useCatalog();
@@ -151,6 +163,12 @@ export default function Admin() {
  setPublished(undefined);
     setError(undefined);
     setMessage(undefined);
+    // 退出/换密钥时不能留着上一位审核员写的驳回理由。
+    setRejecting(undefined);
+    setRejectingPost(undefined);
+    setReasons({});
+    setPostReasons({});
+    setPostReasonError(undefined);
   }
 
   function unlock(event: FormEvent) {
@@ -505,10 +523,18 @@ export default function Admin() {
                     <div className="field">
                       <label className="field-label" htmlFor={`post-reason-${post.id}`}>驳回理由（必填，作者可见）</label>
                       <input
-                        id={`post-reason-${post.id}`} value={postReasons[post.id] ?? ''} maxLength={200}
+                        ref={postReasonRef} id={`post-reason-${post.id}`} value={postReasons[post.id] ?? ''} maxLength={1000}
                         placeholder="说明哪里不合格，作者据此修改后重投"
-                        onChange={event => setPostReasons({ ...postReasons, [post.id]: event.target.value })}
+                        aria-invalid={Boolean(postReasonError)}
+                        aria-describedby={postReasonError ? `post-reason-error-${post.id}` : undefined}
+                        onChange={event => {
+                          setPostReasons({ ...postReasons, [post.id]: event.target.value });
+                          setPostReasonError(undefined);
+                        }}
                       />
+                      {postReasonError && (
+                        <p id={`post-reason-error-${post.id}`} className="form-error" role="alert">{postReasonError}</p>
+                      )}
                       <div className="tags">
                         {REJECT_PRESETS.map(preset => (
                           <button key={preset} type="button" className="tag"
@@ -532,22 +558,27 @@ export default function Admin() {
                           className="btn btn-small btn-ghost" disabled={busy}
                           onClick={() => {
                             const reason = postReasons[post.id]?.trim();
-                            if (!reason) { setError('拒绝文章时必须填写理由，作者要靠它修改重投'); return; }
+                            if (!reason) {
+                              setPostReasonError('拒绝文章时必须填写理由，作者要靠它修改重投');
+                              postReasonRef.current?.focus();
+                              return;
+                            }
                             void act(() => admin.reviewPost(post.id, 'rejected', reason), '已拒绝')
-                              .then((ok) => { if (ok) setRejectingPost(undefined); });
+                              .then((ok) => { if (ok) { setRejectingPost(undefined); clearPostReason(post.id); } });
                           }}
                         >
                           确认拒绝
                         </button>
-                        <button type="button" className="btn btn-small btn-ghost" onClick={() => {
+                        <button type="button" id={`post-reject-${post.id}`} className="btn btn-small btn-ghost" onClick={() => {
                           setRejectingPost(undefined);
-                          setPostReasons((current) => { const { [post.id]: _removed, ...rest } = current; return rest; });
+                          clearPostReason(post.id);
+                          document.getElementById(`post-reject-${post.id}`)?.focus();
                         }}>取消</button>
                       </>
                     ) : (
                       <button
                         className="btn btn-small btn-ghost" disabled={busy}
-                        onClick={() => setRejectingPost(post.id)}
+                        onClick={() => { setPostReasonError(undefined); setRejectingPost(post.id); }}
                       >
                         拒绝
                       </button>
