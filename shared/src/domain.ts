@@ -227,7 +227,7 @@ export interface Banner {
   href: string;
 }
 
-export type RankingTab = 'model' | 'community' | 'expert';
+export type RankingTab = 'model' | 'community' | 'expert' | 'station';
 export interface ModelRanking {
   rank: number;
   model: Model;
@@ -245,6 +245,17 @@ export interface ExpertRanking {
   user: User;
   shareCount: number;
   upCount: number;
+}
+
+/**
+ * 站点榜。
+ *
+ * 刻意只复用 `getStations({ sort: 'score' })` 的排序，不在这里另算一套分数：
+ * 榜单和 /stations 给出不同顺序时，读者会认为其中一个是错的。
+ */
+export interface StationRanking {
+  rank: number;
+  station: Station;
 }
 
 /**

@@ -1,6 +1,6 @@
 import type {
   AgentToken, Banner, CheckIn, Comment, CommentReply, CommunityRanking, CurrentUser,
-  ExpertRanking, FavoriteItem, Model, ModelDetail, ModelRanking, Post, PostKind, PostSummary,
+  ExpertRanking, FavoriteItem, Model, ModelDetail, ModelRanking, Post, PostKind, PostSummary, StationRanking,
   ISODateTime, RankingTab, RateBasis, Station, StationDetail, Target, Vendor, VendorWithModels, VoteSummary, VoteValue,
 } from './domain.js';
 
@@ -368,7 +368,8 @@ export interface GetRankingsRequest extends PaginationQuery { tab: RankingTab }
 export type GetRankingsResponse =
   | (PaginatedResponse<ModelRanking> & { tab: 'model' })
   | (PaginatedResponse<CommunityRanking> & { tab: 'community' })
-  | (PaginatedResponse<ExpertRanking> & { tab: 'expert' });
+  | (PaginatedResponse<ExpertRanking> & { tab: 'expert' })
+  | (PaginatedResponse<StationRanking> & { tab: 'station' });
 export type GetBannersRequest = PaginationQuery;
 export type GetBannersResponse = PaginatedResponse<Banner>;
 export interface SearchRequest { q: string }

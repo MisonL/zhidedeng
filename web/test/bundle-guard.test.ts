@@ -19,6 +19,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import { execFileSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 const webRoot = process.cwd();
@@ -29,6 +30,8 @@ interface BundleResult {
   files: number;
   bytes: number;
   markers: number;
+  /** 构建后 index.html 的 description，用来验证它就是 SITE_NOTICE。 */
+  description?: string | null;
   error?: string;
 }
 
@@ -51,6 +54,18 @@ describe('前端产物不含 zod', () => {
     // 的粗线：带 zod 的产物是 606,000+，所以 570K 仍然能抓住它。
     expect(result.bytes).toBeLessThan(570_000);
     expect(result.markers, '产物里出现了 zod 的内部标识').toBe(0);
+  }, 300_000);
+
+  it('构建产物里的 description 就是 SITE_NOTICE，不是另一份手抄的文案', () => {
+    // 这句话原来在 index.html 和 format.ts 各写一遍，改一处漏一处，
+    // 出现过「页脚说三种来源、meta 只说两种」。现在源码里只有一份，
+    // 这里锁住「注入确实发生了」——占位符没被替换时产物里会留着 %SITE_NOTICE%。
+    const result = build();
+    expect(result.description).toBeTruthy();
+    expect(result.description).not.toContain('%SITE_NOTICE%');
+    const source = readFileSync(join(webRoot, 'src/format.ts'), 'utf8');
+    const notice = /export const SITE_NOTICE = '([^']+)'/.exec(source)?.[1];
+    expect(result.description).toBe(notice);
   }, 300_000);
 
   it('检查器本身能发现真正把 zod 带进产物的写法', () => {

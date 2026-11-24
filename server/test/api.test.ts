@@ -163,12 +163,19 @@ describe('seed and read endpoints', () => {
     }
   });
 
-  it.each(['model', 'community', 'expert'] as const)('returns %s rankings with 6–12 entries', async tab => {
+  it.each(['model', 'station', 'community', 'expert'] as const)('returns %s rankings with 6–12 entries', async tab => {
     const ranking = await ok('getRankings', { tab });
     expect(ranking.tab).toBe(tab);
     expect(ranking.items.length).toBeGreaterThanOrEqual(6);
     expect(ranking.items.length).toBeLessThanOrEqual(12);
     expect(ranking.items.map(i => i.rank)).toEqual(ranking.items.map((_, i) => i + 1));
+  });
+
+  it('站点榜与 /stations?sort=score 同序：两处给出不同顺序等于其中一个是错的', async () => {
+    const ranking = await ok('getRankings', { tab: 'station', pageSize: 12 });
+    const stations = await ok('getStations', { sort: 'score', pageSize: 12 });
+    if (ranking.tab !== 'station') throw new Error(`期望站点榜，实际 ${ranking.tab}`);
+    expect(ranking.items.map(item => item.station.slug)).toEqual(stations.items.map(station => station.slug));
   });
 
   it('searches model, station and article text with bounded groups and literal query safety', async () => {

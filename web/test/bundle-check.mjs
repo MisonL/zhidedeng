@@ -35,7 +35,11 @@ try {
     // 用 zod 内部独有的标识，避免匹配到正常代码里的常见词
     markers += (text.match(/ZodError|_zod|invalid_type|unrecognized_keys|invalid_union/g) ?? []).length;
   }
-  process.stdout.write(JSON.stringify({ ok: true, files: js.length, bytes, markers }));
+  // 顺手把 index.html 里注入后的 description 带出来：它是 SITE_NOTICE 常量的
+  // 唯一副本，靠「页脚和 meta 说同一件事」这件事本身是有测试兜底的。
+  const html = readFileSync(join(work, 'dist/index.html'), 'utf8');
+  const description = /<meta name="description" content="([^"]*)"/.exec(html)?.[1] ?? null;
+  process.stdout.write(JSON.stringify({ ok: true, files: js.length, bytes, markers, description }));
 } catch (error) {
   process.stdout.write(JSON.stringify({ ok: false, error: String(error).slice(0, 500) }));
 } finally {

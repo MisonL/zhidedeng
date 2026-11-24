@@ -5,13 +5,18 @@ import { rankings } from './fixtures';
 import { apiError, callsTo, renderApp, renderWithProviders, stubApi } from './helpers';
 
 describe('排行榜', () => {
-  it('切换模型/社区/达人 tab 重新取数', async () => {
+  it('切换模型/中转站/社区/达人 tab 重新取数', async () => {
     const fetchMock = stubApi();
     renderWithProviders(<RankingBoard />);
 
     expect(await screen.findByText('DeepSeek V4')).toBeInTheDocument();
     expect(screen.getByRole('tab', { name: '模型' })).toHaveAttribute('aria-selected', 'true');
     expect(screen.getByText(/低至 0.5x/)).toBeInTheDocument();
+
+    // 中转站是核心对象，却原来既不在导航也不在榜单里。
+    fireEvent.click(screen.getByRole('tab', { name: '中转站' }));
+    expect(await screen.findByText('云栈')).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: /云栈/ })).toHaveAttribute('href', '/stations/yunzhan');
 
     fireEvent.click(screen.getByRole('tab', { name: '社区' }));
     expect(await screen.findByText('社区热帖一号')).toBeInTheDocument();
@@ -21,7 +26,7 @@ describe('排行榜', () => {
     expect(await screen.findByText('蹬车达人')).toBeInTheDocument();
 
     const tabs = callsTo(fetchMock, 'GET', '/api/rankings').map(({ url }) => url.searchParams.get('tab'));
-    expect(tabs).toEqual(['model', 'community', 'expert']);
+    expect(tabs).toEqual(['model', 'station', 'community', 'expert']);
     expect(screen.getByRole('link', { name: /查看更多/ })).toHaveAttribute('href', '/rank?tab=expert');
   });
 

@@ -48,9 +48,10 @@ export const modelRanking: ModelRanking = {
   rank: 1, model: vendors[0].models[0], lowestRate: 0.5, stationCount: 8,
 };
 
-export function rankings(tab: 'model' | 'community' | 'expert'): GetRankingsResponse {
+export function rankings(tab: 'model' | 'station' | 'community' | 'expert'): GetRankingsResponse {
   const base = { total: 1, page: 1, pageSize: 6 };
   if (tab === 'model') return { ...base, tab, items: [modelRanking] };
+  if (tab === 'station') return { ...base, tab, items: [{ rank: 1, station }] };
   if (tab === 'community') return { ...base, tab, items: [{ rank: 1, post: makePost('hot', { title: '社区热帖一号' }) }] };
   return {
     ...base, tab,

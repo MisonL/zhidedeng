@@ -163,7 +163,7 @@ sudo systemctl start zhidedeng-docker-backup.service #立刻验证一次
  ```
  卷名以 `docker volume ls` 的实际输出为准。若已用 root 跑过，补一句 `chown 1000:1000 /data/zhidedeng.db` 也行。
 4. `docker start zhidedeng`，`curl -s http://<服务器地址>:<映射端口>/api/health` 应返回 database ok，再抽查前台站点数。
- **别用 `127.0.0.1:8787`**：容器部署是端口映射（本仓库 compose 是 `172.16.81.4:8788->8787`），宿主 `127.0.0.1:8787` 并没有监听，照抄会误判成恢复失败。端口以 `docker inspect` 的 `PortBindings` 为准。
+ **别用 `127.0.0.1:8787`**：容器部署是端口映射（compose 的宿主端口 8788，绑定地址由 `BIND_ADDR` 决定，默认 `127.0.0.1`；生产实测绑的是局域网地址 `172.16.81.4`），宿主 `127.0.0.1:8787` 并没有监听，照抄会误判成恢复失败。端口以 `docker inspect` 的 `PortBindings` 为准。
 5. 版本方向：旧备份加当前代码可以直接启动（启动迁移自动补列），这是**推荐方向**。
  反过来「新备份配旧代码」实测也能启动（迁移只加带默认值的列，旧二进制读得动），但旧代码不认新列，行为会退化，所以恢复时仍应使用与备份 schema 相同或更新的代码。
 6. 直跑形态（`zhidedeng.service`）同理：`systemctl stop` 后把备份放到 `DB_PATH`，清理同名 `-wal`/`-shm`，再启动。
@@ -200,7 +200,7 @@ DEPLOY_HOST=user@your-server deploy/deploy.sh
 ## 管理接口
 
 不对公网开放。两种形态的门不同，别混：
- - **容器形态（当前生产）**：`docker-compose.yml` 直接映射端口（`172.16.81.4:8788->8787`），前面没有 nginx，管理接口对**整个可路由网段**可达。唯一的门是 32+ 位的 `SYNC_TOKEN`，未配置时一律 403「管理接口未启用」。别假设「只有本机能访问」。
+ - **容器形态（当前生产）**：`docker-compose.yml` 直接映射端口（`${BIND_ADDR:-127.0.0.1}:8788->8787`，生产用 `BIND_ADDR=172.16.81.4`），前面没有 nginx，管理接口对**整个可路由网段**可达。唯一的门是 32+ 位的 `SYNC_TOKEN`，未配置时一律 403「管理接口未启用」。别假设「只有本机能访问」。
  - **直跑形态（nginx 反代）**：`/api/admin/` 走 `allow` + `deny all` 白名单，非白名单地址返回 **403**（不是 404），默认只放行 `127.0.0.1`。
  两种形态都要 `Authorization: Bearer $SYNC_TOKEN`，写接口要求 `Content-Type: application/json`。
 

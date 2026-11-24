@@ -3,13 +3,14 @@ import type { ReactNode } from 'react';
 import { Link } from 'react-router';
 import type { GetRankingsResponse, RankingTab } from '@zhidedeng/shared';
 import { api } from '../api';
-import { formatPercent, formatRate } from '../format';
+import { formatPercent, formatRate, formatUptime } from '../format';
 import { useAsync } from '../hooks';
 import AsyncView from './AsyncView';
-import { ExpertTile, ModelTile, PostCover } from './visuals';
+import { ExpertTile, ModelTile, PostCover, StationTile } from './visuals';
 
 const TABS: { value: RankingTab; label: string }[] = [
   { value: 'model', label: '模型' },
+  { value: 'station', label: '中转站' },
   { value: 'community', label: '社区' },
   { value: 'expert', label: '达人' },
 ];
@@ -47,6 +48,15 @@ function RankCards({ data }: { data: GetRankingsResponse }) {
       <RankCard
         key={post.id} rank={rank} to={`/posts/${post.id}`} art={<PostCover post={post} />} title={post.title}
         highlight={`值 ${formatPercent(post.votes.upRatio)} · ${post.votes.total} 票`}
+      />
+    ));
+  }
+  if (data.tab === 'station') {
+    return data.items.map(({ rank, station }) => (
+      <RankCard
+        key={station.slug} rank={rank} to={`/stations/${station.slug}`} art={<StationTile station={station} />} title={station.name}
+        // 分数与可用率都来自平台实测或用户断言，这里只陈述数值，不写「最稳」这类结论。
+        highlight={`评分 ${station.score === null ? '暂无' : station.score.toFixed(1)} · 可用率 ${formatUptime(station.uptime)}`}
       />
     ));
   }
@@ -101,6 +111,8 @@ export default function RankingBoard({ tab: controlled, onTabChange, pageSize = 
           <p className="state">
             {tab === 'model'
               ? <>目录里还没有模型，模型榜暂时为空。 <Link to="/submit?kind=model">补录一个模型</Link></>
+              : tab === 'station'
+                ? <>还没有中转站，站点榜暂时为空。 <Link to="/submit?kind=station">推荐一个站</Link></>
               : tab === 'community'
                 ? <>还没有已通过的社区文章，社区榜暂时为空。 <Link to="/submit?kind=community">写第一篇</Link></>
                 : <>还没有人分享过内容，达人榜暂时为空。 <Link to="/submit">去写第一篇</Link></>}

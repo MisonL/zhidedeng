@@ -1066,6 +1066,15 @@ export class Service {
         || comparePublishedAt(b.publishedAt, a.publishedAt));
       return { tab: 'community', ...paginate(records.slice(0, 12).map((record, index) => ({ rank: index + 1, post: this.post(record) })), query) };
     }
+    if (query.tab === 'station') {
+      // 12 条够用，直接复用 /stations 的 score 排序，避免两处各算一套分。
+      const page = this.getStations({ sort: 'score', page: 1, pageSize: 12 });
+      return {
+        tab: 'station',
+        items: page.items.map((station, index) => ({ rank: index + 1, station })),
+        total: page.total, page: 1, pageSize: 12,
+      };
+    }
     // 专家榜同样：up 数与篇数各用一条聚合查询算，再只组装上榜的 12 条。
     const records = this.approvedPosts();
     const up = this.countVotes('post', 'up');

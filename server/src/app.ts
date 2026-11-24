@@ -910,7 +910,7 @@ function orderByMaterializeDependency(store: Store, ids: string[]): string[] {
     reason: z.string().trim().min(1).max(200),
     detail: z.string().trim().max(500).optional(),
   }), (service, input) => service.createReport(input));
-  route('getRankings', z.strictObject({ ...pagination, tab: z.enum(['model', 'community', 'expert']) }), (service, input) => service.getRankings(input));
+  route('getRankings', z.strictObject({ ...pagination, tab: z.enum(['model', 'station', 'community', 'expert']) }), (service, input) => service.getRankings(input));
   route('getBanners', z.strictObject(pagination), (service, input) => service.getBanners(input));
   route('search', z.strictObject({ q: z.string().trim().max(200) }), (service, input) => service.search(input.q));
   route('getHotSearches', z.strictObject(pagination), (service, input) => service.getHotSearches(input));

@@ -1,0 +1,8 @@
+# 站点目前只在局域网 HTTP 上运行，没有对外域名；这份文件是为将来上 HTTPS 准备的。
+# 管理台与 API 不欢迎爬虫：/admin 是给人用的审核台，/api 的响应是 JSON。
+User-agent: *
+Allow: /
+Disallow: /admin
+Disallow: /api/
+
+# 动态列表靠站内链接发现即可，不做 Sitemap 声明（还没有稳定域名）。
