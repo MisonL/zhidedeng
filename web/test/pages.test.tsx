@@ -572,9 +572,13 @@ describe('切页期间的写请求', () => {
     // 请求还没回来就切页。
     fireEvent.click(screen.getByRole('button', { name: '换一篇' }));
     await screen.findByText('p2 的评论');
+    // 在新页面上重新打字，模拟用户切页后继续写。
+    const box = screen.getByLabelText('写评论') as HTMLTextAreaElement;
+    fireEvent.change(box, { target: { value: 'p2 的新草稿' } });
     release();
-    // 晚到的响应属于 p1，不能出现在 p2 的列表里。
+    // 晚到的响应属于 p1，不能出现在 p2 的列表里，也不能清掉 p2 刚打的草稿。
     await waitFor(() => expect(screen.queryByText('p1 晚到的评论')).not.toBeInTheDocument());
     expect(screen.getByText('p2 的评论')).toBeInTheDocument();
+    await waitFor(() => expect((screen.getByLabelText('写评论') as HTMLTextAreaElement).value).toBe('p2 的新草稿'));
   });
 });

@@ -147,7 +147,10 @@ export default function Comments({ targetType, targetId }: { targetType: TargetT
       <header className="module-head"><h2 className="module-title">评论</h2></header>
       {me.data === null
         ? <p className="hint comment-login"><Link to={loginPath(here)}>登录</Link>后发表评论</p>
-        : <CommentForm label="写评论" submitLabel="发表评论" onSubmit={addComment} />}
+        // key 让换文章时表单**重新挂载**：草稿、错误、提交中状态都属于「这一页」。
+        // 少了它，上一页那条还没回来的发表请求会在成功回调里 setContent('')，
+        // 把用户在新页面上刚打的字清掉（实测复现过）。
+        : <CommentForm key={`${targetType}:${targetId}`} label="写评论" submitLabel="发表评论" onSubmit={addComment} />}
       {deleteError && <p className="form-error" role="alert">{deleteError}</p>}
       <AsyncView
         state={paged}
