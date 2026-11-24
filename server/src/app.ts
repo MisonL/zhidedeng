@@ -551,7 +551,6 @@ function orderByMaterializeDependency(store: Store, ids: string[]): string[] {
       // 所以 DELETE /api/posts/:id 这类路由的 handler 根本拿不到 id，
       // 而 handler 签名里没有 `c`，也没法自己读。此前 39 条路由里恰好
       // 没有一条「非 GET + path 参数」的，这个洞才一直没暴露。
-      // 语义有冲突时以 body 为准（body 是显式提交的内容，path 是定位信息）。
       const pathParams = c.req.param();
       const hasPathParams = Object.keys(pathParams).length > 0;
       // 解析出来的 body 先原样留着：`null`、`[]` 这类非对象值要照旧交给 schema 去拒，
@@ -887,6 +886,8 @@ function orderByMaterializeDependency(store: Store, ids: string[]): string[] {
  route('putFavorite', z.strictObject({ ...target, favorited: z.boolean() }), (service, input) => { voteGuard(service); return service.putFavorite(input); });
   route('getComments', z.strictObject({ ...pagination, ...target }), (service, input) => service.getComments(input));
   route('createComment', z.strictObject({ ...target, content: z.string().trim().min(1).max(2000), parentId: identifier.optional() }), (service, input) => service.createComment(input));
+  // 作者删除自己的评论。id 来自 path：route() 现在会把 c.req.param() 合并进输入。
+  route('deleteComment', z.strictObject({ id: identifier }), (service, input) => service.deleteComment(input.id));
   route('getRankings', z.strictObject({ ...pagination, tab: z.enum(['model', 'community', 'expert']) }), (service, input) => service.getRankings(input));
   route('getBanners', z.strictObject(pagination), (service, input) => service.getBanners(input));
   route('search', z.strictObject({ q: z.string().trim().max(200) }), (service, input) => service.search(input.q));

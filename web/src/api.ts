@@ -90,6 +90,7 @@ export const api = {
   putFavorite: (body: PutFavoriteRequest) => call('putFavorite', { body }),
   getComments: (query: Target & PaginationQuery, signal?: AbortSignal) => call('getComments', { query, signal }),
   createComment: (body: CreateCommentRequest) => call('createComment', { body }),
+  deleteComment: (id: string) => call('deleteComment', { path: { id } }),
   getRankings: (query: GetRankingsRequest, signal?: AbortSignal) => call('getRankings', { query, signal }),
   getBanners: (signal?: AbortSignal) => call('getBanners', { signal }),
   search: (q: string, signal?: AbortSignal) => call('search', { query: { q }, signal }),

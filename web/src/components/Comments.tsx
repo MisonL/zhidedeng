@@ -7,6 +7,7 @@ import { formatDate, loginPath } from '../format';
 import { usePaged } from '../hooks';
 import { useHere, useMe, useRequireLogin } from '../state';
 import AsyncView, { Empty, LoadMore } from './AsyncView';
+import ConfirmButton from './ConfirmButton';
 import { Avatar } from './visuals';
 
 const MAX_LENGTH = 2000;
@@ -56,6 +57,11 @@ export default function Comments({ targetType, targetId }: { targetType: TargetT
   const [added, setAdded] = useState<Comment[]>([]);
   const [replies, setReplies] = useState<Record<string, CommentReply[]>>({});
   const [replyTo, setReplyTo] = useState<string>();
+  // 本地已删除/已墓碑的 id。删除后就地更新，不再整页重取：
+  // 重取会让列表跳回第一页，用户正看到第 3 页时删一条会莫名其妙回到顶部。
+  const [removedIds, setRemovedIds] = useState<Set<string>>(new Set());
+  const [tombstones, setTombstones] = useState<Set<string>>(new Set());
+  const [deleting, setDeleting] = useState<string>();
   const me = useMe();
   const here = useHere();
   const requireLogin = useRequireLogin();
@@ -63,6 +69,19 @@ export default function Comments({ targetType, targetId }: { targetType: TargetT
   async function addComment(content: string) {
     const created = await api.createComment({ targetType, targetId, content }) as Comment;
     setAdded((list) => [created, ...list]);
+  }
+
+  async function removeComment(id: string) {
+    // 只有自己写的评论才会渲染这个按钮，所以不用再问一次「这是你的吗」；
+    // 但服务端仍会校验（不是自己的回 404），前端不是权限边界。
+    setDeleting(id);
+    try {
+      const result = await api.deleteComment(id);
+      if (result.deleted === 'tombstoned') setTombstones((set) => new Set(set).add(id));
+      else setRemovedIds((set) => new Set(set).add(id));
+    } finally {
+      setDeleting(undefined);
+    }
   }
 
   async function addReply(parentId: string, content: string) {
@@ -85,7 +104,13 @@ export default function Comments({ targetType, targetId }: { targetType: TargetT
         {(items) => (
           <ul className="comment-list">
             {/* 发表后分页偏移，后续页会再次返回已显示的评论；保留先出现的一条，其本地回复才不会与服务端回复重复。 */}
-            {[...added, ...items].filter((comment, index, list) => list.findIndex(({ id }) => id === comment.id) === index).map((comment) => (
+            {[...added, ...items]
+              // 本地删掉的先滤掉；服务端已标记墓碑的保留一行，因为下面还挂着别人的回复。
+              .filter((comment) => !removedIds.has(comment.id))
+              .filter((comment, index, list) => list.findIndex(({ id }) => id === comment.id) === index)
+              .map((comment) => {
+                const tombstoned = tombstones.has(comment.id) || comment.deleted;
+                return (
               <li key={comment.id} className="comment">
                 <Avatar nickname={comment.author.nickname} />
                 <div className="comment-main">
@@ -93,8 +118,22 @@ export default function Comments({ targetType, targetId }: { targetType: TargetT
                     <strong>{comment.author.nickname}</strong>
                     <time className="num" dateTime={comment.createdAt}>{formatDate(comment.createdAt)}</time>
                   </p>
-                  <p className="comment-content">{comment.content}</p>
-                  <button type="button" className="text-btn" onClick={() => { if (requireLogin()) setReplyTo(comment.id); }}>回复</button>
+                  {tombstoned
+                    ? <p className="comment-content comment-deleted">该评论已删除</p>
+                    : <p className="comment-content">{comment.content}</p>}
+                  <div className="comment-actions">
+                    {!tombstoned && (
+                      <button type="button" className="text-btn" onClick={() => { if (requireLogin()) setReplyTo(comment.id); }}>回复</button>
+                    )}
+                    {!tombstoned && me.data?.handle === comment.author.handle && (
+                      <ConfirmButton
+                        label="删除" tone="red" busy={deleting === comment.id}
+                        description="删除后无法恢复，确定删除这条评论？"
+                        confirmLabel="删除"
+                        onConfirm={() => removeComment(comment.id)}
+                      />
+                    )}
+                  </div>
                   {replyTo === comment.id && (
                     <CommentForm
                       label={`回复 ${comment.author.nickname}`} submitLabel="发表回复"
@@ -110,12 +149,21 @@ export default function Comments({ targetType, targetId }: { targetType: TargetT
                           <time className="num" dateTime={reply.createdAt}>{formatDate(reply.createdAt)}</time>
                         </p>
                         <p className="comment-content">{reply.content}</p>
+                        {me.data?.handle === reply.author.handle && (
+                          <ConfirmButton
+                            label="删除" tone="red" busy={deleting === reply.id}
+                            description="删除后无法恢复，确定删除这条回复？"
+                            confirmLabel="删除"
+                            onConfirm={() => removeComment(reply.id)}
+                          />
+                        )}
                       </div>
                     </div>
                   ))}
                 </div>
               </li>
-            ))}
+                );
+              })}
           </ul>
         )}
       </AsyncView>

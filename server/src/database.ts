@@ -48,7 +48,10 @@ export const SCHEMA = `
   CREATE TABLE IF NOT EXISTS comments (
     id TEXT PRIMARY KEY, userHandle TEXT NOT NULL, targetType TEXT NOT NULL CHECK(targetType IN ('post','station')),
     targetId TEXT NOT NULL, content TEXT NOT NULL, parentId TEXT REFERENCES comments(id), createdAt TEXT NOT NULL,
-    hidden INTEGER NOT NULL DEFAULT 0
+    hidden INTEGER NOT NULL DEFAULT 0,
+    -- 作者自删。有别人回复时不能物理删（会连带删掉别人的话，也会撞 parentId 外键），
+    -- 于是正文清空、留一行墓碑。deletedAt 只被「这条是不是墓碑」用到。
+    deletedAt TEXT
   );
   CREATE TABLE IF NOT EXISTS checkins (
     userHandle TEXT NOT NULL, date TEXT NOT NULL, tokensAwarded INTEGER NOT NULL, streak INTEGER NOT NULL,
@@ -281,6 +284,20 @@ export function ensureOfferColumns(store: Store) {
   store.transaction(() => {
     ensureColumn(store.db, 'basis', "TEXT NOT NULL DEFAULT 'blended'", 'offers');
     ensureColumn(store.db, 'quotedAt', 'TEXT', 'offers');
+  });
+}
+
+/**
+ * 旧库的 comments 表补 deletedAt。
+ *
+ * 与 entities.removedAt 同样的坑：`CREATE TABLE IF NOT EXISTS` 对已存在的表不生效，
+ * 新列必须走 ALTER。不补的话自删接口在旧库上直接 SQL 报错。
+ */
+export function ensureCommentColumns(store: Store) {
+  const table = store.db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'comments'").get();
+  if (!table) return;
+  store.transaction(() => {
+    ensureColumn(store.db, 'deletedAt', 'TEXT', 'comments');
   });
 }
 

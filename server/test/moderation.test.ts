@@ -497,3 +497,86 @@ describe('审核入口的闭环约束', () => {
     expect(response.status).toBe(400);
   });
 });
+
+describe('评论自删', () => {
+  const target = { targetType: 'post' as const, targetId: 'post-1' };
+  async function comment(who: Awaited<ReturnType<typeof account>>, content: string, parentId?: string) {
+    const response = await who.call('POST', '/api/comments', { ...target, content, ...(parentId ? { parentId } : {}) });
+    expect(response.status).toBe(200);
+    return await response.json() as { id: string };
+  }
+
+  it('没有回复的评论直接物理删除，不在列表里留空壳', async () => {
+    const a = await account('alice');
+    const created = await comment(a, '只有我一条');
+    const removed = await a.call('DELETE', `/api/comments/${created.id}`);
+    expect(removed.status).toBe(200);
+    expect(await removed.json()).toMatchObject({ id: created.id, deleted: 'removed' });
+    const list = await a.get<{ items: Array<{ id: string }> }>('/api/comments?targetType=post&targetId=post-1');
+    expect(list.items.map(item => item.id)).not.toContain(created.id);
+  });
+
+  it('有别人回复时留墓碑：正文清空、回复仍在', async () => {
+    // 物理删会连带删掉别人写的话，而且 PRAGMA foreign_keys=ON 会对 parentId 生效。
+    const a = await account('alice');
+    const b = await account('bobby');
+    const parent = await comment(a, '会被删的父评论');
+    await comment(b, '别人的回复', parent.id);
+    expect((await a.call('DELETE', `/api/comments/${parent.id}`)).status).toBe(200);
+
+    const list = await a.get<{ items: Array<{ id: string; content: string; deleted?: boolean; replies: Array<{ content: string }> }> }>(
+      '/api/comments?targetType=post&targetId=post-1',
+    );
+    const tomb = list.items.find(item => item.id === parent.id)!;
+    expect(tomb).toMatchObject({ deleted: true, content: '' });
+    expect(tomb.replies.map(reply => reply.content)).toEqual(['别人的回复']);
+  });
+
+  it('隐藏的回复也算「有子行」：外键不看 hidden，按可见回复判断会撞约束', async () => {
+    // rs-tech 的原方案是「按可见子回复判断能否物理删」，这条专门锁住那个漏洞。
+    const a = await account('alice');
+    const b = await account('bobby');
+    const parent = await comment(a, '父评论');
+    const reply = await comment(b, '会被管理员隐藏的回复', parent.id);
+    expect((await admin(`/api/admin/comments/${reply.id}/hide`, { hidden: true })).status).toBe(200);
+    const removed = await a.call('DELETE', `/api/comments/${parent.id}`);
+    expect(removed.status).toBe(200);
+    expect(await removed.json()).toMatchObject({ deleted: 'tombstoned' });
+    // 墓碑没有可见回复，按设计不出现在列表里，但行还在库里（外键要它）。
+    const row = server.db.prepare('SELECT deletedAt, content FROM comments WHERE id = ?').get(parent.id) as { deletedAt: string | null; content: string };
+    expect(row.deletedAt).not.toBeNull();
+    expect(row.content).toBe('');
+  });
+
+  it('删别人的评论回 404，不泄露该 id 是否存在', async () => {
+    const a = await account('alice');
+    const b = await account('bobby');
+    const created = await comment(a, 'alice 的评论');
+    expect((await b.call('DELETE', `/api/comments/${created.id}`)).status).toBe(404);
+    expect((await b.call('DELETE', '/api/comments/never-existed')).status).toBe(404);
+    // 两条路径的状态码一致：403 等于承认「存在但不是你的」。
+    expect((await a.get<{ items: Array<{ id: string }> }>('/api/comments?targetType=post&targetId=post-1')).items.map(i => i.id)).toContain(created.id);
+  });
+
+  it('墓碑不计入评论数，也不能再被回复', async () => {
+    const a = await account('alice');
+    const b = await account('bobby');
+    const parent = await comment(a, '父评论');
+    await comment(b, '回复');
+    const before = (await a.get<Post>('/api/posts/post-1')).commentCount;
+    await a.call('DELETE', `/api/comments/${parent.id}`);
+    expect((await a.get<Post>('/api/posts/post-1')).commentCount).toBe(before - 1);
+    expect((await b.call('POST', '/api/comments', { ...target, content: '回复墓碑', parentId: parent.id })).status).toBe(400);
+  });
+
+  it('回复没有子行，永远物理删；重复删只报一次 404', async () => {
+    const a = await account('alice');
+    const b = await account('bobby');
+    const parent = await comment(a, '父评论');
+    const reply = await comment(b, 'bobby 的回复', parent.id);
+    expect(await (await b.call('DELETE', `/api/comments/${reply.id}`)).json()).toMatchObject({ deleted: 'removed' });
+    expect((await b.call('DELETE', `/api/comments/${reply.id}`)).status).toBe(404);
+    // 父评论现在没有子行，再删就是物理删。
+    expect(await (await a.call('DELETE', `/api/comments/${parent.id}`)).json()).toMatchObject({ deleted: 'removed' });
+  });
+});

@@ -4,7 +4,7 @@ import { dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildApp } from './app.ts';
 import { MIN_SYNC_TOKEN_LENGTH } from './catalog.ts';
-import { ensureAgentTokenColumns, ensureOfferColumns, ensureSubmissionColumns, SCHEMA, Store } from './database.ts';
+import { ensureAgentTokenColumns, ensureCommentColumns, ensureOfferColumns, ensureSubmissionColumns, SCHEMA, Store } from './database.ts';
 import type { SqlDatabase } from './database.ts';
 import { seed } from './seed.ts';
 import { mountWeb } from './static.ts';
@@ -39,6 +39,7 @@ export function openDatabase(path: string, options: { readOnly?: boolean } = {})
     ensureAgentTokenColumns(openStore(db));
     // offers 表在 SCHEMA 里是 IF NOT EXISTS，老库不会因此长出 basis/quotedAt。
     ensureOfferColumns(openStore(db));
+    ensureCommentColumns(openStore(db));
   } catch (error) {
     db.close();
     throw error;

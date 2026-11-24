@@ -137,6 +137,9 @@ export interface CreateAgentTokenRequest {
 export type CreateAgentTokenResponse = Pick<AgentToken, 'id' | 'tokenPrefix' | 'label' | 'createdAt'> & { token: string };
 export type GetAgentTokensRequest = EmptyRequest;
 export type GetAgentTokensResponse = AgentToken[];
+export interface DeleteCommentRequest { id: string }
+export interface DeleteCommentResponse { id: string; deleted: 'removed' | 'tombstoned' }
+
 export interface RevokeAgentTokenRequest { id: string }
 export interface RevokeAgentTokenResponse { id: string; revokedAt: string }
 
@@ -441,6 +444,7 @@ export interface ApiContracts {
   changePassword: { request: ChangePasswordRequest; response: ApiResponse<ChangePasswordResponse> };
   createAgentToken: { request: CreateAgentTokenRequest; response: ApiResponse<CreateAgentTokenResponse> };
   getAgentTokens: { request: GetAgentTokensRequest; response: ApiResponse<GetAgentTokensResponse> };
+  deleteComment: { request: DeleteCommentRequest; response: ApiResponse<DeleteCommentResponse> };
   revokeAgentToken: { request: RevokeAgentTokenRequest; response: ApiResponse<RevokeAgentTokenResponse> };
   createAgentStation: { request: CreateAgentStationRequest; response: ApiResponse<CreateAgentStationResponse> };
   createAgentPost: { request: CreateAgentPostRequest; response: ApiResponse<CreateAgentPostResponse> };

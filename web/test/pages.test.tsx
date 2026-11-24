@@ -1,6 +1,7 @@
 import { fireEvent, screen, waitFor, within } from '@testing-library/react';
 import type { StationDetail } from '@zhidedeng/shared';
 import { describe, expect, it } from 'vitest';
+import Comments from '../src/components/Comments';
 import Markdown from '../src/components/Markdown';
 import { makePost, page, station, vendors } from './fixtures';
 import { apiError, callsTo, renderApp, renderWithProviders, stubApi } from './helpers';
@@ -305,5 +306,60 @@ describe('投稿后的落点', () => {
     fireEvent.click(screen.getByRole('button', { name: '提交审核' }));
 
     expect(await screen.findByRole('tab', { name: '我的投稿' })).toHaveAttribute('aria-selected', 'true');
+  });
+});
+
+describe('评论自删', () => {
+  it('只有自己的评论才显示删除按钮', async () => {
+    // 当前登录用户是 fixtures 里的 me（handle: demo-pedal）。
+    const mine = { handle: 'demo-pedal', nickname: '我自己', avatar: '' };
+    const other = { handle: 'someone', nickname: '别人', avatar: '' };
+    stubApi({
+      'GET /api/comments': page([
+        { id: 'c-mine', targetType: 'post', targetId: 'p1', author: mine, content: '我的评论', parentId: null, createdAt: '2026-11-03T08:00:00.000Z', replies: [] },
+        { id: 'c-other', targetType: 'post', targetId: 'p1', author: other, content: '别人的评论', parentId: null, createdAt: '2026-11-03T09:00:00.000Z', replies: [] },
+      ]),
+    });
+    renderWithProviders(<Comments targetType="post" targetId="p1" />);
+    expect(await screen.findByText('我的评论')).toBeInTheDocument();
+    // 两条「回复」都在，但「删除」只有一个。
+    expect(screen.getAllByRole('button', { name: '回复' })).toHaveLength(2);
+    expect(screen.getAllByRole('button', { name: '删除' })).toHaveLength(1);
+  });
+
+  it('删除要先确认，确认后调用接口并从列表移除', async () => {
+    // 当前登录用户是 fixtures 里的 me（handle: demo-pedal）。
+    const mine = { handle: 'demo-pedal', nickname: '我自己', avatar: '' };
+    const fetchMock = stubApi({
+      'GET /api/comments': page([
+        { id: 'c-mine', targetType: 'post', targetId: 'p1', author: mine, content: '要被删掉的话', parentId: null, createdAt: '2026-11-03T08:00:00.000Z', replies: [] },
+      ]),
+      'DELETE /api/comments/c-mine': { id: 'c-mine', deleted: 'removed' },
+    });
+    renderWithProviders(<Comments targetType="post" targetId="p1" />);
+    fireEvent.click(await screen.findByRole('button', { name: '删除' }));
+    // 只点一次不会发请求：必须再点「删除」确认。
+    expect(callsTo(fetchMock, 'DELETE', '/api/comments/c-mine')).toHaveLength(0);
+    expect(screen.getByText(/删除后无法恢复/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '删除' }));
+    await waitFor(() => expect(callsTo(fetchMock, 'DELETE', '/api/comments/c-mine')).toHaveLength(1));
+    await waitFor(() => expect(screen.queryByText('要被删掉的话')).not.toBeInTheDocument());
+  });
+
+  it('墓碑渲染成「该评论已删除」，其下的回复保留', async () => {
+    stubApi({
+      'GET /api/comments': page([
+        {
+          id: 'c-tomb', targetType: 'post', targetId: 'p1', author: { handle: 'demo-pedal', nickname: '我自己', avatar: '' },
+          content: '', deleted: true, parentId: null, createdAt: '2026-11-03T08:00:00.000Z',
+          replies: [{ id: 'r1', targetType: 'post', targetId: 'p1', author: { handle: 'x', nickname: '路人', avatar: '' }, content: '别人写的话', parentId: 'c-tomb', createdAt: '2026-11-03T09:00:00.000Z' }],
+        },
+      ]),
+    });
+    renderWithProviders(<Comments targetType="post" targetId="p1" />);
+    expect(await screen.findByText('该评论已删除')).toBeInTheDocument();
+    // 别人的回复不跟着消失，也不该出现「回复」入口（墓碑不能再被回复）。
+    expect(screen.getByText('别人写的话')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '回复' })).not.toBeInTheDocument();
   });
 });

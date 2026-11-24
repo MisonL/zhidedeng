@@ -193,15 +193,23 @@ export interface CommentReply extends Target {
   content: string;
   parentId: Id;
   createdAt: ISODateTime;
+  /** 作者已删除。回复本身没有子行，删除时会物理删掉，所以这个标记实际只会出现在顶层评论上。 */
+  deleted?: boolean;
 }
 
 export interface Comment extends Target {
   id: Id;
   author: Author;
+  /** 已删除时为空串；正文在删除时就被清掉，不留在库里。 */
   content: string;
   parentId: null;
   createdAt: ISODateTime;
   replies: CommentReply[];
+  /**
+   * 作者已删除。这条评论**还有别人回复**，物理删会连带删掉别人的内容或撞外键，
+   * 所以保留一行墓碑：正文清空、作者仍是本人（他删的是自己的话，不是注销账号）。
+   */
+  deleted?: boolean;
 }
 
 export interface CheckIn {

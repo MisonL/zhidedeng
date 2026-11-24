@@ -130,6 +130,12 @@ textarea { display: block; resize: vertical; line-height: 1.6; }
 .comment-meta strong { color: var(--ink); font-size: 14px; font-weight: 500; }
 .comment-content { margin-top: 2px; white-space: pre-wrap; }
 .comment-reply { display: flex; gap: 8px; margin-top: 8px; padding: 8px 10px; border-radius: 8px; background: var(--surface-warm); }
+/* 删除后用墓碑提示取代正文：空心字色，不要让人误以为加载失败。 */
+.comment-deleted { color: var(--text-3); font-style: italic; }
+.comment-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-top: 4px; }
+/* 统一的二次确认：展开后原地换成追问 + 两个按钮，不弹窗、不遮挡内容。 */
+.confirm-inline { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.confirm-ask { color: var(--text-2); font-size: 13px; }
 .avatar { display: inline-grid; flex: none; place-items: center; border-radius: 50%; color: #fff; font-family: var(--font-serif); font-weight: 700; line-height: 1; }
 
 /* 表单 */

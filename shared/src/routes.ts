@@ -32,6 +32,7 @@ export const API_ROUTES = {
   putFavorite: { method: 'PUT', path: '/api/favorites' },
   getComments: { method: 'GET', path: '/api/comments' },
   createComment: { method: 'POST', path: '/api/comments' },
+  deleteComment: { method: 'DELETE', path: '/api/comments/:id' },
   getRankings: { method: 'GET', path: '/api/rankings' },
   getBanners: { method: 'GET', path: '/api/banners' },
   search: { method: 'GET', path: '/api/search' },

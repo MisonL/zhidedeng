@@ -58,7 +58,10 @@ function matches(query: string | undefined, ...texts: string[]) {
  */
 const PREFETCH_MIN_ROWS = 100;
 
-const COMMENT_VISIBLE = 'hidden = 0 AND (parentId IS NULL OR parentId NOT IN (SELECT id FROM comments WHERE hidden = 1 AND targetType = comments.targetType AND targetId = comments.targetId))';
+// hidden = 管理隐藏（含连带隐藏其回复）；deletedAt = 作者自删的墓碑。
+// 计数只算真正有内容的评论：墓碑是空壳，算进「N 条评论」会让数字虚高。
+// 列表查询另走一套（hidden = 0），因为别人回复还挂在墓碑下面，得把它取出来才能渲染。
+const COMMENT_VISIBLE = 'hidden = 0 AND deletedAt IS NULL AND (parentId IS NULL OR parentId NOT IN (SELECT id FROM comments WHERE hidden = 1 AND targetType = comments.targetType AND targetId = comments.targetId))';
 const COMMENTS_PER_MINUTE = 5;
 const POSTS_PER_HOUR = 10;
 const MAX_PENDING_POSTS = 20;
@@ -815,7 +818,7 @@ export class Service {
 
   getComments(query: GetCommentsRequest) {
     this.requireTarget(query);
-    const rows = this.store.db.prepare('SELECT id,userHandle,targetType,targetId,content,parentId,createdAt FROM comments WHERE targetType=? AND targetId=? AND hidden = 0 ORDER BY createdAt DESC, rowid DESC').all(query.targetType, query.targetId) as unknown as CommentRow[];
+    const rows = this.store.db.prepare('SELECT id,userHandle,targetType,targetId,content,parentId,createdAt,deletedAt FROM comments WHERE targetType=? AND targetId=? AND hidden = 0 ORDER BY createdAt DESC, rowid DESC').all(query.targetType, query.targetId) as unknown as CommentRow[];
     // 回复按父评论分组，不要对每条顶层评论重扫一遍全部行：
     // 那是 O(顶层数 × 总行数)，一条热帖几百条评论时会明显卡。
     const repliesByParent = new Map<string, CommentRow[]>();
@@ -826,7 +829,10 @@ export class Service {
       const bucket = repliesByParent.get(row.parentId);
       if (bucket) bucket.push(row); else repliesByParent.set(row.parentId, [row]);
     }
-    const tops = rows.filter(row => row.parentId === null);
+    // 墓碑只在「下面还挂着别人的回复」时才值得显示——那时它提供的是上下文
+    // （这几条回复是在回什么）。没有可见回复的空墓碑等于一条空白评论，
+    // 直接从列表里去掉，别让读者以为是加载失败。
+    const tops = rows.filter(row => row.parentId === null && (!row.deletedAt || (repliesByParent.get(row.id)?.length ?? 0) > 0));
     // 先切页再组装：回复可能很多，没必要把后面几页的全部装配出来再丢掉。
     return paginateThen(tops, query, row => ({
       ...this.comment(row), parentId: null,
@@ -835,8 +841,10 @@ export class Service {
   }
 
   private comment(row: CommentRow) {
-    const { userHandle, ...fields } = row;
-    return { ...fields, author: this.author(userHandle) };
+    const { userHandle, deletedAt, ...fields } = row;
+    // deletedAt 不外泄成时间戳，只暴露一个布尔 —— 前端要的是「显示成已删除」，
+    // 精确到秒的删除时间没有用处，反而让人以为能查到操作记录。
+    return { ...fields, author: this.author(userHandle), ...(deletedAt ? { deleted: true } : {}) };
   }
 
   createComment(input: CreateCommentRequest): Comment | CommentReply {
@@ -845,13 +853,41 @@ export class Service {
     const recent = Number(this.store.db.prepare('SELECT count(*) AS count FROM comments WHERE userHandle=? AND createdAt > ?').get(this.user, since)!.count);
     if (recent >= COMMENTS_PER_MINUTE) throw new ApiError(429, 'RATE_LIMITED', '评论太频繁了，请稍后再试');
     if (input.parentId) {
-      const parent = this.store.db.prepare('SELECT targetType,targetId,parentId FROM comments WHERE id=? AND hidden = 0').get(input.parentId);
+      const parent = this.store.db.prepare('SELECT targetType,targetId,parentId FROM comments WHERE id=? AND hidden = 0 AND deletedAt IS NULL').get(input.parentId);
       if (!parent || parent.parentId !== null || parent.targetType !== input.targetType || parent.targetId !== input.targetId) throw new ApiError(400, 'INVALID_INPUT', '回复必须属于同一对象的顶层评论');
     }
     const row: CommentRow = { ...input, id: crypto.randomUUID(), userHandle: this.user, parentId: input.parentId ?? null, createdAt: this.now().toISOString() };
     this.store.db.prepare('INSERT INTO comments (id,userHandle,targetType,targetId,content,parentId,createdAt) VALUES (?,?,?,?,?,?,?)')
       .run(row.id, row.userHandle, row.targetType, row.targetId, row.content, row.parentId, row.createdAt);
     return row.parentId === null ? { ...this.comment(row), parentId: null, replies: [] } : { ...this.comment(row), parentId: row.parentId };
+  }
+
+  /**
+   * 作者删除自己的评论。
+   *
+   * 分两种情况：
+   * - **没有子行**：直接物理删。留墓碑只会让读者点进来发现一条空评论。
+   * - **有子行**：只能留墓碑（正文清空 + `deletedAt`）。`PRAGMA foreign_keys = ON`
+   *   会对 `parentId` 生效，而且外键**不看 `hidden`**——被管理员隐藏的回复一样
+   *   引用着这条父评论。所以判断必须用「是否存在任何子行」，用「可见子回复」
+   *   会漏掉隐藏的那些，删除时直接撞约束失败。
+   *
+   * 别人回复的内容不跟着消失：那是他们写的话，不该因为父评论作者删了帖就一起没。
+   */
+  deleteComment(id: string) {
+    const row = this.store.db.prepare('SELECT id, userHandle FROM comments WHERE id = ?').get(id) as
+      { id: string; userHandle: string } | undefined;
+    // 不是自己的评论一律 404：回 403 等于告诉对方「这个 id 存在但不是你的」。
+    if (!row || row.userHandle !== this.user) throw new ApiError(404, 'NOT_FOUND', '评论不存在');
+    const children = Number(this.store.db.prepare('SELECT count(*) AS count FROM comments WHERE parentId = ?').get(id)!.count);
+    if (children > 0) {
+      // 已经是墓碑就当作成功，重复点不该报错。
+      this.store.db.prepare("UPDATE comments SET deletedAt = COALESCE(deletedAt, ?), content = '' WHERE id = ?")
+        .run(this.now().toISOString(), id);
+      return { id, deleted: 'tombstoned' as const };
+    }
+    this.store.db.prepare('DELETE FROM comments WHERE id = ?').run(id);
+    return { id, deleted: 'removed' as const };
   }
 
   getRankings(query: GetRankingsRequest): GetRankingsResponse {
@@ -946,4 +982,5 @@ interface CommentRow extends Target {
   content: string;
   parentId: string | null;
   createdAt: string;
+  deletedAt?: string | null;
 }
