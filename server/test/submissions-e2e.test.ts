@@ -144,7 +144,7 @@ describe('投稿全链路（HTTP 层）', () => {
 
     // 队列只处理待审记录，已上站的文章只能从这里下架
     const takedown = await server.app.request(`/api/admin/posts/${postId}/review`, {
-      method: 'POST', headers: admin, body: JSON.stringify({ status: 'rejected' }),
+      method: 'POST', headers: admin, body: JSON.stringify({ status: 'rejected', reason: '队列只处理待审，已上站的只能下架' }),
     });
     expect(takedown.status).toBe(200);
     expect((await server.app.request(`/api/posts/${postId}`)).status).toBe(404);

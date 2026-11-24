@@ -119,7 +119,7 @@ describe('投稿审核', () => {
   it('拒绝后只有作者可见，我的分享标 rejected', async () => {
     const a = await account('alice');
     const post = await submit(a, '被拒帖');
-    expect((await admin(`/api/admin/posts/${post.id}/review`, { status: 'rejected' })).status).toBe(200);
+    expect((await admin(`/api/admin/posts/${post.id}/review`, { status: 'rejected', reason: '缺少站点信息' })).status).toBe(200);
     expect((await anonymous.call('GET', `/api/posts/${post.id}`)).status).toBe(404);
     expect((await a.get<GetPostsResponse>('/api/me/posts')).items[0].status).toBe('rejected');
   });
@@ -131,7 +131,7 @@ describe('投稿审核', () => {
     await admin(`/api/admin/posts/${post.id}/review`, { status: 'approved' });
     await b.call('PUT', '/api/favorites', { targetType: 'post', targetId: post.id, favorited: true });
     expect((await b.get<CurrentUser>('/api/me')).favoriteCount).toBe(1);
-    await admin(`/api/admin/posts/${post.id}/review`, { status: 'rejected' });
+    await admin(`/api/admin/posts/${post.id}/review`, { status: 'rejected', reason: '缺少站点信息' });
     const favorites = await b.call('GET', '/api/me/favorites');
     expect(favorites.status).toBe(200);
     expect((await favorites.json() as GetMyFavoritesResponse).total).toBe(0);
@@ -210,7 +210,7 @@ describe('管理接口鉴权', () => {
   const routes: [string, string, unknown][] = [
     ['POST', '/api/admin/import', { stations: [], posts: [] }],
     ['GET', '/api/admin/posts?status=pending', undefined],
-    ['POST', '/api/admin/posts/post-1/review', { status: 'rejected' }],
+    ['POST', '/api/admin/posts/post-1/review', { status: 'rejected', reason: '测试拒绝' }],
     ['POST', '/api/admin/comments/x/hide', { hidden: true }],
   ];
 
@@ -330,5 +330,88 @@ describe('GET /api/health 的静态资源检查', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('文章驳回理由', () => {
+  it('拒绝文章必须给理由，否则 400', async () => {
+    // 唯一一位真实投稿人被拒后只看到「未通过」两个字，改不了也不知道该不该重投。
+    const a = await account('alice');
+    const post = await submit(a, '会被拒的帖子');
+    const response = await admin(`/api/admin/posts/${post.id}/review`, { status: 'rejected' });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ error: { code: 'INVALID_INPUT' } });
+    // 没被拒成，文章还在待审。
+    expect((await a.get<GetPostsResponse>('/api/me/posts')).items[0].status).toBe('pending');
+  });
+
+  it('理由随文章存下，作者在「我的分享」和详情页都看得到', async () => {
+    const a = await account('alice');
+    const post = await submit(a, '理由要能看到');
+    expect((await admin(`/api/admin/posts/${post.id}/review`, { status: 'rejected', reason: '缺少费用截图' })).status).toBe(200);
+    expect((await a.get<GetPostsResponse>('/api/me/posts')).items[0])
+      .toMatchObject({ status: 'rejected', reviewReason: '缺少费用截图' });
+    expect(await a.get<Post>(`/api/posts/${post.id}`)).toMatchObject({ status: 'rejected', reviewReason: '缺少费用截图' });
+  });
+
+  it('理由只有作者看得到，别人连文章都读不到', async () => {
+    const a = await account('alice');
+    const b = await account('bobby');
+    const post = await submit(a, '别人不该看到理由');
+    await admin(`/api/admin/posts/${post.id}/review`, { status: 'rejected', reason: '仅作者可见的备注' });
+    expect((await b.call('GET', `/api/posts/${post.id}`)).status).toBe(404);
+    expect(JSON.stringify((await b.get<GetPostsResponse>('/api/me/posts')))).not.toContain('仅作者可见的备注');
+  });
+
+  it('先拒后过审时清掉旧的驳回理由', async () => {
+    // 走 reviewPost 的「已物化文章」分支：队列里的记录被拒后是终态（再审返回 404），
+    // 只有已经落成实体的文章才可能被拒了再通过（飞书/Agent 物化出来的那类）。
+    // 不清理由的话，作者会在过审的文章上同时看到「已通过」和「未通过原因」。
+    const a = await account('alice');
+    const post = await submit(a, '先过审再被拒再通过');
+    expect((await admin(`/api/admin/posts/${post.id}/review`, { status: 'approved' })).status).toBe(200);
+    // 过审即物化成实体，之后这条走的是 reviewPost 的直接改状态分支。
+    expect(await anonymous.get<Post>(`/api/posts/${post.id}`)).toMatchObject({ status: 'approved' });
+    expect((await admin(`/api/admin/posts/${post.id}/review`, { status: 'rejected', reason: '先拒' })).status).toBe(200);
+    expect(await a.get<Post>(`/api/posts/${post.id}`)).toMatchObject({ status: 'rejected', reviewReason: '先拒' });
+    expect((await admin(`/api/admin/posts/${post.id}/review`, { status: 'approved' })).status).toBe(200);
+    const approved = await anonymous.get<Post>(`/api/posts/${post.id}`);
+    expect(approved.status).toBe('approved');
+    expect(approved.reviewReason ?? null).toBeNull();
+  });
+
+  it('队列里的投稿被拒后是终态，不能靠再点一次通过把它救回来', async () => {
+    // 记录这条既有语义，免得日后有人为了「支持改完重投」把终态放开：
+    // 被拒的作者要重新投稿，而不是等管理员翻回去点通过。
+    const a = await account('alice');
+    const post = await submit(a, '被拒了');
+    await admin(`/api/admin/posts/${post.id}/review`, { status: 'rejected', reason: '不合格' });
+    expect((await admin(`/api/admin/posts/${post.id}/review`, { status: 'approved' })).status).toBe(404);
+  });
+});
+
+describe('作者实体缺失时的韧性', () => {
+  it('删掉一个用户的实体后，公开列表不崩，作者显示「已注销用户」', async () => {
+    // 这一条守的是「一个坏行打挂全站」：author() 原来是 store.get(...)!，
+    // 解构 undefined 会抛 TypeError，而被它打挂的是所有包含该文章的列表。
+    const a = await account('ghost');
+    const post = await submit(a, '作者会消失');
+    await admin(`/api/admin/posts/${post.id}/review`, { status: 'approved' });
+    server.db.prepare("DELETE FROM entities WHERE kind = 'user' AND id = 'ghost'").run();
+
+    const feed = await anonymous.get<GetPostsResponse>('/api/posts?pageSize=50');
+    expect(feed.items.map(item => item.id)).toContain(post.id);
+    expect(feed.items.find(item => item.id === post.id)!.author)
+      .toMatchObject({ handle: 'ghost', nickname: '已注销用户' });
+    // 详情与评论也走同一条 author()，一并确认。
+    expect((await anonymous.get<Post>(`/api/posts/${post.id}`)).author.nickname).toBe('已注销用户');
+  });
+
+  it('会话有效但资料行丢失时，个人接口给出明确的 401 而不是半个对象', async () => {
+    const a = await account('half');
+    server.db.prepare("DELETE FROM entities WHERE kind = 'user' AND id = 'half'").run();
+    expect((await a.call('GET', '/api/me')).status).toBe(401);
+    expect((await a.call('POST', '/api/me/checkin')).status).toBe(401);
+    expect((await a.call('PATCH', '/api/me', { nickname: '新名字' })).status).toBe(401);
   });
 });

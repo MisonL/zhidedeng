@@ -79,6 +79,10 @@ export default function Admin() {
   // 驳回理由会写进 submissions.reason，作者在 /me 能看到；不填就只显示「已驳回」。
   const [rejecting, setRejecting] = useState<string>();
   const [reasons, setReasons] = useState<Record<string, string>>({});
+  // 文章页签单独一套。文章 id 与投稿 id 在「站内投稿物化」时是同一个值，
+  // 共用一张 map 会让两个页签互相 prefetch 对方的输入。
+  const [rejectingPost, setRejectingPost] = useState<string>();
+  const [postReasons, setPostReasons] = useState<Record<string, string>>({});
   // reload 用来在恢复/下架/审核通过后失效目录缓存：否则公开页要手动刷新浏览器
   // 才看得到刚恢复的站点，用户会以为操作没生效。
   const { stationBySlug, reload: reloadCatalog } = useCatalog();
@@ -495,6 +499,24 @@ export default function Admin() {
                   </div>
                   <p>{post.title}</p>
                   <p className="hint">{post.summary}</p>
+                  {rejectingPost === post.id && (
+                    <div className="field">
+                      <label className="field-label" htmlFor={`post-reason-${post.id}`}>驳回理由（必填，作者可见）</label>
+                      <input
+                        id={`post-reason-${post.id}`} value={postReasons[post.id] ?? ''} maxLength={200}
+                        placeholder="说明哪里不合格，作者据此修改后重投"
+                        onChange={event => setPostReasons({ ...postReasons, [post.id]: event.target.value })}
+                      />
+                      <div className="tags">
+                        {REJECT_PRESETS.map(preset => (
+                          <button key={preset} type="button" className="tag"
+                            onClick={() => setPostReasons({ ...postReasons, [post.id]: preset })}>
+                            {preset}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                   <div className="tags">
                     <button
                       className="btn btn-small btn-red" disabled={busy}
@@ -502,12 +524,29 @@ export default function Admin() {
                     >
                       通过
                     </button>
-                    <button
-                      className="btn btn-small btn-ghost" disabled={busy}
-                      onClick={() => act(() => admin.reviewPost(post.id, 'rejected'), '已拒绝')}
-                    >
-                      拒绝
-                    </button>
+                    {rejectingPost === post.id ? (
+                      <>
+                        <button
+                          className="btn btn-small btn-ghost" disabled={busy}
+                          onClick={() => {
+                            const reason = postReasons[post.id]?.trim();
+                            if (!reason) { setError('拒绝文章时必须填写理由，作者要靠它修改重投'); return; }
+                            void act(() => admin.reviewPost(post.id, 'rejected', reason), '已拒绝')
+                              .then(() => setRejectingPost(undefined));
+                          }}
+                        >
+                          确认拒绝
+                        </button>
+                        <button type="button" className="btn btn-small btn-ghost" onClick={() => setRejectingPost(undefined)}>取消</button>
+                      </>
+                    ) : (
+                      <button
+                        className="btn btn-small btn-ghost" disabled={busy}
+                        onClick={() => setRejectingPost(post.id)}
+                      >
+                        拒绝
+                      </button>
+                    )}
                   </div>
                 </li>
               ))}

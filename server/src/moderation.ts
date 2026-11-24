@@ -23,7 +23,7 @@ export function listPosts(store: Store, status: PostStatus) {
   return { items: [...items, ...queued].sort((a, b) => comparePublishedAt(a.publishedAt, b.publishedAt)) };
 }
 
-export function reviewPost(store: Store, now: () => Date, id: string, status: PostStatus) {
+export function reviewPost(store: Store, now: () => Date, id: string, status: PostStatus, reason?: string) {
   const post = store.get('post', id);
   if (!post) {
     // 站内投稿还在队列里：交给统一的审核函数，物化和状态推进都在那里。
@@ -31,7 +31,11 @@ export function reviewPost(store: Store, now: () => Date, id: string, status: Po
       "SELECT 1 FROM submissions WHERE id = ? AND kind = 'post' AND channel = 'web' AND status = 'pending'",
     ).get(id);
     if (!row) throw new ApiError(404, 'NOT_FOUND', '文章不存在');
-    const reviewed = reviewSubmission(store, now(), id, { status: status === 'approved' ? 'approved' : 'rejected' });
+    const reviewed = reviewSubmission(store, now(), id, {
+      status: status === 'approved' ? 'approved' : 'rejected',
+      // 理由要一路带到 submissions.reason，作者才能在「我的投稿」里看到为什么被拒。
+      ...(reason ? { reason } : {}),
+    });
     return { id, status: reviewed.status as PostStatus };
   }
   // 群友提交的文章由飞书全量同步写入，直接改状态下次同步就白改了。
@@ -42,7 +46,9 @@ export function reviewPost(store: Store, now: () => Date, id: string, status: Po
     withdrawPost(store, id, now().toISOString());
     return { id, status };
   }
-  store.put('post', id, { ...post, status });
+  // 理由随记录一起存。已通过时清空：一篇后来过审的文章不该还挂着旧的驳回理由，
+  // 否则作者在详情页会同时看到「已通过」和「未通过原因」。
+  store.put('post', id, { ...post, status, reviewReason: status === 'rejected' ? (reason ?? null) : null });
   return { id, status };
 }
 

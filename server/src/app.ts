@@ -509,8 +509,16 @@ function orderByMaterializeDependency(store: Store, ids: string[]): string[] {
     return c.json({ items: rows.map(row => ({ id: row.id as string, removedAt: row.removedAt as string })) });
   });
   app.post('/api/admin/posts/:id/review', async c => {
-    const { status } = z.strictObject({ status: postStatus }).parse(await c.req.json());
-    return c.json(reviewPost(store, now, c.req.param('id'), status));
+    const input = z.strictObject({
+      status: postStatus,
+      reason: z.string().trim().max(200).optional(),
+    }).refine(value => value.status !== 'rejected' || (value.reason ?? '').length > 0, {
+      // 拒绝必须说明原因。唯一一位真实投稿人被拒后只看到「未通过」两个字，
+      // 既改不了也不知道该不该重投——这是已经发生的事故，不是假想风险。
+      message: '拒绝文章时必须填写理由',
+      path: ['reason'],
+    }).parse(await c.req.json());
+    return c.json(reviewPost(store, now, c.req.param('id'), input.status, input.reason));
   });
   app.post('/api/admin/users/:handle/disable', async c => {
     const { disabled } = z.strictObject({ disabled: z.boolean() }).parse(await c.req.json());

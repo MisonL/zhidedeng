@@ -206,7 +206,7 @@ describe('投稿限制', () => {
     const limited = await post('/api/posts', newPost('超额'), '203.0.113.1', alice);
     expect(limited.status).toBe(429);
     expect(await limited.json()).toMatchObject({ error: { code: 'PENDING_LIMIT' } });
-    await server.app.request(`/api/admin/posts/${ids[0]}/review`, { method: 'POST', headers: admin, body: '{"status":"rejected"}' });
+    await server.app.request(`/api/admin/posts/${ids[0]}/review`, { method: 'POST', headers: admin, body: '{"status":"rejected","reason":"测试拒绝"}' });
     expect((await post('/api/posts', newPost('腾出位置后'), '203.0.113.1', alice)).status).toBe(200);
   }, 30_000);
 
@@ -261,7 +261,7 @@ describe('审核群友提交', () => {
     };
     expect((await server.app.request('/api/admin/import', { method: 'POST', headers: admin, body: JSON.stringify(body) })).status).toBe(200);
     expect((await server.app.request('/api/posts/feishu-rec1')).status).toBe(200);
-    const response = await server.app.request('/api/admin/posts/feishu-rec1/review', { method: 'POST', headers: admin, body: '{"status":"rejected"}' });
+    const response = await server.app.request('/api/admin/posts/feishu-rec1/review', { method: 'POST', headers: admin, body: '{"status":"rejected","reason":"测试拒绝"}' });
     expect(response.status).toBe(200);
     // 下架后前台立刻看不见
     expect((await server.app.request('/api/posts/feishu-rec1')).status).toBe(404);

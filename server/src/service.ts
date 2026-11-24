@@ -1,10 +1,10 @@
 import type {
-  Author, CheckInResponse, Comment, CommentReply, CreateCommentRequest, CreatePostRequest,
+  Author, CheckInResponse, Comment, CommentReply, CreateCommentRequest,
   CurrentUser, Favorite, FavoriteItem, GetCommentsRequest, GetModelsRequest, GetPostsRequest,
   GetRankingsRequest, GetRankingsResponse, GetStationsRequest, InteractionState, ModelDetail,
   PaginationQuery, Post, PutFavoriteRequest, PutFavoriteResponse, PutVoteRequest, PutVoteResponse,
   SearchResponse, Station, StationDetail, StationOffer, SubmissionStatus, Target, UpdateMeRequest,
-  VendorWithModels, Vote,
+  User, VendorWithModels, Vote,
 } from '@zhidedeng/shared';
 import { ApiError } from './errors.ts';
 import { Store } from './database.ts';
@@ -164,9 +164,36 @@ export class Service {
     return this.handle;
   }
 
+  /**
+   * 作者信息。**用户实体缺失时不能崩**。
+   *
+   * 原来这里是 `store.get('user', handle)!`：只要有一条文章或评论的作者
+   * 在 users 里找不到，解构就会抛 TypeError，而被它打挂的不是那一条，
+   * 是**所有包含它的列表**——首页、社区、评测、搜索、榜单、收藏、我的分享。
+   * 触发条件不止「账号注销」：手工删库、迁移出错、早期演示数据残留都会。
+   *
+   * 现在降级成「已注销用户」，handle 保留原值（前端用它做 key 与链接）。
+   */
+  /**
+   * 当前登录用户对应的实体。
+   *
+   * 会话校验（`sessionHandle`）只确认 `accounts` 里有这一行，不保证 `entities`
+   * 里也有同名的 user 记录——两者由不同代码路径写入。以前这里用 `!` 假装一定存在，
+   * 缺失时 `{...undefined}` 不会报错，而是**静默返回一个缺字段的用户对象**，
+   * 下游（改昵称、签到）再整体展开覆写，等于用半个对象覆盖掉完整记录。
+   * 所以宁可显式 401：这种状态只能靠重新注册/修复数据来结束。
+   */
+  private requireUser(): User {
+    const user = this.store.get('user', this.user);
+    if (!user) throw new ApiError(401, 'UNAUTHENTICATED', '账号资料缺失，请重新登录后再试');
+    return user;
+  }
+
   private author(handle: string): Author {
-    const { nickname, avatar } = this.store.get('user', handle)!;
-    return { handle, nickname, avatar };
+    const user = this.store.get('user', handle);
+    return user
+      ? { handle, nickname: user.nickname, avatar: user.avatar }
+      : { handle, nickname: '已注销用户', avatar: '' };
   }
 
   /**
@@ -487,7 +514,7 @@ export class Service {
     const yesterday = shanghaiDate.format(new Date(this.now().getTime() - dayMs));
     const last = this.store.db.prepare('SELECT date,streak FROM checkins WHERE userHandle=? ORDER BY date DESC LIMIT 1').get(this.user);
     return {
-      ...this.store.get('user', this.user)!, checkedInToday: last?.date === today,
+      ...this.requireUser(), checkedInToday: last?.date === today,
       streak: last && (last.date === today || last.date === yesterday) ? Number(last.streak) : 0,
       // 只要个数，不要内容：原来调 myFavorites() 会把每个收藏的目标都读出来并
       // 逐条组装详情（1000 收藏时 1023 条 SQL / 364ms），而 /api/me 每次页面
@@ -503,7 +530,7 @@ export class Service {
     // 各自读到旧 user 再整体展开覆写时，后写的会把先写的改动抹掉；
     // 昵称查重与写入之间也有 TOCTOU：两人可同时通过查重拿到同一个昵称。
     return this.store.transaction(() => {
-      const user = this.store.get('user', this.user)!;
+      const user = this.requireUser();
       const nickname = input.nickname;
       if (nickname !== undefined) {
         // 列表和详情只渲染 nickname，不渲染 handle，所以「官方」「管理员」这类
@@ -531,7 +558,7 @@ export class Service {
       const tokensAwarded = 10 + Math.min(streak, 7);
       const date = shanghaiDate.format(this.now());
       this.store.db.prepare('INSERT INTO checkins (userHandle,date,tokensAwarded,streak) VALUES (?,?,?,?)').run(this.user, date, tokensAwarded, streak);
-      const user = this.store.get('user', this.user)!;
+      const user = this.requireUser();
       this.store.put('user', this.user, { ...user, tokens: user.tokens + tokensAwarded });
       return { userHandle: this.user, date, tokensAwarded, streak, tokens: user.tokens + tokensAwarded, checkedInToday: true };
     });
@@ -746,18 +773,11 @@ export class Service {
     return this.post(post, undefined, true);
   }
 
-  createPost(input: CreatePostRequest): Post {
-    if (input.stationSlug && !this.store.get('station', input.stationSlug)) throw new ApiError(400, 'INVALID_INPUT', '关联中转站不存在');
-    if (input.modelSlug && !this.store.get('model', input.modelSlug)) throw new ApiError(400, 'INVALID_INPUT', '关联模型不存在');
-    this.assertCanSubmitPost();
-    const post: PostRecord = {
-      ...input, id: crypto.randomUUID(), authorHandle: this.user, stationSlug: input.stationSlug ?? null,
-      modelSlug: input.modelSlug ?? null, cover: null, publishedAt: this.now().toISOString(), status: 'pending',
-    };
-    this.store.put('post', post.id, post);
-    // 提交成功后前端直接展示这篇内容，需要正文。
-    return this.post(post, undefined, true);
-  }
+  // 这里原先有个 createPost()，直接 store.put 一篇 pending 文章，绕过投稿队列。
+  // 公开路由 POST /api/posts 已经改成走 enqueueSubmission，它就再也没被调用过——
+  // 留着是一颗地雷：谁哪天顺手调它，就绕过了审核队列、飞书去重和下架版本校验，
+  // 而且是静默的。删掉，让「站内投稿只走队列」变成结构上的事实。
+  // 提交后的回显由 pendingPost(submission) 负责。
 
   putVote(input: PutVoteRequest): PutVoteResponse {
     this.requireTarget(input);

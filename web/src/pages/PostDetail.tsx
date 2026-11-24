@@ -21,7 +21,12 @@ export default function PostDetail() {
       <title>{`${state.data?.title ?? '文章'} · 什么值得蹬`}</title>
       {label && <p className="demo-notice" role="note">{label}，不构成消费建议</p>}
       {state.data?.status === 'pending' && <p className="demo-notice" role="note">审核中，目前只有你自己看得到</p>}
-      {state.data?.status === 'rejected' && <p className="demo-notice" role="note">未通过审核，目前只有你自己看得到</p>}
+      {state.data?.status === 'rejected' && (
+        <p className="demo-notice" role="note">
+          未通过审核，目前只有你自己看得到
+          {state.data.reviewReason ? `：${state.data.reviewReason}` : ''}
+        </p>
+      )}
       <article className="module page article">
         <AsyncView state={state}>
           {(post) => {

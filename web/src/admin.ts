@@ -134,8 +134,11 @@ export const admin = {
     }),
   listPosts: (status: string, signal?: AbortSignal) =>
     request<{ items: AdminPostRow[] }>(`/api/admin/posts?status=${encodeURIComponent(status)}`, { signal }),
-  reviewPost: (id: string, status: 'approved' | 'rejected') =>
-    request<{ id: string; status: string }>(`/api/admin/posts/${encodeURIComponent(id)}/review`, { method: 'POST', body: { status } }),
+  // 拒绝必须带理由，与服务端的强制校验保持一致（不带会被 400 挡回来）。
+  reviewPost: (id: string, status: 'approved' | 'rejected', reason?: string) =>
+    request<{ id: string; status: string }>(`/api/admin/posts/${encodeURIComponent(id)}/review`, {
+      method: 'POST', body: { status, ...(reason ? { reason } : {}) },
+    }),
   // 已发布文章的撤回与恢复。撤回是软删除，正文一直留着，误操作能直接救回来。
   withdrawPost: (id: string) =>
     request<{ id: string; removed: true }>(`/api/admin/posts/${encodeURIComponent(id)}/withdraw`, { method: 'POST', body: {} }),

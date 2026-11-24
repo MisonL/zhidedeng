@@ -61,7 +61,7 @@ channel 是队列的来源渠道，source 是物化内容的展示来源，二�
 |---|---|---|
 | feishu | 同步脚本调用 POST /api/admin/submissions/batch，进入队列 | 新站点和评价为 submission |
 | agent | 公开 POST /api/agent/stations、POST /api/agent/posts 已上线，强制 pending；管理队列也接受 channel=agent | 新站点和评价为 agent |
-| web | 管理队列支持 channel=web；公开 POST /api/posts 仍直接写入待审文章 entities，没有迁移到 submissions 表 | 新站点或队列评价为 user；普通文章缺省 source 按 user 读取 |
+| web | 公开 POST /api/posts、补录模型、推荐站点都走 `enqueueSubmission` 进同一个队列，物化前只存在于 submissions 表 | 新站点或队列评价为 user；普通文章缺省 source 按 user 读取 |
 
 依据：`server/src/app.ts` 的公开路由 `route()` 表与 Agent 路由段、`server/src/submissions.ts` 的 `sourceByChannel` 与 `materialize`、`server/src/service.ts` 的 `post`。管理员模型/厂商接口、运维 import 和种子初始化也保留直接写库路径，不能把队列称为当前所有 entities 的唯一写入路径。
 
