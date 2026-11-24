@@ -809,7 +809,7 @@ function materialize(store: Store, submission: SubmissionRecord, reviewedAt: str
     // 人再点一次「通过」，所以必须显式拦住，让人走恢复接口。
     // 返回原因即表示「本条没有产生新版本」，调用方据此不清理旧的下架请求。
     // removedAt 是独立列，不在 PostRecord 里（业务层不该看见它），所以单查一次。
-    if (store.postRemovedAt(postId) !== null) return '此前已被下架，本次同步跳过';
+    if (store.removedAt('post', postId) !== null) return '此前已被下架，本次同步跳过';
     store.put('post', postId, {
       id: postId, kind: 'review', title: payload.title, summary: payload.summary, body: payload.body,
       authorHandle: payload.authorHandle ?? 'anonymous-submission', authorNickname: payload.authorName,
@@ -925,8 +925,13 @@ function reviewSubmissionInner(store: Store, now: Date, id: string, decision: {
       // Agent 通道的驳回必须给理由。这条通道没人盯着屏幕，被拒后唯一的
       // 反馈就是 reason；为空时提交方只能去问用户，用户也答不出来，
       // 「驳回 → 修正 → 重投」这个闭环就断在最后一步。
-      if (status === 'rejected' && submission.channel === 'agent' && !reason) {
-        throw new ApiError(400, 'REASON_REQUIRED', 'Agent 提交的投稿驳回时必须填写理由，否则提交方无法修正');
+      //
+      // 文章（kind=post）不论来源都要求理由：站内投稿在管理台有两个入口——
+      // 「我的投稿」页签和「待审文章」页签，后者绕开 /api/admin/posts/:id/review
+      // 直接打这里。只在前一个入口拦，等于把「必须填理由」变成了一道可选项。
+      if (status === 'rejected' && !reason && (submission.channel === 'agent' || submission.kind === 'post')) {
+        throw new ApiError(400, 'REASON_REQUIRED',
+          submission.kind === 'post' ? '驳回文章时必须填写理由，作者要靠它修改后重投' : 'Agent 提交的投稿驳回时必须填写理由，否则提交方无法修正');
       }
       let resolvedReason = reason ?? null;
       let materializationReason: string | undefined;

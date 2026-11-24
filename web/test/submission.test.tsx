@@ -45,7 +45,7 @@ describe('群友提交的内容要标明来源', () => {
     stubApi({ 'GET /api/stations/yunzhan': { ...station, offers: [] }, 'GET /api/posts': page([]) });
     renderApp('/stations/yunzhan');
     // 演示来源现在有统一标签（sourceLabel 的 demo 分支），不再靠 name 里的「虚构」二字区分。
-    expect(await within(screen.getByRole('main')).findByRole('note')).toHaveTextContent('演示数据，虚构样例');
+    expect(await within(screen.getByRole('main')).findByRole('note')).toHaveTextContent('演示数据');
     expect(screen.queryByText('站点网址')).not.toBeInTheDocument();
   });
 
@@ -174,12 +174,12 @@ describe('演示来源也有标签', () => {
     // 那个约定只在种子数据的命名里成立：任何新入口（对比表、sitemap、导出）
     // 只要忘了拼「虚构」二字，虚构内容就和真实内容长得一样。
     renderWithProviders(<StationCard station={{ ...station, name: '某个中转站' }} />);
-    expect(screen.getByText('演示数据，虚构样例')).toBeInTheDocument();
+    expect(screen.getByText('演示数据')).toBeInTheDocument();
   });
 
   it('演示文章卡片同样带标签', () => {
     renderWithProviders(<PostCard post={makePost('demo-post-1')} />);
-    expect(screen.getByText('演示数据，虚构样例')).toBeInTheDocument();
+    expect(screen.getByText('演示数据')).toBeInTheDocument();
   });
 
   it('演示正文仍按 Markdown 渲染，不因为有了标签就退化成纯文本', () => {

@@ -25,20 +25,22 @@
 
 调研之间冲突、或调研与代码冲突的地方，以代码为准。以下每条都已实地比对。
 
-### 2.1 codex 说错的一条（重要）
+### 2.1 关于 `POST /api/posts` 的写入路径（已订正）
 
-codex 称「`POST /api/posts` 实际经 `enqueueSubmission` 入队，`docs/spec.md:64` 的『仍直接写入 entities』已过时」。
+调研阶段本节曾断言「codex 说错、spec 对」：`Service.createPost()` 直接 `store.put`，
+站内投稿有两条并存写入路径。**该结论后来被推翻，本节已按 final 实现重写。**
 
-**核实结果：codex 错了，spec 是对的。**
+现行事实（实现已收敛为一条路径）：
 
-`server/src/service.ts:749-760` 的 `createPost` 就是直接 `store.put('post', ...)`，`status: 'pending'`，不经过 `submissions` 表。
+- `POST /api/posts` 的路由（`app.ts:779` 起）调用 `enqueueSubmission`，先入 `submissions` 队列，
+  审核通过时才物化成 `entities` 里的文章，且**用投稿 id 当文章 id**（`submissions.ts` 的 `materialize`）。
+- 曾经存在的 `Service.createPost()`（直接 `store.put`）在路由改造后已无人调用，属于死代码，
+  批次 0 已删除。`docs/spec.md:64` 也已同步订正为「公开 POST /api/posts、补录模型、推荐站点都走 enqueueSubmission」。
+- 因此**不存在两条并存的站内投稿写入路径**。「编辑必须走队列否则会新建重复文章」的担忧现在对站内投稿普遍成立。
+  设计文章编辑时一律以队列为唯一入口；已物化的文章是编辑的**对象**，不是另一条投稿路径。
 
-这个区别直接影响「文章编辑」的设计：站内投稿有**两条并存**的写入路径——
-
-- `POST /api/posts` → 直接写 `entities`（status=pending），审核走 `reviewPost` 的「直接改状态」分支；
-- `POST /api/admin/submissions`（channel=web）→ 进 `submissions`，物化时用**投稿 id 当文章 id**（`submissions.ts:766`）。
-
-所以「编辑必须走队列否则会新建重复文章」这个担忧，只在第二条路径上成立。设计编辑功能时必须先明确走哪条。
+> 保留这一段修订记录是为了说明：`next-phase-plan` 与 `spec` 曾有矛盾，若日后看到 research 存档
+> （`docs/research/research-tech.md`）里还引用旧说法，以本节与现行代码为准。
 
 ### 2.2 rs-tech 说错的一条（重要）
 

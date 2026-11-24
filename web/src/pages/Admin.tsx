@@ -224,7 +224,7 @@ export default function Admin() {
     }
   }
 
-  async function act(run: () => Promise<unknown>, done: string) {
+  async function act(run: () => Promise<unknown>, done: string): Promise<boolean> {
     setBusy(true);
     setError(undefined);
     setMessage(undefined);
@@ -234,15 +234,17 @@ export default function Admin() {
       await load(tab);
       // 单条通过/拒绝、下架、恢复都会改变「哪些站和文章在线」，目录缓存跟着失效。
       reloadCatalog();
+      return true;
     } catch (caught) {
       if (caught instanceof AdminError && caught.unauthorized) {
         reset();
         // reset() 会连着把 error 清掉，这里补回来：否则密钥失效后输入框
         // 重现却没有任何说明，看着像操作没生效。
         setError('管理密钥无效，请重新输入');
-        return;
+        return false;
       }
       setError((caught as Error).message);
+      return false;
     } finally {
       setBusy(false);
     }
@@ -427,7 +429,7 @@ export default function Admin() {
                     {rejecting === item.id && (
                       <div className="field">
                         <label className="field-label" htmlFor={`reason-${item.id}`}>
-                          {item.channel === 'agent' ? '驳回理由（Agent 投稿必填）' : '驳回理由（可选）'}
+                          {(item.channel === 'agent' || item.kind === 'post') ? '驳回理由（必填，作者可见）' : '驳回理由（可选）'}
                         </label>
                         <input
                           id={`reason-${item.id}`} value={reasons[item.id] ?? ''} maxLength={200}
@@ -449,9 +451,9 @@ export default function Admin() {
                           className="btn btn-small btn-ghost" disabled={busy}
                           onClick={() => {
                             const reason = reasons[item.id]?.trim();
-                            // 服务端对 Agent 通道强制要求理由；这里先拦一下，省一次往返。
-                            if (item.channel === 'agent' && !reason) {
-                              setError('Agent 投稿驳回时必须填理由，点上面的常用原因即可');
+                            // 服务端对 Agent 通道与所有文章强制要求理由；这里先拦一下，省一次往返。
+                            if ((item.channel === 'agent' || item.kind === 'post') && !reason) {
+                              setError(item.kind === 'post' ? '驳回文章时必须填写理由，作者要靠它修改后重投' : 'Agent 投稿驳回时必须填理由，点上面的常用原因即可');
                               return;
                             }
                             void act(
@@ -532,12 +534,15 @@ export default function Admin() {
                             const reason = postReasons[post.id]?.trim();
                             if (!reason) { setError('拒绝文章时必须填写理由，作者要靠它修改重投'); return; }
                             void act(() => admin.reviewPost(post.id, 'rejected', reason), '已拒绝')
-                              .then(() => setRejectingPost(undefined));
+                              .then((ok) => { if (ok) setRejectingPost(undefined); });
                           }}
                         >
                           确认拒绝
                         </button>
-                        <button type="button" className="btn btn-small btn-ghost" onClick={() => setRejectingPost(undefined)}>取消</button>
+                        <button type="button" className="btn btn-small btn-ghost" onClick={() => {
+                          setRejectingPost(undefined);
+                          setPostReasons((current) => { const { [post.id]: _removed, ...rest } = current; return rest; });
+                        }}>取消</button>
                       </>
                     ) : (
                       <button

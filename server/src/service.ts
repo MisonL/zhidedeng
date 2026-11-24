@@ -7,6 +7,7 @@ import type {
   User, VendorWithModels, Vote,
 } from '@zhidedeng/shared';
 import { ApiError } from './errors.ts';
+import { INITIAL_TOKENS } from './auth.ts';
 import { Store } from './database.ts';
 import type { PostRecord, StationRecord } from './database.ts';
 // 只借一个纯函数算 hostname，避免和 submissions.ts 之间形成运行时循环依赖：
@@ -118,11 +119,19 @@ export function normalizeNickname(nickname: string): string {
 
 /** 昵称是否用了保留身份。注册与改资料走同一套判定。 */
 export function isReservedNickname(nickname: string): boolean {
-  return RESERVED_NICKNAMES.has(normalizeNickname(nickname));
+  const normalized = normalizeNickname(nickname);
+  // 降级占位带 handle 后缀（`已注销用户·xxx`）以便区分不同的人，
+  // 所以这里对这一个前缀额外做「开头匹配」。其余保留词仍只做整段相等：
+  // 按包含判定会把「官方粉丝」「系统工程师」这类正常昵称一起挡掉。
+  if (normalized.startsWith('已注销用户')) return true;
+  return RESERVED_NICKNAMES.has(normalized);
 }
 
 const RESERVED_NICKNAMES = new Set([
   '官方', '管理员', 'admin', 'administrator', '客服', '版主', '小编', '系统',
+  // 作者实体缺失时的降级占位。不挡住的话，任何人都能把昵称改成这个字符串，
+  // 冒充「已注销」身份；而真正的降级占位反而失去区分力。
+  '已注销用户',
 ]);
 
 /** 报价表的展示顺序：综合在前，其余按「谁更常被拿来比」排。 */
@@ -175,25 +184,33 @@ export class Service {
    * 现在降级成「已注销用户」，handle 保留原值（前端用它做 key 与链接）。
    */
   /**
-   * 当前登录用户对应的实体。
+   * 当前登录用户对应的实体，缺失时**自动重建**。
    *
    * 会话校验（`sessionHandle`）只确认 `accounts` 里有这一行，不保证 `entities`
-   * 里也有同名的 user 记录——两者由不同代码路径写入。以前这里用 `!` 假装一定存在，
-   * 缺失时 `{...undefined}` 不会报错，而是**静默返回一个缺字段的用户对象**，
-   * 下游（改昵称、签到）再整体展开覆写，等于用半个对象覆盖掉完整记录。
-   * 所以宁可显式 401：这种状态只能靠重新注册/修复数据来结束。
+   * 里也有同名 user 记录——两者由不同代码路径写入，手工删库、迁移出错、
+   * 早期演示数据都可能只留下其中一边。以前这里用 `!` 假装一定存在，
+   * 缺失时 `{...undefined}` 不报错，而是静默返回缺字段的对象，
+   * 下游（改昵称、签到）再整体展开覆写，等于用半个对象覆盖完整记录。
+   *
+   * 为什么不用 401 让用户「重新登录」：会话是有效的，账号也在，缺的只是一条
+   * 派生资料。发 401 会让「重新登录」这条路永远失败（登录接口本身也要读这条
+   * 记录），而重新注册会撞 409 —— 把一个能自动修好的状态变成必须人工改库。
+   * 重建是幂等的：昵称取 handle（用户自己的标识，不伪造身份），其余取默认。
    */
   private requireUser(): User {
-    const user = this.store.get('user', this.user);
-    if (!user) throw new ApiError(401, 'UNAUTHENTICATED', '账号资料缺失，请重新登录后再试');
-    return user;
+    const existing = this.store.get('user', this.user);
+    if (existing) return existing;
+    const rebuilt: User = { handle: this.user, nickname: this.user, avatar: '', bio: '', tokens: INITIAL_TOKENS };
+    this.store.put('user', this.user, rebuilt);
+    return rebuilt;
   }
 
   private author(handle: string): Author {
     const user = this.store.get('user', handle);
-    return user
-      ? { handle, nickname: user.nickname, avatar: user.avatar }
-      : { handle, nickname: '已注销用户', avatar: '' };
+    if (user) return { handle, nickname: user.nickname, avatar: user.avatar };
+    // 昵称带上 handle，否则不同缺失用户的评论会显示成同一个名字、同一个头像
+    // （Avatar 用昵称算字形与底色），读者分不清是一条历史评论还是好几个人。
+    return { handle, nickname: `已注销用户·${handle}`, avatar: '' };
   }
 
   /**

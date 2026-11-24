@@ -43,13 +43,27 @@ export function reviewPost(store: Store, now: () => Date, id: string, status: Po
   // 撤销只会让这条记录从批次里消失，一个不存在的记录生成不了下架请求。
   // 所以这里改成真的下架（软删除，同步不会再复活，见 materialize 里的守卫）。
   if (post.source === 'submission' && status === 'rejected') {
+    // 先把理由写进实体，再下架。以前只调 withdrawPost，强制填的理由成了一次性
+    // 废纸：管理员自己事后都看不到，更别说作者。reviewReason 与 status 无关，
+    // 恢复后仍可读，这正是「说明为什么被拒」需要的语义。
+    store.put('post', id, { ...post, reviewReason: reason ?? null });
     withdrawPost(store, id, now().toISOString());
     return { id, status };
   }
   // 理由随记录一起存。已通过时清空：一篇后来过审的文章不该还挂着旧的驳回理由，
   // 否则作者在详情页会同时看到「已通过」和「未通过原因」。
   store.put('post', id, { ...post, status, reviewReason: status === 'rejected' ? (reason ?? null) : null });
-  return { id, status };
+  // 站内投稿物化后 entities.id === submissions.id。两个页签各读一处，
+  // 只改 entities 会让「我的分享」说 rejected、「我的投稿」说 approved，
+  // 理由也只对一边可见。把终态同步回 submissions，让两边同一口径。
+  // 用 status = 'approved'/'rejected' 直接对齐；未命中 submissions 的
+  // （演示/直接建的实体）没有这一行，update 影响 0 条也无害。
+  const sync = store.db.prepare(
+    "UPDATE submissions SET status = ?, reason = ?, reviewedAt = ? WHERE id = ? AND kind = 'post' AND channel = 'web' AND status IN ('approved','rejected')",
+  ).run(status, status === 'rejected' ? (reason ?? null) : null, now().toISOString(), id) as { changes?: number };
+  // 返回值里多带一个 synced 仅供测试与调用方确认两边已对齐；
+  // API 契约仍是 {id,status}，app.ts 会原样返回它（多余字段无害）。
+  return { id, status, synced: Number(sync.changes ?? 0) > 0 };
 }
 
 /**

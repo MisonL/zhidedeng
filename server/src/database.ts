@@ -227,23 +227,6 @@ export class Store {
     return changed;
   }
 
-  /**
-   * 文章是否已被下架（软删除）。
-   *
-   * `put` 的 SQL 带 `removedAt = NULL`——对站点这是「重新上架就是清标记」，
-   * 对文章却是有毒的：任何一条「把内容写一遍」的路径都会顺带撤销下架，
-   * 管理员的下架等于白做。所以凡是写文章之前都要先问这一句。
-   *
-   * 已有两处各自手写过同样的查询（飞书同步、运维导入），而作者自删、
-   * 注销清理、编辑过审都会再引入新的写入点。散着写必然会漏一处，
-   * 所以收敛到这里，让「忘记检查」变成一件要显式绕开的事。
-   */
-  postRemovedAt(id: string): string | null {
-    const row = this.db.prepare("SELECT removedAt FROM entities WHERE kind = 'post' AND id = ?").get(id) as
-      { removedAt: string | null } | undefined;
-    return row?.removedAt ?? null;
-  }
-
   put<K extends keyof Entities>(kind: K, id: string, value: Entities[K]) {
     // 重新写入等于恢复：同一个 slug 再次上架时，软删除标记要一并清掉。
     this.db.prepare('INSERT INTO entities (kind, id, data, removedAt) VALUES (?, ?, ?, NULL) ON CONFLICT(kind,id) DO UPDATE SET data=excluded.data, removedAt=NULL')

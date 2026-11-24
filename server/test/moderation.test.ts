@@ -340,7 +340,7 @@ describe('文章驳回理由', () => {
     const post = await submit(a, '会被拒的帖子');
     const response = await admin(`/api/admin/posts/${post.id}/review`, { status: 'rejected' });
     expect(response.status).toBe(400);
-    expect(await response.json()).toMatchObject({ error: { code: 'INVALID_INPUT' } });
+    expect(await response.json()).toMatchObject({ error: { code: 'REASON_REQUIRED' } });
     // 没被拒成，文章还在待审。
     expect((await a.get<GetPostsResponse>('/api/me/posts')).items[0].status).toBe('pending');
   });
@@ -402,16 +402,98 @@ describe('作者实体缺失时的韧性', () => {
     const feed = await anonymous.get<GetPostsResponse>('/api/posts?pageSize=50');
     expect(feed.items.map(item => item.id)).toContain(post.id);
     expect(feed.items.find(item => item.id === post.id)!.author)
-      .toMatchObject({ handle: 'ghost', nickname: '已注销用户' });
+      .toMatchObject({ handle: 'ghost', nickname: '已注销用户·ghost' });
     // 详情与评论也走同一条 author()，一并确认。
-    expect((await anonymous.get<Post>(`/api/posts/${post.id}`)).author.nickname).toBe('已注销用户');
+    expect((await anonymous.get<Post>(`/api/posts/${post.id}`)).author.nickname).toBe('已注销用户·ghost');
   });
 
-  it('会话有效但资料行丢失时，个人接口给出明确的 401 而不是半个对象', async () => {
+  it('会话有效但资料行丢失时，个人接口自动重建资料而不是返回半个对象', async () => {
+    // 原来这里期望 401，但审查发现那是死路：登录接口本身也读 user 实体，
+    // 返回 401 的同时又已下发有效 cookie，用户「重新登录」永远失败。
+    // 现在改成自动重建：资料以 handle 为昵称（不伪造身份），tokens 取初始值。
     const a = await account('half');
+    const before = await a.get<CurrentUser>('/api/me');
+    expect(before.nickname).toBe('half');
     server.db.prepare("DELETE FROM entities WHERE kind = 'user' AND id = 'half'").run();
-    expect((await a.call('GET', '/api/me')).status).toBe(401);
-    expect((await a.call('POST', '/api/me/checkin')).status).toBe(401);
-    expect((await a.call('PATCH', '/api/me', { nickname: '新名字' })).status).toBe(401);
+    const after = await a.get<CurrentUser>('/api/me');
+    expect(after).toMatchObject({ handle: 'half', nickname: 'half', tokens: before.tokens, bio: '', avatar: '' });
+    expect((await a.call('POST', '/api/me/checkin')).status).toBe(200);
+    expect((await a.call('PATCH', '/api/me', { nickname: '新名字' })).status).toBe(200);
+    expect((await a.get<CurrentUser>('/api/me')).nickname).toBe('新名字');
+  });
+
+  it('「已注销用户」占位昵称不能被活用户注册或改名占用', async () => {
+    const register = await server.app.request('/api/auth/register', {
+      method: 'POST', headers: json,
+      body: JSON.stringify({ username: 'imposter', password: PASSWORD, nickname: '已注销用户' }),
+    });
+    expect(register.status).toBe(400);
+    const a = await account('normal');
+    expect((await a.call('PATCH', '/api/me', { nickname: '已注销用户·ghost' })).status).toBe(400);
+  });
+});
+
+describe('审核入口的闭环约束', () => {
+  it('通过投稿页签拒绝站内文章也必须填理由（两个入口不能一个必填一个可选）', async () => {
+    // 站内文章同时出现在「待审文章」和「我的投稿」两个页签，分别打
+    // /api/admin/posts/:id/review 与 /api/admin/submissions/:id/review。
+    // 只在一个入口强制理由，等于给用户留了一个「被拒但没有原因」的后门。
+    const a = await account('alice');
+    const post = await submit(a, '从投稿页签拒绝');
+    const without = await admin(`/api/admin/submissions/${post.id}/review`, { status: 'rejected' });
+    expect(without.status).toBe(400);
+    expect(await without.json()).toMatchObject({ error: { code: 'REASON_REQUIRED' } });
+    expect((await a.get<GetPostsResponse>('/api/me/posts')).items[0].status).toBe('pending');
+  });
+
+  it('群友文章驳回后理由随记录保留，恢复后仍可读', async () => {
+    // reviewPost 对群友稿走 withdrawPost。之前只写下架标记不写理由，
+    // 管理台强制填的理由成了一次性废纸，管理员自己也看不到。
+    // 先导入一篇群友稿（import 生成的 id 是 feishu-<recordId>）。
+    expect((await admin('/api/admin/import', {
+      stations: [{
+        slug: 'sub-reviewcase-com', name: '案例站', description: 'd', url: 'https://reviewcase.example.com/',
+        rechargeThreshold: null, paymentMethods: [], offers: [],
+      }],
+      posts: [{
+        recordId: 'reviewcase', stationSlug: 'sub-reviewcase-com', title: '群友稿', summary: 's', body: 'b',
+        authorName: '群友', publishedAt: '2026-11-04T08:00:00.000Z',
+      }],
+    })).status).toBe(200);
+    const response = await admin('/api/admin/posts/feishu-reviewcase/review', { status: 'rejected', reason: '证据不足' });
+    expect(response.status).toBe(200);
+    const removed = await server.app.request('/api/admin/posts/removed', { headers: bearer });
+    expect(removed.status).toBe(200);
+    expect(await removed.json()).toMatchObject({ items: [{ id: 'feishu-reviewcase' }] });
+    const raw = server.db.prepare("SELECT data FROM entities WHERE kind='post' AND id='feishu-reviewcase'").get() as { data: string };
+    expect(JSON.parse(raw.data)).toMatchObject({ reviewReason: '证据不足' });
+  });
+
+  it('已物化文章再审核时同步 submissions，两个页签不再互相打脸', async () => {
+    const a = await account('alice');
+    const post = await submit(a, '两个页签同一口径');
+    expect((await admin(`/api/admin/posts/${post.id}/review`, { status: 'approved' })).status).toBe(200);
+    expect((await admin(`/api/admin/posts/${post.id}/review`, { status: 'rejected', reason: '复核不通过' })).status).toBe(200);
+    expect((await a.get<GetPostsResponse>('/api/me/posts')).items[0]).toMatchObject({ status: 'rejected', reviewReason: '复核不通过' });
+    const subs = await a.get<{ items: Array<{ id: string; status: string; reason: string | null }> }>('/api/me/submissions');
+    expect(subs.items.find(item => item.id === post.id)).toMatchObject({ status: 'rejected', reason: '复核不通过' });
+  });
+
+  it('review 不接受 pending：那会产生前台 404、下架列表也没有的第三种不在线状态', async () => {
+    const a = await account('alice');
+    const post = await submit(a, 'pending 不该是审核终态');
+    expect((await admin(`/api/admin/posts/${post.id}/review`, { status: 'pending' })).status).toBe(400);
+    expect((await admin(`/api/admin/posts/${post.id}/review`, { status: 'approved', reason: 'x' })).status).toBe(200);
+    expect((await admin(`/api/admin/posts/${post.id}/review`, { status: 'pending' })).status).toBe(400);
+  });
+
+  it('非对象的空 body 不再被展开成 {}，校验语义不放松', async () => {
+    const a = await account('alice');
+    const cookie = server.db.prepare("SELECT handle FROM accounts WHERE handle = 'alice'").get();
+    expect(cookie).toBeDefined();
+    const response = await a.call('POST', '/api/me/checkin', null);
+    // 旧代码 `JSON.parse(body || '{}')` 拿 null 交给 strictObject 会 400；
+    // 合并 path 参数时若写成 `{...null}` 就悄悄变成 {} 让请求通过。
+    expect(response.status).toBe(400);
   });
 });

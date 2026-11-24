@@ -100,9 +100,9 @@ export default function RankingBoard({ tab: controlled, onTabChange, pageSize = 
         empty={(
           <p className="state">
             {tab === 'model'
-              ? <>还没有站点报出可比的报价，模型榜暂时为空。 <Link to="/submit?kind=station">推荐一个站</Link></>
+              ? <>目录里还没有模型，模型榜暂时为空。 <Link to="/submit?kind=model">补录一个模型</Link></>
               : tab === 'community'
-                ? <>还没有被投票的文章，社区榜暂时为空。 <Link to="/community">去社区看看</Link></>
+                ? <>还没有已通过的社区文章，社区榜暂时为空。 <Link to="/submit?kind=community">写第一篇</Link></>
                 : <>还没有人分享过内容，达人榜暂时为空。 <Link to="/submit">去写第一篇</Link></>}
           </p>
         )}

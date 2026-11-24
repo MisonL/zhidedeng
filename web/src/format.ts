@@ -6,7 +6,9 @@ export const KIND_LABEL: Record<PostKind, string> = {
 
 export const SUBMISSION_LABEL = '群友提交，未经平台核实';
 export const AGENT_LABEL = 'AI 采集，未经平台核实';
-export const DEMO_LABEL = '演示数据，虚构样例';
+// 名称里通常已经带「虚构·」，摘要里也说「虚构体验」。标签只补「演示数据」
+// 这一个维度，避免同一张卡片上出现三次「虚构」。
+export const DEMO_LABEL = '演示数据';
 /**
  * 页脚总声明。三种来源必须各自点名：
  * - demo：种子数据，但界面上会和真实内容混在一起；

@@ -509,15 +509,22 @@ function orderByMaterializeDependency(store: Store, ids: string[]): string[] {
     return c.json({ items: rows.map(row => ({ id: row.id as string, removedAt: row.removedAt as string })) });
   });
   app.post('/api/admin/posts/:id/review', async c => {
+    // 只接受终态。放开 'pending' 有两条坏路：队列投稿会被 reviewPost 映射成
+    // rejected（状态与请求不符，理由还可能为空），已物化文章会变成「前台 404、
+    // 下架列表里没有、审核台当待审」的第三种不在线状态。
     const input = z.strictObject({
-      status: postStatus,
-      reason: z.string().trim().max(200).optional(),
-    }).refine(value => value.status !== 'rejected' || (value.reason ?? '').length > 0, {
-      // 拒绝必须说明原因。唯一一位真实投稿人被拒后只看到「未通过」两个字，
-      // 既改不了也不知道该不该重投——这是已经发生的事故，不是假想风险。
-      message: '拒绝文章时必须填写理由',
-      path: ['reason'],
+      status: z.enum(['approved', 'rejected']),
+      // 上限与 submissions 的 review 一致（1000），否则同一句话在两个入口
+      // 一个能进一个进不去。
+      reason: z.string().trim().max(1000).optional(),
     }).parse(await c.req.json());
+    // 拒绝必须说明原因。唯一一位真实投稿人被拒后只看到「未通过」两个字，
+    // 既改不了也不知道该不该重投——这是已经发生的事故，不是假想风险。
+    // 放在业务层抛（而不是 zod refine）：onError 会把验证错误统一改成
+    // 「请求参数或 JSON 正文无效」，调用方根本看不到自己漏了什么。
+    if (input.status === 'rejected' && !input.reason) {
+      throw new ApiError(400, 'REASON_REQUIRED', '拒绝文章时必须填写理由，作者要靠它修改后重投');
+    }
     return c.json(reviewPost(store, now, c.req.param('id'), input.status, input.reason));
   });
   app.post('/api/admin/users/:handle/disable', async c => {
@@ -546,9 +553,17 @@ function orderByMaterializeDependency(store: Store, ids: string[]): string[] {
       // 没有一条「非 GET + path 参数」的，这个洞才一直没暴露。
       // 语义有冲突时以 body 为准（body 是显式提交的内容，path 是定位信息）。
       const pathParams = c.req.param();
+      const hasPathParams = Object.keys(pathParams).length > 0;
+      // 解析出来的 body 先原样留着：`null`、`[]` 这类非对象值要照旧交给 schema 去拒，
+      // 不能被 `{...null}` 悄悄变成 `{}`（那会把 400 变成 200）。
+      const parsedBody: unknown = method === 'GET' ? undefined : JSON.parse(body || '{}');
       const raw: unknown = method === 'GET'
         ? normalizeQuery(schema, { ...c.req.query(), ...pathParams })
-        : { ...pathParams, ...JSON.parse(body || '{}') };
+        : (hasPathParams && parsedBody !== null && typeof parsedBody === 'object' && !Array.isArray(parsedBody)
+          // 冲突时以 path 为准：path 是这条请求的身份，body 是载荷。
+          // 反过来写（body 覆盖 path）等于允许调用方用 body 改掉自己要操作的资源。
+          ? { ...parsedBody, ...pathParams }
+          : parsedBody);
  //公开读接口的响应体含登录态（currentUserVote/favorited），是按 Cookie变体的：
  //不下 no-store的话，前面一旦加 CDN/代理缓存，A用户的投票状态会被发给 B用户。
  c.header('cache-control', 'no-store');

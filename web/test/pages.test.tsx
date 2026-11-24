@@ -7,7 +7,7 @@ import { apiError, callsTo, renderApp, renderWithProviders, stubApi } from './he
 
 // 演示来源现在有统一的来源标签（sourceLabel 的 demo 分支），
 // 站点详情里那句提示是「标签 + 不构成消费建议」，不再走单独的兜底常量。
-const DEMO_NOTICE = '演示数据，虚构样例';
+const DEMO_NOTICE = '演示数据';
 
 describe('数据诚信声明', () => {
   it('全站页脚常驻，站点详情顶部也显示', async () => {

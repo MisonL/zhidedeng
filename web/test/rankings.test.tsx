@@ -34,10 +34,10 @@ describe('排行榜', () => {
       'GET /api/rankings': ({ url }: { url: URL }) => empty(url.searchParams.get('tab') as 'model'),
     });
     renderWithProviders(<RankingBoard />);
-    expect(await screen.findByText(/模型榜暂时为空/)).toBeInTheDocument();
+    expect(await screen.findByText(/目录里还没有模型，模型榜暂时为空/)).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('tab', { name: '社区' }));
-    expect(await screen.findByText(/社区榜暂时为空/)).toBeInTheDocument();
+    expect(await screen.findByText(/还没有已通过的社区文章，社区榜暂时为空/)).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('tab', { name: '达人' }));
     expect(await screen.findByText(/达人榜暂时为空/)).toBeInTheDocument();
