@@ -479,6 +479,26 @@ describe('删除与头像的回归（审查修复）', () => {
     expect(screen.queryByText('p1 新写的')).not.toBeInTheDocument();
   });
 
+  it('删回复不触发重取：回复不影响顶层 total，重取只会丢掉已展开的后续页', async () => {
+    const mine = { handle: 'demo-pedal', nickname: '我自己', avatar: '' };
+    const fetchMock = stubApi({
+      'GET /api/comments': { items: [{
+        id: 'c1', targetType: 'post', targetId: 'p1', author: mine, content: '父评论',
+        parentId: null, createdAt: '2026-11-03T08:00:00.000Z',
+        replies: [{ id: 'r1', targetType: 'post', targetId: 'p1', author: mine, content: '我的回复', parentId: 'c1', createdAt: '2026-11-03T09:00:00.000Z' }],
+      }], total: 25, page: 1, pageSize: 20 },
+      'DELETE /api/comments/r1': { id: 'r1', deleted: 'removed' },
+    });
+    renderWithProviders(<Comments targetType="post" targetId="p1" />);
+    await screen.findByText('我的回复');
+    fireEvent.click(screen.getAllByRole('button', { name: '删除' })[1]);
+    fireEvent.click(await screen.findByRole('button', { name: '确认删除' }));
+    await waitFor(() => expect(callsTo(fetchMock, 'DELETE', '/api/comments/r1')).toHaveLength(1));
+    expect(screen.queryByText('我的回复')).not.toBeInTheDocument();
+    // 只有首屏那一次 GET。
+    expect(callsTo(fetchMock, 'GET', '/api/comments')).toHaveLength(1);
+  });
+
   it('还有后续页时，物理删一条会重取，避免「加载更多」漏掉补位的那条', async () => {
     const mine = { handle: 'demo-pedal', nickname: '我自己', avatar: '' };
     const fetchMock = stubApi({
@@ -518,5 +538,43 @@ describe('删掉最后一条评论', () => {
     fireEvent.click(await screen.findByRole('button', { name: '删除' }));
     fireEvent.click(await screen.findByRole('button', { name: '确认删除' }));
     expect(await screen.findByText('还没有评论，来抢沙发')).toBeInTheDocument();
+  });
+});
+
+describe('切页期间的写请求', () => {
+  it('晚到的发表响应不会贴到新目标下面', async () => {
+    const mine = { handle: 'demo-pedal', nickname: '我自己', avatar: '' };
+    // 让发表请求挂住，切到 p2 之后再放行。
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    stubApi({
+      'GET /api/comments': ({ url }: { url: URL }) => page(url.searchParams.get('targetId') === 'p1'
+        ? [{ id: 'c1', targetType: 'post', targetId: 'p1', author: mine, content: 'p1 的评论', parentId: null, createdAt: '2026-11-03T08:00:00.000Z', replies: [] }]
+        : [{ id: 'c2', targetType: 'post', targetId: 'p2', author: mine, content: 'p2 的评论', parentId: null, createdAt: '2026-11-03T09:00:00.000Z', replies: [] }]),
+      'POST /api/comments': async () => {
+        await gate;
+        return { id: 'late', targetType: 'post', targetId: 'p1', author: mine, content: 'p1 晚到的评论', parentId: null, createdAt: '2026-11-03T10:00:00.000Z', replies: [] };
+      },
+    });
+    function Harness() {
+      const [target, setTarget] = useState('p1');
+      return (
+        <>
+          <button type="button" onClick={() => setTarget('p2')}>换一篇</button>
+          <Comments targetType="post" targetId={target} />
+        </>
+      );
+    }
+    renderWithProviders(<Harness />);
+    await screen.findByText('p1 的评论');
+    fireEvent.change(screen.getByLabelText('写评论'), { target: { value: 'p1 晚到的评论' } });
+    fireEvent.click(screen.getByRole('button', { name: '发表评论' }));
+    // 请求还没回来就切页。
+    fireEvent.click(screen.getByRole('button', { name: '换一篇' }));
+    await screen.findByText('p2 的评论');
+    release();
+    // 晚到的响应属于 p1，不能出现在 p2 的列表里。
+    await waitFor(() => expect(screen.queryByText('p1 晚到的评论')).not.toBeInTheDocument());
+    expect(screen.getByText('p2 的评论')).toBeInTheDocument();
   });
 });

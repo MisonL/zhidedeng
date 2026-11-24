@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { FormEvent } from 'react';
 import { Link } from 'react-router';
 import type { Comment, CommentReply, TargetType } from '@zhidedeng/shared';
@@ -68,6 +68,10 @@ export default function Comments({ targetType, targetId }: { targetType: TargetT
   const [deleteError, setDeleteError] = useState<string>();
   const me = useMe();
   const here = useHere();
+  // 发起写请求时的目标。请求在途时用户可能已经切到另一篇文章，
+  // 晚到的响应如果直接 setState，就会把 p1 的评论贴到 p2 下面。
+  const targetKey = useRef('');
+  targetKey.current = `${targetType}:${targetId}`;
   const requireLogin = useRequireLogin();
 
   // 换了一篇文章/站点就清空所有本地状态。不清的话，A 页删掉/新增的评论
@@ -84,11 +88,13 @@ export default function Comments({ targetType, targetId }: { targetType: TargetT
   }, [targetType, targetId]);
 
   async function addComment(content: string) {
+    const key = targetKey.current;
     const created = await api.createComment({ targetType, targetId, content }) as Comment;
+    if (targetKey.current !== key) return;
     setAdded((list) => [created, ...list]);
   }
 
-  async function removeComment(id: string) {
+  async function removeComment(id: string, topLevel = false) {
     // 只有自己写的评论才会渲染这个按钮，所以不用再问一次「这是你的吗」；
     // 但服务端仍会校验（不是自己的回 404），前端不是权限边界。
     if (deleting.has(id)) return;
@@ -111,7 +117,8 @@ export default function Comments({ targetType, targetId }: { targetType: TargetT
         setRemovedIds((set) => new Set(set).add(id));
         // 顶层评论是物理删：服务端 total 少了一条，本地却还把后面的页偏移当没变。
         // 有后续页时就地重取，否则「加载更多」会跳过正好补位的那一条。
-        if (paged.hasMore) paged.reload();
+        // 只有顶层评论影响列表 total；删回复时重取会白白丢掉已展开的后续页。
+        if (topLevel && paged.hasMore) paged.reload();
         setReplies((map) => {
           const next: Record<string, CommentReply[]> = {};
           for (const [parent, list] of Object.entries(map)) next[parent] = list.filter((reply) => reply.id !== id);
@@ -128,7 +135,9 @@ export default function Comments({ targetType, targetId }: { targetType: TargetT
   }
 
   async function addReply(parentId: string, content: string) {
+    const key = targetKey.current;
     const created = await api.createComment({ targetType, targetId, content, parentId }) as CommentReply;
+    if (targetKey.current !== key) return;
     setReplies((map) => ({ ...map, [parentId]: [...(map[parentId] ?? []), created] }));
     setReplyTo(undefined);
   }
@@ -178,7 +187,7 @@ export default function Comments({ targetType, targetId }: { targetType: TargetT
                         label="删除" tone="red" busy={deleting.has(comment.id)}
                         description="删除后无法恢复，确定删除这条评论？"
                         confirmLabel="确认删除"
-                        onConfirm={() => removeComment(comment.id)}
+                        onConfirm={() => removeComment(comment.id, true)}
                       />
                     )}
                   </div>
