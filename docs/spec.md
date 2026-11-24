@@ -168,6 +168,8 @@ channel 是队列的来源渠道，source 是物化内容的展示来源，二�
 | POST / GET | /api/admin/invite-codes | 创建邀请码（note?、maxUses?、expiresAt?）/ 列出元数据，明文只在创建响应里出现一次 |
 | POST | /api/admin/invite-codes/:id/revoke | 吊销邀请码，重复调用保留首次吊销时间 |
 | POST | /api/admin/comments/:id/hide | hidden=true/false，隐藏父评论时回复也不公开 |
+| GET | /api/admin/reports | 默认 status=open；按 createdAt 倒序，逐条带 targetAlive（被举报对象是否还在线）与 targetLabel |
+| POST | /api/admin/reports/:id/resolve | status=resolved/dismissed，note 可选；**只改举报状态，不动被举报内容**（下架要走 withdraw/撤下/隐藏）。重复处置 409 ALREADY_HANDLED |
 | POST | /api/admin/users/:handle/disable | disabled=true/false，按用户名查账号；禁用时删除会话，公开内容保留 |
 
 路由依据：`server/src/app.ts` 的管理路由段；模型和导入语义见 `server/src/catalog.ts` 的 `importCatalog`、`updateModel`、`createVendor`、`deleteModel`。`/api/admin/import` 仍是正式保留的运维能力，没有被改成队列接口或限制为一次性迁移；它不推进 submissions 审核版本，不能作为队列 freshness 检查覆盖的写入路径。独立 agent/user 来源站点及其报价受同 slug 跳过保护，原本就是 submission 来源的站点仍属于替换集合。
@@ -177,7 +179,7 @@ channel 是队列的来源渠道，source 是物化内容的展示来源，二�
 ## 飞书同步
 
 - `scripts/sync-feishu.ts` 用 lark-cli 串行只读拉取表格，仅处理审核状态严格等于「通过」的记录；先按 hostname 聚合站点，评价按记录 ID 各自入队。每块最多 500 项，同一次同步共用一个新 UUID batchId 和 feishu 渠道，调用 `/api/admin/submissions/batch`，不再调用 import（`scripts/sync-feishu.ts` 的同步主流程与批次提交）
-- 同 batchId 不能混入其他渠道，返回 409 BATCH_CHANNEL_MISMATCH；人工审完的批次不能继续追加，返回 409 BATCH_ALREADY_REVIEWED。只含自动通过条目的批次允许后续分块；批次内冲突站点在写入前整批拒绝（`server/src/submissions.ts` 的 `assertBatchChannel`、`assertBatchOpen`、`enqueueBatch`）
+- 同 batchId 不能混入其他渠道，返回 409 BATCH_CHANNEL_MISMATCH；人工审完的批次不能继续追加，返回 409 BATCH_ALREADY_REVIEWED。只含自动处理条目（autoApproved=1，不论定成 approved 还是 rejected）的批次允许后续分块；批次内冲突站点在写入前整批拒绝（`server/src/submissions.ts` 的 `assertBatchChannel`、`assertBatchOpen`、`enqueueBatch`）
 - state 仅列出存在 approved 飞书 upsert 的 hostname 组内、仍在线且 source=submission 的站点；submissionId 取跨渠道最新 approved upsert。旧导入站点没有对应 approved 飞书队列记录时不参与下架检测（`server/src/submissions.ts` 的 `submissionState`）
 - 表格中消失或撤销通过的站点生成 action=remove，payload 带实际 slug 和 state 返回的 submissionId。下架始终等待人工审核，审核时重查来源和版本；通过后只删除站点与报价，已有评价及互动记录保留，已不存在目标按幂等下架处理（`scripts/sync-feishu.ts` 的下架比较、`server/src/submissions.ts` 的 `removeStation` 与 `materialize`）
 - 记录级解析失败时同步和 dry-run 以退出码 2 中止且不 POST。显式 --allow-skipped 可跳过坏记录，但本次完全不生成下架，并打印警告；有效站点为零且已读取的线上 state 非空时仍中止（`scripts/sync-feishu.ts` 的安全检查与退出码分支）
@@ -195,20 +197,21 @@ channel 是队列的来源渠道，source 是物化内容的展示来源，二�
 
 - `POST /auth/register`（username、password、nickname?）、`POST /auth/login`、`POST /auth/logout`、`POST /auth/password`（currentPassword、newPassword）
 - `POST /account/agent-tokens`（label、inviteCode?）签发；`GET /account/agent-tokens` 列出本人凭证元数据；`DELETE /account/agent-tokens/:id` 软吊销，重复吊销保留首次 revokedAt。均需会话，不需要管理员权限；准入不足返回 403 ELIGIBILITY_REQUIRED，活跃凭证超限返回 409 TOKEN_LIMIT
-- `GET /me`、`PATCH /me`（nickname、bio）
+- `GET /me`、`PATCH /me`（nickname、bio、avatar）—— avatar 只接受预设集合里的图案或空串（空串=默认），不做上传、不接收外链
 - `POST /me/checkin`（当天重复调用返回 409 ALREADY_CHECKED_IN）；`GET /me` 含 tokens、checkedInToday、streak、favoriteCount、shareCount
 - `GET /me/favorites`、`GET /me/posts`
 - `GET /me/submissions` —— 「我的投稿」：文章、模型、站点三类统一返回，带状态与驳回理由；已通过的给出可点的详情链接。此前补录模型和推荐站点这两条通道的审核结果，提交人完全看不到
 - `GET /vendors`（含 models 摘要）
 - `GET /models?vendor=&q=`、`GET /models/:slug`（含 offers：各站倍率，先按计价口径分组、组内按倍率升序；每条带 `basis` 与可为 null 的 `quotedAt`）
 - `GET /stations?vendor=&sort=score|rate|uptime&q=`、`GET /stations/:slug`（含 offers、指标、投票汇总、当前用户投票与收藏状态）
-- `GET /posts?kind=&vendor=&station=&model=&sort=latest|hot&q=`、`GET /posts/:id`、`POST /posts`（kind、title、summary、body、stationSlug?、modelSlug?）
+- `GET /posts?kind=&vendor=&station=&model=&sort=latest|hot&q=`、`GET /posts/:id`、`POST /posts`（kind、title、summary、body、stationSlug?、modelSlug?）、`DELETE /posts/:id` —— 作者撤下自己已发布的文章：软删除，正文保留，恢复只给管理员；只能撤自己的（他人 404）、只能撤已通过的（待审/被拒 409 POST_NOT_PUBLISHED）、演示数据 409
 - `POST /models/suggest`（slug、vendor、name、description）—— 站内补录模型，与 Agent 通道同一套字段，进同一个待审队列
 - `POST /stations/suggest`（name、url、description?、offers?、rechargeThreshold?、paymentMethods?）—— 站内推荐新中转站。此前站内根本没有这条路，站点只能由飞书同步或 Agent 送来。与其它投稿进同一个待审队列，审核通过后由同一套物化逻辑建站；报价里的模型必须已存在，写错在提交时就报错而不是留成停在 pending 的坏记录
 - `POST /admin/invite-codes`（note?、maxUses?、expiresAt?）、`GET /admin/invite-codes`、`POST /admin/invite-codes/:id/revoke` —— 邀请码管理，`Authorization: Bearer` 鉴权。明文只在创建响应里返回一次，库里只存 SHA-256 与前缀；`maxUses` 为 null 表示不限次数，同一账号对同一个码只核销一次
 - `PUT /votes`（targetType: post|station、targetId、value: up|down|null）返回最新汇总
 - `PUT /favorites`（targetType、targetId、favorited）
-- `GET /comments?targetType=&targetId=`、`POST /comments`（content 1~2000 字、parentId?）
+- `GET /comments?targetType=&targetId=`、`POST /comments`（content 1~2000 字、parentId?）、`DELETE /comments/:id` —— 作者删除自己的评论（他人 404）。没有子行时物理删除；有任何子行（**含被管理员隐藏的回复**，因为外键约束不看 hidden）时留墓碑：正文在库里保留、接口返回空串，列表显示「该评论已删除」，其下的回复不跟着消失。墓碑不计入评论数，也不能被回复
+- `POST /reports`（targetType: post|station|comment、targetId、reason 1~200 字、detail?）—— 举报进人工队列，**不自动下架、不承诺 SLA**。不能举报自己的内容、看不到的对象（隐藏/已删除/所属文章已撤下）与演示数据；同一人对同一对象未处理时重复举报 409 ALREADY_REPORTED；按人限流 20 条/小时，超限 429 RATE_LIMITED
 - `GET /rankings?tab=model|community|expert`（各返回 6~12 条）
 - `GET /banners`
 - `GET /search?q=`（models、stations、posts 三组，各最多 10 条）
