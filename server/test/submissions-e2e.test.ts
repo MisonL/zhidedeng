@@ -388,3 +388,36 @@ describe('撤下后重投（自动通过模式）', () => {
     expect(posts.filter(row => String(row.id) === first.id)).toHaveLength(1);
   });
 });
+
+describe('撤下后同步（飞书/自动通过）', () => {
+  it('管理员下架后再次同步，文章保持下架且投稿记为 rejected 而不是 approved', async () => {
+    // 幽灵的另一种形态：同步说 approved，读者点开却是 404。
+    // 正确结果是「没有复活」，并且同步结果要如实说「没上线」。
+    const cookie = await server.app.request('/api/admin/settings', {
+      method: 'POST', headers: admin, body: JSON.stringify({ autoApprove: true }),
+    });
+    expect(cookie.status).toBe(200);
+    const station = { name: '飞书站', description: 'd', url: 'https://fs2.example.com/', rechargeThreshold: 10, paymentMethods: ['支付宝'], offers: [{ modelSlug: 'gpt-4-1', rate: 0.5 }] };
+    const { enqueueBatch } = await import('../src/submissions.ts');
+    const sync = (batchId: string) => enqueueBatch(openStore(server.db), {
+      channel: 'feishu', batchId, now: clock(), ip: '127.0.0.1',
+      items: [
+        { kind: 'station', originKey: 'fs2.example.com', payload: station },
+        { kind: 'post', originKey: 'post-r9', payload: { recordId: 'r9', hostname: 'fs2.example.com', authorName: '某作者', title: '飞书文章', summary: '摘要', body: '正文', publishedAt: '2026-11-01T00:00:00.000Z' } },
+      ],
+    });
+    const first = sync('b1');
+    const postId = `sub-${first.results[1].id!}`;
+    expect((await server.app.request(`/api/posts/${postId}`)).status).toBe(200);
+    // 管理员下架。
+    expect((await server.app.request(`/api/admin/posts/${postId}/withdraw`, { method: 'POST', headers: admin })).status).toBe(200);
+    // 再同步一次：不许复活。
+    const second = sync('b2');
+    expect(second.results[1].status).toBe('rejected');
+    expect(second.results[1].reason).toContain('已被下架');
+    expect((await server.app.request(`/api/posts/${postId}`)).status).toBe(404);
+    // 实体没有被复制成两份。
+    const rows = server.db.prepare("SELECT id FROM entities WHERE kind = 'post'").all().filter(row => String(row.id).includes('sub-'));
+    expect(rows).toHaveLength(1);
+  });
+});

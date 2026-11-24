@@ -294,7 +294,17 @@ export function enqueueSubmission(store: Store, input: {
       reviewedAt: auto ? reviewedAt : null, createdAt: reviewedAt,
     };
     // 物化失败时整条记录随事务回滚，不会留下 approved 但没上站的幽灵。
-    if (auto) materialize(store, submission, reviewedAt);
+    //
+    // materialize 返回字符串表示「这条没有产生新版本」（目前只有一种：文章此前
+    // 已被撤下/下架，同步不再复活它）。此时不能把投稿记成 approved——那等于
+    // 又造一只幽灵：同步脚本看到 approved，读者点开却是 404。记成 rejected 并带上
+    // 原因，同步侧才知道是人为下架、不是自己写错了。
+    const skipReason = auto ? materialize(store, submission, reviewedAt) : undefined;
+    if (auto && skipReason !== undefined && validated.kind === 'post') {
+      submission.status = 'rejected';
+      submission.reason = skipReason;
+      submission.reviewedAt = reviewedAt;
+    }
     store.db.prepare('INSERT INTO submissions (id, kind, channel, originKey, batchId, action, autoApproved, payload, payloadHash, actorHandle, ip, status, reason, reviewedAt, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
       .run(submission.id, submission.kind, submission.channel, submission.originKey, submission.batchId, submission.action, auto ? 1 : 0, serialized, payloadHash,
         submission.actorHandle, validated.ip, submission.status, submission.reason, submission.reviewedAt, submission.createdAt);
@@ -340,7 +350,7 @@ export function enqueueBatch(store: Store, input: AdminBatchSubmitRequest & { ip
       // 管理端批次是受信通道，且一次同步天然会超过 200 条，不套用户侧的熔断。
       const { submission, deduplicated, autoApproved } = enqueueSubmission(store, { ...item, batchId, channel: batch.channel, ip: input.ip, now: input.now }, { globalPendingBreaker: false });
       // 返回请求里的 key 以便逐条对账；记录里的站点 key 已由服务端规范化。
-      return { originKey: item.originKey, kind: item.kind, id: submission.id, status: submission.status, deduplicated, autoApproved };
+      return { originKey: item.originKey, kind: item.kind, id: submission.id, status: submission.status, reason: submission.reason, deduplicated, autoApproved };
     } catch (error) {
       // 另一个写入方可能在预检后认领新 batchId，事务内发现时仍返回整批 409。
       if (error instanceof ApiError && (error.code === 'BATCH_CHANNEL_MISMATCH' || error.code === 'BATCH_ALREADY_REVIEWED')) throw error;

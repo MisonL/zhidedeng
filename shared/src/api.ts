@@ -55,6 +55,8 @@ export interface AdminBatchSubmitResponse {
     kind: SubmissionKind;
     id?: string;
     status?: SubmissionStatus;
+    /** 审核/物化留下的原因，例如「此前已被下架，本次同步跳过」。 */
+    reason?: string | null;
     deduplicated?: boolean;
     autoApproved?: boolean;
     error?: { code: string; message: string };
