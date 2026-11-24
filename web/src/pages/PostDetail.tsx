@@ -4,6 +4,7 @@ import AsyncView from '../components/AsyncView';
 import Comments from '../components/Comments';
 import FavoriteButton from '../components/FavoriteButton';
 import Markdown from '../components/Markdown';
+import ReportButton from '../components/ReportButton';
 import { Avatar } from '../components/visuals';
 import VoteButtons from '../components/VoteButtons';
 import { formatDate, formatRate, isUntrustedSource, KIND_LABEL, sourceLabel } from '../format';
@@ -52,6 +53,8 @@ export default function PostDetail() {
                 <footer className="article-foot">
                   <VoteButtons targetType="post" targetId={post.id} votes={post.votes} currentUserVote={post.currentUserVote} />
                   <FavoriteButton targetType="post" targetId={post.id} favorited={post.favorited} favoriteCount={post.favoriteCount} />
+                  {/* 只在已通过的公开文章上给举报入口：待审的还没公开，别人看不到。 */}
+                  {post.status === 'approved' && <ReportButton targetType="post" targetId={post.id} />}
                 </footer>
               </>
             );

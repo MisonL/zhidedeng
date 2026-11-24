@@ -232,6 +232,13 @@ export function enqueueSubmission(store: Store, input: {
       ).get(slug);
       if (pendingSame) throw new ApiError(409, 'PENDING_DUPLICATE', `模型 ${slug} 已有待审的投稿，请等审核后再提交`);
     }
+    // 自动通过模式命中「已 approved 的站内文章」时，实体可能已被作者撤下或管理员下架。
+    // 幂等返回旧 id 会变成幽灵：响应说 approved、前端以为已上线，详情却是 404
+    // （removedAt 还在）。撤下是人的决定，同内容重投应当按新投稿处理：
+    // 走下面的正常插入（新 id、重新物化），而不是复活旧行、绕过这次撤下。
+    // existing.id 在 SQLite 返回行里是 unknown，这里明确转成 string 再判断。
+    const approvedPostWithdrawn = auto && validated.kind === 'post' && validated.channel === 'web'
+      && existing?.status === 'approved' && (existing.id === undefined || store.removedAt('post', String(existing.id)) !== null);
     const reviewedAt = validated.now.toISOString();
     // 飞书 www/裸域切换会更新同一实体，版本应取实际实体当前 URL 的 hostname。
     const currentOriginKey = auto && existing?.status === 'approved' && validated.kind === 'station'
@@ -241,7 +248,8 @@ export function enqueueSubmission(store: Store, input: {
       ? store.db.prepare("SELECT id FROM submissions WHERE kind = ? AND originKey = ? AND status = 'approved' ORDER BY reviewedAt DESC, rowid DESC LIMIT 1").get(validated.kind, currentOriginKey)
       : undefined;
     // approved 只在仍是最新版本时去重，否则需要重新物化本次提交的内容。
-    if (existing && (existing.status === 'pending' || latest?.id === existing.id)) {
+    // approvedPostWithdrawn 时视作未命中（见上方注释），避免返回幽灵。
+    if (!approvedPostWithdrawn && existing && (existing.status === 'pending' || latest?.id === existing.id)) {
       const submission = submissionRecord(existing);
       if (auto && submission.status === 'pending') {
         materialize(store, submission, reviewedAt);

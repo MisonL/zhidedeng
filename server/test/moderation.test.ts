@@ -639,3 +639,72 @@ describe('作者撤下自己的文章', () => {
     expect((await b.get<GetPostsResponse>('/api/me/favorites')).total).toBe(0);
   });
 });
+
+describe('举报最小闭环', () => {
+  async function approvedPost(who: Awaited<ReturnType<typeof account>>, title: string) {
+    const post = await submit(who, title);
+    await admin(`/api/admin/posts/${post.id}/review`, { status: 'approved' });
+    return post;
+  }
+
+  it('登录用户能举报已公开文章，重复举报 409', async () => {
+    const a = await account('alice');
+    const b = await account('bobby');
+    const post = await approvedPost(a, '会被举报的文章');
+    expect((await b.call('POST', '/api/reports', { targetType: 'post', targetId: post.id, reason: '内容不实或夸大' })).status).toBe(200);
+    const again = await b.call('POST', '/api/reports', { targetType: 'post', targetId: post.id, reason: '再报一次' });
+    expect(again.status).toBe(409);
+    expect(await again.json()).toMatchObject({ error: { code: 'ALREADY_REPORTED' } });
+  });
+
+  it('不能举报自己的内容，也不能举报不存在的内容', async () => {
+    const a = await account('alice');
+    const post = await approvedPost(a, '自己的文章');
+    expect((await a.call('POST', '/api/reports', { targetType: 'post', targetId: post.id, reason: 'x' })).status).toBe(400);
+    expect((await a.call('POST', '/api/reports', { targetType: 'post', targetId: 'never', reason: 'x' })).status).toBe(404);
+    expect((await a.call('POST', '/api/reports', { targetType: 'station', targetId: 'whale-demo', reason: 'x' })).status).toBe(400);
+    // 未登录不能举报：没有可追责的对象。
+    expect((await anonymous.call('POST', '/api/reports', { targetType: 'post', targetId: post.id, reason: 'x' })).status).toBe(401);
+  });
+
+  it('管理台看到举报列表，处置后从 open 里消失', async () => {
+    const a = await account('alice');
+    const b = await account('bobby');
+    const post = await approvedPost(a, '待处置的文章');
+    const created = await b.call('POST', '/api/reports', { targetType: 'post', targetId: post.id, reason: '含广告', detail: '第二段推荐了购买渠道' });
+    expect(created.status).toBe(200);
+    const { id } = await created.json() as { id: string };
+
+    const list = await (await server.app.request('/api/admin/reports', { headers: bearer })).json() as { items: Array<{ id: string; reason: string; detail: string | null; targetLabel: string; targetAlive: boolean }> };
+    expect(list.items).toHaveLength(1);
+    expect(list.items[0]).toMatchObject({ id, reason: '含广告', detail: '第二段推荐了购买渠道', targetLabel: '待处置的文章', targetAlive: true });
+
+    expect((await admin(`/api/admin/reports/${id}/resolve`, { status: 'resolved' })).status).toBe(200);
+    const after = await (await server.app.request('/api/admin/reports', { headers: bearer })).json() as { items: unknown[] };
+    expect(after.items).toHaveLength(0);
+    // 处置不自动动内容：文章还在线。
+    expect((await anonymous.get<Post>(`/api/posts/${post.id}`)).status).toBe('approved');
+  });
+
+  it('被举报内容已下架时列表标记「已不在线」，处置不报错', async () => {
+    const a = await account('alice');
+    const b = await account('bobby');
+    const post = await approvedPost(a, '先被举报再被下架');
+    await b.call('POST', '/api/reports', { targetType: 'post', targetId: post.id, reason: 'x' });
+    await a.call('DELETE', `/api/posts/${post.id}`);
+    const list = await (await server.app.request('/api/admin/reports', { headers: bearer })).json() as { items: Array<{ targetAlive: boolean }> };
+    expect(list.items[0].targetAlive).toBe(false);
+  });
+
+  it('举报评论：不能举报自己的评论，看不到的（隐藏的/删除的）也不能举报', async () => {
+    const a = await account('alice');
+    const b = await account('bobby');
+    const comment = await (async () => {
+      const response = await b.call('POST', '/api/comments', { targetType: 'post', targetId: 'post-1', content: '一条可举报的评论' });
+      return await response.json() as { id: string };
+    })();
+    expect((await a.call('POST', '/api/reports', { targetType: 'comment', targetId: comment.id, reason: '人身攻击' })).status).toBe(200);
+    expect((await b.call('POST', '/api/reports', { targetType: 'comment', targetId: comment.id, reason: 'x' })).status).toBe(400);
+    expect((await anonymous.call('POST', '/api/reports', { targetType: 'comment', targetId: comment.id, reason: 'x' })).status).toBe(401);
+  });
+});

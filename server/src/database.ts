@@ -53,6 +53,25 @@ export const SCHEMA = `
     -- 于是正文清空、留一行墓碑。deletedAt 只被「这条是不是墓碑」用到。
     deletedAt TEXT
   );
+  -- 举报。只记录「有人说这个有问题」，处置永远由人来做：自动下架等于把
+  -- 一次点击变成一次删帖，而举报没有成本、也没有复核。
+  CREATE TABLE IF NOT EXISTS reports (
+    id TEXT PRIMARY KEY,
+    targetType TEXT NOT NULL CHECK(targetType IN ('post','station','comment')),
+    targetId TEXT NOT NULL,
+    reporterHandle TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    detail TEXT,
+    status TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open','resolved','dismissed')),
+    createdAt TEXT NOT NULL,
+    handledAt TEXT,
+    note TEXT
+  );
+  -- 同一个人对同一个对象只能有一条未处理举报。用部分唯一索引而不是先查后插：
+  -- 并发下「都查到没有」然后各插一条，靠应用层查重挡不住。
+  CREATE UNIQUE INDEX IF NOT EXISTS reports_open_once ON reports(targetType, targetId, reporterHandle) WHERE status = 'open';
+  CREATE INDEX IF NOT EXISTS reports_open ON reports(status, createdAt);
+
   CREATE TABLE IF NOT EXISTS checkins (
     userHandle TEXT NOT NULL, date TEXT NOT NULL, tokensAwarded INTEGER NOT NULL, streak INTEGER NOT NULL,
     PRIMARY KEY (userHandle, date)

@@ -7,6 +7,7 @@ import AsyncView, { Empty, LoadMore } from '../components/AsyncView';
 import Comments from '../components/Comments';
 import FavoriteButton from '../components/FavoriteButton';
 import PostCard from '../components/PostCard';
+import ReportButton from '../components/ReportButton';
 import StationCard from '../components/StationCard';
 import { StationTile } from '../components/visuals';
 import VoteButtons from '../components/VoteButtons';
@@ -136,6 +137,11 @@ export function StationDetailPage() {
           )}
         </AsyncView>
       </section>
+      {state.data && (
+        <p className="hint station-report">
+          <ReportButton targetType="station" targetId={slug} />
+        </p>
+      )}
       {state.data && <Comments targetType="station" targetId={slug} />}
       <section className="module page" aria-label="相关文章">
         <h2 className="section-title">相关文章</h2>

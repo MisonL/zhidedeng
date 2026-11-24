@@ -137,6 +137,22 @@ export interface CreateAgentTokenRequest {
 export type CreateAgentTokenResponse = Pick<AgentToken, 'id' | 'tokenPrefix' | 'label' | 'createdAt'> & { token: string };
 export type GetAgentTokensRequest = EmptyRequest;
 export type GetAgentTokensResponse = AgentToken[];
+export type ReportTargetType = 'post' | 'station' | 'comment';
+export type ReportStatus = 'open' | 'resolved' | 'dismissed';
+
+export interface CreateReportRequest {
+  targetType: ReportTargetType;
+  targetId: string;
+  /** 一句原因。前端给固定选项，也允许自由填写。 */
+  reason: string;
+  /** 补充说明，可选。 */
+  detail?: string;
+}
+export interface CreateReportResponse {
+  id: string;
+  status: ReportStatus;
+}
+
 export interface DeletePostRequest { id: string }
 export interface DeletePostResponse { id: string; removed: true }
 
@@ -449,6 +465,7 @@ export interface ApiContracts {
   getAgentTokens: { request: GetAgentTokensRequest; response: ApiResponse<GetAgentTokensResponse> };
   deleteComment: { request: DeleteCommentRequest; response: ApiResponse<DeleteCommentResponse> };
   deletePost: { request: DeletePostRequest; response: ApiResponse<DeletePostResponse> };
+  createReport: { request: CreateReportRequest; response: ApiResponse<CreateReportResponse> };
   revokeAgentToken: { request: RevokeAgentTokenRequest; response: ApiResponse<RevokeAgentTokenResponse> };
   createAgentStation: { request: CreateAgentStationRequest; response: ApiResponse<CreateAgentStationResponse> };
   createAgentPost: { request: CreateAgentPostRequest; response: ApiResponse<CreateAgentPostResponse> };

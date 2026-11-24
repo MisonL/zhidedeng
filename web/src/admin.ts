@@ -80,6 +80,20 @@ export interface AdminPostRow {
   status: Post['status'];
 }
 
+export interface AdminReport {
+  id: string;
+  targetType: 'post' | 'station' | 'comment';
+  targetId: string;
+  reporterHandle: string;
+  reason: string;
+  detail: string | null;
+  status: 'open' | 'resolved' | 'dismissed';
+  createdAt: string;
+  handledAt: string | null;
+  targetAlive: boolean;
+  targetLabel: string;
+}
+
 export interface BatchReviewResult {
   id: string;
  /**审核后的状态：approved/rejected/superseded（被同批其他版本替代，不算失败）。只回这两个字段，不回整条记录（500条时那是295KB 的无用载荷）。 */
@@ -145,6 +159,12 @@ export const admin = {
   restorePost: (id: string) =>
     request<{ id: string; restored: true }>(`/api/admin/posts/${encodeURIComponent(id)}/restore`, { method: 'POST', body: {} }),
   listRemovedPosts: (signal?: AbortSignal) => request<{ items: RemovedPost[] }>('/api/admin/posts/removed', { signal }),
+  listReports: (status: string, signal?: AbortSignal) =>
+    request<{ items: AdminReport[] }>(`/api/admin/reports?status=${encodeURIComponent(status)}`, { signal }),
+  resolveReport: (id: string, status: 'resolved' | 'dismissed', note?: string) =>
+    request<{ id: string; status: string }>(`/api/admin/reports/${encodeURIComponent(id)}/resolve`, {
+      method: 'POST', body: { status, ...(note ? { note } : {}) },
+    }),
   listRemovedStations: (signal?: AbortSignal) => request<{ items: RemovedStation[] }>('/api/admin/stations/removed', { signal }),
   restoreStation: (slug: string) =>
     request<{ slug: string; restored: true }>(`/api/admin/stations/${encodeURIComponent(slug)}/restore`, { method: 'POST', body: {} }),

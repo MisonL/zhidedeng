@@ -1,6 +1,6 @@
 import { API_ROUTES } from '@zhidedeng/shared';
 import type {
-  ApiContracts, ApiErrorResponse, ApiRouteName, ChangePasswordRequest, CreateAgentTokenRequest, CreateCommentRequest, CreatePostRequest,
+  ApiContracts, ApiErrorResponse, ApiRouteName, ChangePasswordRequest, CreateAgentTokenRequest, CreateCommentRequest, CreatePostRequest, CreateReportRequest,
   GetModelsRequest, GetPostsRequest, GetRankingsRequest, GetStationsRequest, LoginRequest, PaginationQuery,
   PutFavoriteRequest, PutVoteRequest, RegisterRequest, SuggestModelRequest, Target, SuggestStationRequest, UpdateMeRequest
 } from '@zhidedeng/shared';
@@ -92,6 +92,7 @@ export const api = {
   createComment: (body: CreateCommentRequest) => call('createComment', { body }),
   deleteComment: (id: string) => call('deleteComment', { path: { id } }),
   deletePost: (id: string) => call('deletePost', { path: { id } }),
+  createReport: (body: CreateReportRequest) => call('createReport', { body }),
   getRankings: (query: GetRankingsRequest, signal?: AbortSignal) => call('getRankings', { query, signal }),
   getBanners: (signal?: AbortSignal) => call('getBanners', { signal }),
   search: (q: string, signal?: AbortSignal) => call('search', { query: { q }, signal }),

@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { StationDetail } from '@zhidedeng/shared';
 import { createApp, openStore } from '../src/node-app.ts';
 import { enqueueSubmission } from '../src/submissions.ts';
+import { hashPassword } from '../src/auth.ts';
 
 const TOKEN = 'verify-admin-token-0123456789abcdef';
 const admin = { 'content-type': 'application/json', authorization: `Bearer ${TOKEN}` };
@@ -333,5 +334,57 @@ describe('模型投稿的重复与中间态', () => {
     store.put('vendor', vendor.slug, vendor);
     expect((await review(id, { status: 'approved' })).status).toBe(200);
     expect(store.get('model', 'vendor-gone')?.name).toBe('名称');
+  });
+});
+
+const PASSWORD = 'correct-horse-battery';
+const json = { 'content-type': 'application/json' };
+// 站内投稿要走登录会话；直接插 accounts 行 + 会话不行（sessionHandle 查 sessions 表）。
+async function regSession(username: string) {
+  const cookie = await server.app.request('/api/auth/register', {
+    method: 'POST', headers: json, body: JSON.stringify({ username, password: PASSWORD }),
+  });
+  expect(cookie.status).toBe(200);
+  return { ...json, cookie: cookie.headers.get('set-cookie')!.split(';')[0] };
+}
+
+describe('撤下后重投（自动通过模式）', () => {
+  const setAuto = (autoApprove: boolean) => server.app.request('/api/admin/settings', {
+    method: 'POST', headers: admin, body: JSON.stringify({ autoApprove }),
+  });
+
+  it('原样重投不再返回旧 id 的幽灵：撤下的文章重投会生成新实体并重新上线', async () => {
+    const headers = await regSession('alice');
+    expect((await setAuto(true)).status).toBe(200);
+
+    const body = { kind: 'review', title: '会被撤下的文章', summary: 's', body: 'b' };
+    const first = await (await server.app.request('/api/posts', { method: 'POST', headers, body: JSON.stringify(body) })).json() as { id: string; status: string };
+    expect(first.status).toBe('approved');
+    expect((await server.app.request(`/api/posts/${first.id}`)).status).toBe(200);
+
+    // 作者撤下。
+    expect((await server.app.request(`/api/posts/${first.id}`, { method: 'DELETE', headers })).status).toBe(200);
+    expect((await server.app.request(`/api/posts/${first.id}`)).status).toBe(404);
+
+    // 原样重投：必须得到**新** id 且立即可读，而不是旧 id 的幽灵（approved 但详情 404）。
+    const second = await (await server.app.request('/api/posts', { method: 'POST', headers, body: JSON.stringify(body) })).json() as { id: string; status: string };
+    expect(second.id).not.toBe(first.id);
+    expect(second.status).toBe('approved');
+    expect((await server.app.request(`/api/posts/${second.id}`)).status).toBe(200);
+    // 旧 id 保持下架状态，不被复活。
+    expect((await server.app.request(`/api/posts/${first.id}`)).status).toBe(404);
+  });
+
+  it('未撤下时原样重投仍是幂等命中（不产生新行）', async () => {
+    const headers = await regSession('bob');
+    expect((await setAuto(true)).status).toBe(200);
+
+    const body = { kind: 'review', title: '幂等的文章', summary: 's', body: 'b' };
+    const first = await (await server.app.request('/api/posts', { method: 'POST', headers, body: JSON.stringify(body) })).json() as { id: string };
+    const second = await (await server.app.request('/api/posts', { method: 'POST', headers, body: JSON.stringify(body) })).json() as { id: string };
+    expect(second.id).toBe(first.id);
+    // 只产生一篇实体。
+    const posts = server.db.prepare("SELECT id FROM entities WHERE kind='post'").all();
+    expect(posts.filter(row => String(row.id) === first.id)).toHaveLength(1);
   });
 });

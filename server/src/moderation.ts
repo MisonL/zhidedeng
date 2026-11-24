@@ -122,3 +122,64 @@ export function setCommentHidden(store: Store, id: string, hidden: boolean) {
   store.db.prepare('UPDATE comments SET hidden = ? WHERE id = ?').run(hidden ? 1 : 0, id);
   return { id, hidden };
 }
+
+/** 举报的展示行。管理台一次看一条，同时带出被举报对象是否还在线。 */
+export interface ReportRow {
+  id: string;
+  targetType: 'post' | 'station' | 'comment';
+  targetId: string;
+  reporterHandle: string;
+  reason: string;
+  detail: string | null;
+  status: 'open' | 'resolved' | 'dismissed';
+  createdAt: string;
+  handledAt: string | null;
+  /** 被举报对象当前是否仍然可见。已下架的再处理一次没有意义。 */
+  targetAlive: boolean;
+  /** 展示用的一句摘要（文章标题/站点名/评论正文前 40 字）。 */
+  targetLabel: string;
+}
+
+export function listReports(store: Store, status: 'open' | 'resolved' | 'dismissed' = 'open') {
+  const rows = store.db.prepare(
+    'SELECT id,targetType,targetId,reporterHandle,reason,detail,status,createdAt,handledAt FROM reports WHERE status = ? ORDER BY createdAt DESC',
+  ).all(status) as unknown as Array<Omit<ReportRow, 'targetAlive' | 'targetLabel'>>;
+  const items = rows.map((row) => {
+    // 一次一条地查目标，而不是先取全量对象再匹配：举报量小，但这里要保证
+    // 「已下架/已删除」也能被认出来，所以查实体（含 removedAt）而不是公开接口。
+    let targetAlive = false;
+    let targetLabel = row.targetId;
+    if (row.targetType === 'post') {
+      const post = store.getWithRemoved('post', row.targetId);
+      targetAlive = post !== undefined && store.removedAt('post', row.targetId) === null;
+      if (post) targetLabel = post.title;
+    } else if (row.targetType === 'station') {
+      const station = store.getWithRemoved('station', row.targetId);
+      targetAlive = station !== undefined && store.removedAt('station', row.targetId) === null;
+      if (station) targetLabel = station.name;
+    } else {
+      const comment = store.db.prepare('SELECT content, hidden, deletedAt FROM comments WHERE id = ?').get(row.targetId) as
+        { content: string; hidden: number; deletedAt: string | null } | undefined;
+      targetAlive = comment !== undefined && comment.hidden === 0 && comment.deletedAt === null;
+      if (comment) targetLabel = comment.content.slice(0, 40) || '（已删除的评论）';
+    }
+    return { ...row, targetAlive, targetLabel };
+  });
+  return { items, total: items.length };
+}
+
+/**
+ * 处置一条举报：`resolved` = 已处理（内容可能已下架），`dismissed` = 看过但不认为有问题。
+ *
+ * **只改举报自身的状态，不动被举报内容。** 下架是另一个动作（withdrawPost /
+ * removeStation），需要管理员再点一次——把「有人举报」直接变成「内容下架」
+ * 等于把删帖权交给任何点按钮的人。
+ */
+export function resolveReport(store: Store, now: () => Date, id: string, status: 'resolved' | 'dismissed', note?: string) {
+  const row = store.db.prepare('SELECT status FROM reports WHERE id = ?').get(id) as { status: string } | undefined;
+  if (!row) throw new ApiError(404, 'NOT_FOUND', '举报不存在');
+  if (row.status !== 'open') throw new ApiError(409, 'ALREADY_HANDLED', '这条举报已经处理过了');
+  store.db.prepare('UPDATE reports SET status = ?, handledAt = ?, note = ? WHERE id = ?')
+    .run(status, now().toISOString(), note?.trim().slice(0, 500) ?? null, id);
+  return { id, status };
+}

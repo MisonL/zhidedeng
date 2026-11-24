@@ -3,7 +3,7 @@ import type { FormEvent } from 'react';
 import { feishuHostnameKey } from '@zhidedeng/shared';
 import type { Station, SubmissionRecord } from '@zhidedeng/shared';
 import { admin, adminToken, AdminError } from '../admin';
-import type { AdminPostRow, RemovedPost, RemovedStation } from '../admin';
+import type { AdminPostRow, AdminReport, RemovedPost, RemovedStation } from '../admin';
 import { Skeleton } from '../components/AsyncView';
 import { useCatalog } from '../state';
 
@@ -18,6 +18,7 @@ const displayTime = (iso: string) => {
 };
 
 const KIND_LABEL: Record<string, string> = { station: '站点', model: '模型', post: '文章' };
+const TARGET_LABEL: Record<string, string> = { post: '文章', station: '站点', comment: '评论' };
 const CHANNEL_LABEL: Record<string, string> = { feishu: '飞书', agent: 'Agent', web: '站内' };
 /** 常见驳回原因。Agent 通道必须给理由，点一下就填上，省得每次手打。 */
 const REJECT_PRESETS = ['报价与页面不一致', '站点无法访问', '与已有投稿重复', '内容含广告或推荐语', '字段填写有误'];
@@ -62,7 +63,7 @@ function impact(submission: SubmissionRecord, current: Station | undefined): str
   return lines;
 }
 
-type Tab = 'submissions' | 'posts' | 'published' | 'removed' | 'removedPosts';
+type Tab = 'submissions' | 'posts' | 'published' | 'removed' | 'removedPosts' | 'reports';
 
 export default function Admin() {
   const [token, setToken] = useState(adminToken.get());
@@ -73,6 +74,7 @@ export default function Admin() {
   const [removed, setRemoved] = useState<RemovedStation[]>();
   const [removedPosts, setRemovedPosts] = useState<RemovedPost[]>();
   const [published, setPublished] = useState<AdminPostRow[]>();
+  const [reports, setReports] = useState<AdminReport[]>();
   const [error, setError] = useState<string>();
   const [message, setMessage] = useState<string>();
   const [busy, setBusy] = useState(false);
@@ -83,6 +85,8 @@ export default function Admin() {
   // 共用一张 map 会让两个页签互相 prefetch 对方的输入。
   const [rejectingPost, setRejectingPost] = useState<string>();
   const [postReasons, setPostReasons] = useState<Record<string, string>>({});
+  const [openReportId, setOpenReportId] = useState<string>();
+  const [reportNotes, setReportNotes] = useState<Record<string, string>>({});
   // 理由必填错误要有就地播报，不能只写在页面顶部的通用错误里：
   // 读屏用户停在输入框上，听不到别处的错误。
   const [postReasonError, setPostReasonError] = useState<string>();
@@ -123,6 +127,10 @@ export default function Admin() {
       if (active === 'removedPosts') {
         const data = (await admin.listRemovedPosts(signal)).items;
         if (!signal?.aborted) setRemovedPosts(data);
+      }
+      if (active === 'reports') {
+        const data = (await admin.listReports('open', signal)).items;
+        if (!signal?.aborted) setReports(data);
       }
     } catch (caught) {
       if (signal?.aborted) return;
@@ -169,6 +177,8 @@ export default function Admin() {
     setReasons({});
     setPostReasons({});
     setPostReasonError(undefined);
+    setOpenReportId(undefined);
+    setReportNotes({});
   }
 
   function unlock(event: FormEvent) {
@@ -368,6 +378,7 @@ export default function Admin() {
   const pendingPosts = posts ?? [];
   const removedStations = removed ?? [];
   const withdrawnPosts = removedPosts ?? [];
+  const openReports = reports ?? [];
   const publishedPosts = published ?? [];
 
   return (
@@ -388,6 +399,9 @@ export default function Admin() {
         </button>
         <button type="button" role="tab" aria-selected={tab === 'removedPosts'} className={`btn btn-small ${tab === 'removedPosts' ? 'btn-red' : 'btn-ghost'}`} onClick={() => setTab('removedPosts')}>
           已下架文章 {removedPosts ? `(${withdrawnPosts.length})` : ''}
+        </button>
+        <button type="button" role="tab" aria-selected={tab === 'reports'} className={`btn btn-small ${tab === 'reports' ? 'btn-red' : 'btn-ghost'}`} onClick={() => setTab('reports')}>
+          举报 {reports ? `(${reports.length})` : ''}
         </button>
       </div>
       {/* 退出不是页签：它不切换内容区，放在 tablist 外面，否则读屏会把它
@@ -639,6 +653,69 @@ export default function Admin() {
                       恢复
                     </button>
                   </div>
+                </li>
+              ))}
+            </ul>
+          )
+      )}
+
+      {tab === 'reports' && (
+        reports === undefined ? <Skeleton /> : openReports.length === 0
+          ? <p className="state">没有待处理的举报</p>
+          : (
+            <ul className="card-list">
+              {openReports.map(report => (
+                <li key={report.id}>
+                  <div className="tags">
+                    <span className="tag">{TARGET_LABEL[report.targetType]}</span>
+                    <span className="tag">{report.reporterHandle}</span>
+                    <span className="hint">{displayTime(report.createdAt)}</span>
+                  </div>
+                  <p><strong>{report.reason}</strong></p>
+                  {report.detail && <p className="hint">{report.detail}</p>}
+                  <p className="hint">
+                    被举报：{report.targetId === report.targetLabel ? <code>{report.targetId}</code> : report.targetLabel}
+                    {' '}{report.targetAlive ? '' : <span className="tag tag-warn">已不在线</span>}
+                  </p>
+                  <p className="hint">
+                    {/* 处置不等于处置内容：下架要走各自的接口（下架/撤下）。 */}
+                    <button type="button" className="text-btn" onClick={() => { if (openReportId !== report.id) setOpenReportId(report.id); else setOpenReportId(undefined); }}>
+                      处理…
+                    </button>
+                  </p>
+                  {openReportId === report.id && (
+                    <div className="field">
+                      <input
+                        aria-label="处理备注（可选）" maxLength={500}
+                        value={reportNotes[report.id] ?? ''}
+                        onChange={event => setReportNotes({ ...reportNotes, [report.id]: event.target.value })}
+                      />
+                      <div className="tags">
+                        <button
+                          className="btn btn-small btn-red" disabled={busy}
+                          onClick={() => {
+                            void act(
+                              () => admin.resolveReport(report.id, 'resolved', reportNotes[report.id]?.trim() || undefined),
+                              '已标记处理',
+                            ).then((ok) => { if (ok) { setOpenReportId(undefined); } });
+                          }}
+                        >
+                          已处理
+                        </button>
+                        <button
+                          className="btn btn-small btn-ghost" disabled={busy}
+                          onClick={() => {
+                            void act(
+                              () => admin.resolveReport(report.id, 'dismissed', reportNotes[report.id]?.trim() || undefined),
+                              '已驳回举报',
+                            ).then((ok) => { if (ok) { setOpenReportId(undefined); } });
+                          }}
+                        >
+                          不成立
+                        </button>
+                      </div>
+                    </div>
+                  )}
                 </li>
               ))}
             </ul>

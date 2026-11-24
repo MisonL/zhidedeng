@@ -8,6 +8,7 @@ import { usePaged } from '../hooks';
 import { useHere, useMe, useRequireLogin } from '../state';
 import AsyncView, { Empty, LoadMore } from './AsyncView';
 import ConfirmButton from './ConfirmButton';
+import ReportButton from './ReportButton';
 import { Avatar } from './visuals';
 
 const MAX_LENGTH = 2000;
@@ -124,6 +125,9 @@ export default function Comments({ targetType, targetId }: { targetType: TargetT
                   <div className="comment-actions">
                     {!tombstoned && (
                       <button type="button" className="text-btn" onClick={() => { if (requireLogin()) setReplyTo(comment.id); }}>回复</button>
+                    )}
+                    {!tombstoned && me.data?.handle !== comment.author.handle && (
+                      <ReportButton targetType="comment" targetId={comment.id} />
                     )}
                     {!tombstoned && me.data?.handle === comment.author.handle && (
                       <ConfirmButton

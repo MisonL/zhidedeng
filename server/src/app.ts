@@ -18,7 +18,7 @@ import type { Store } from './database.ts';
 import { Service, isReservedNickname, normalizeNickname } from './service.ts';
 import { ApiError, isDatabaseBusyError } from './errors.ts';
 import { createInviteCode, listInviteCodes, revokeInviteCode } from './invite-codes.ts';
-import { listPosts, restorePost, reviewPost, setAccountDisabled, setCommentHidden, withdrawPost } from './moderation.ts';
+import { listPosts, listReports, resolveReport, restorePost, reviewPost, setAccountDisabled, setCommentHidden, withdrawPost } from './moderation.ts';
 import { autoApproveEnabled, enqueueBatch, enqueueSubmission, listSubmissions, reviewSubmission, setAutoApprove, submissionBatchReviewSchema, submissionBatchSchema, submissionQuerySchema, submissionReviewSchema, submissionState } from './submissions.ts';
 
 /**
@@ -77,6 +77,7 @@ const IMPORT_BODY_BYTES = 8 * 1024 * 1024;
 const IMPORT_PATH = '/api/admin/import';
 const SUBMISSION_BATCH_PATH = '/api/admin/submissions/batch';
 const postStatus = z.enum(['pending', 'approved', 'rejected']);
+const reportStatus = z.enum(['open', 'resolved', 'dismissed']);
 
 export interface AppOptions {
   secureCookie?: boolean;
@@ -501,6 +502,15 @@ function orderByMaterializeDependency(store: Store, ids: string[]): string[] {
     return c.json({ results });
   });
   app.get('/api/admin/posts', c => c.json(listPosts(store, postStatus.parse(c.req.query('status')))));
+  // 举报只读列表 + 人工处置。没有「一键下架」：处置内容要走对应的下架接口。
+  app.get('/api/admin/reports', c => c.json(listReports(store, reportStatus.parse(c.req.query('status') ?? 'open'))));
+  app.post('/api/admin/reports/:id/resolve', async c => {
+    const input = z.strictObject({
+      status: z.enum(['resolved', 'dismissed']),
+      note: z.string().trim().max(500).optional(),
+    }).parse(await c.req.json());
+    return c.json(resolveReport(store, now, c.req.param('id'), input.status, input.note));
+  });
   // 下架 / 恢复已发布的文章。下架是软删除，正文一直留着，误操作能直接撤回。
   app.post('/api/admin/posts/:id/withdraw', c => c.json(withdrawPost(store, c.req.param('id'), now().toISOString())));
   app.post('/api/admin/posts/:id/restore', c => c.json(restorePost(store, c.req.param('id'))));
@@ -890,6 +900,12 @@ function orderByMaterializeDependency(store: Store, ids: string[]): string[] {
   route('deleteComment', z.strictObject({ id: identifier }), (service, input) => service.deleteComment(input.id));
   // 作者撤下自己已发布的文章。软删除，管理员仍可恢复。
   route('deletePost', z.strictObject({ id: identifier }), (service, input) => service.withdrawOwnPost(input.id));
+  route('createReport', z.strictObject({
+    targetType: z.enum(['post', 'station', 'comment']),
+    targetId: identifier,
+    reason: z.string().trim().min(1).max(200),
+    detail: z.string().trim().max(500).optional(),
+  }), (service, input) => service.createReport(input));
   route('getRankings', z.strictObject({ ...pagination, tab: z.enum(['model', 'community', 'expert']) }), (service, input) => service.getRankings(input));
   route('getBanners', z.strictObject(pagination), (service, input) => service.getBanners(input));
   route('search', z.strictObject({ q: z.string().trim().max(200) }), (service, input) => service.search(input.q));

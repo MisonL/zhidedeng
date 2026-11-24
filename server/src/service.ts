@@ -1,12 +1,12 @@
 import type {
   Author, CheckInResponse, Comment, CommentReply, CreateCommentRequest,
-  CurrentUser, Favorite, FavoriteItem, GetCommentsRequest, GetModelsRequest, GetPostsRequest,
+  CreateReportRequest, CurrentUser, Favorite, FavoriteItem, GetCommentsRequest, GetModelsRequest, GetPostsRequest,
   GetRankingsRequest, GetRankingsResponse, GetStationsRequest, InteractionState, ModelDetail,
   PaginationQuery, Post, PutFavoriteRequest, PutFavoriteResponse, PutVoteRequest, PutVoteResponse,
   SearchResponse, Station, StationDetail, StationOffer, SubmissionStatus, Target, UpdateMeRequest,
   User, VendorWithModels, Vote,
 } from '@zhidedeng/shared';
-import { ApiError } from './errors.ts';
+import { ApiError, isDatabaseBusyError } from './errors.ts';
 import { INITIAL_TOKENS } from './auth.ts';
 import { Store } from './database.ts';
 import type { PostRecord, StationRecord } from './database.ts';
@@ -860,6 +860,53 @@ export class Service {
     this.store.db.prepare('INSERT INTO comments (id,userHandle,targetType,targetId,content,parentId,createdAt) VALUES (?,?,?,?,?,?,?)')
       .run(row.id, row.userHandle, row.targetType, row.targetId, row.content, row.parentId, row.createdAt);
     return row.parentId === null ? { ...this.comment(row), parentId: null, replies: [] } : { ...this.comment(row), parentId: row.parentId };
+  }
+
+  /**
+   * 举报一处内容。
+   *
+   * 这个功能只做「让人能说出来」，不做自动处置：举报零成本，自动下架等于
+   * 一次点击删一篇文章，而没有任何复核。处置入口在管理台，由人看。
+   *
+   * 三条限制是有意的：
+   * - 不能举报自己的内容（那不是举报，是撤下，走 deletePost/deleteComment）；
+   * - 不能举报看不见的对象（否则可以用它探测哪些 id 存在）；
+   * - 演示数据不能举报（虚构样例，运营侧清库，不归读者管）。
+   */
+  createReport(input: CreateReportRequest) {
+    const targetType = input.targetType;
+    if (targetType === 'post') {
+      const post = this.readablePost(input.targetId);
+      if (!post) throw new ApiError(404, 'NOT_FOUND', '内容不存在');
+      if (post.authorHandle === this.user) throw new ApiError(400, 'INVALID_INPUT', '不能举报自己发布的内容');
+    } else if (targetType === 'station') {
+      const station = this.store.get('station', input.targetId);
+      if (!station) throw new ApiError(404, 'NOT_FOUND', '内容不存在');
+      if (station.source === 'demo') throw new ApiError(400, 'INVALID_INPUT', '演示数据不需要举报');
+    } else {
+      const comment = this.store.db.prepare('SELECT userHandle FROM comments WHERE id = ? AND hidden = 0').get(input.targetId) as
+        { userHandle: string } | undefined;
+      if (!comment) throw new ApiError(404, 'NOT_FOUND', '内容不存在');
+      if (comment.userHandle === this.user) throw new ApiError(400, 'INVALID_INPUT', '不能举报自己发布的评论');
+    }
+    const reason = input.reason.trim();
+    if (!reason) throw new ApiError(400, 'INVALID_INPUT', '请选择或填写举报原因');
+    const id = crypto.randomUUID();
+    const now = this.now().toISOString();
+    try {
+      this.store.db.prepare(
+        'INSERT INTO reports (id,targetType,targetId,reporterHandle,reason,detail,status,createdAt) VALUES (?,?,?,?,?,?,?,?)',
+      ).run(id, targetType, input.targetId, this.user, reason.slice(0, 200), input.detail?.trim().slice(0, 500) ?? null, 'open', now);
+    } catch (error) {
+      // 部分唯一索引挡住重复举报。回 409 而不是静默成功：用户应该知道
+      // 「已经报过了」，而不是以为又报了一次、等着第二个处理结果。
+      if (isDatabaseBusyError(error)) throw error;
+      if (String((error as Error).message).includes('UNIQUE')) {
+        throw new ApiError(409, 'ALREADY_REPORTED', '你已经举报过这条内容，我们会在处理时一并看到');
+      }
+      throw error;
+    }
+    return { id, status: 'open' as const };
   }
 
   /**
