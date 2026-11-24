@@ -15,7 +15,8 @@ const GROUPS: { title: string; routes: Partial<Record<ApiRouteName, { summary: s
     title: '当前用户（需登录，未登录返回 401 UNAUTHENTICATED）',
     routes: {
       getMe: { summary: '当前账号，含 Token、签到状态、连续天数、收藏数和分享数' },
-      updateMe: { summary: '修改资料', params: 'body: nickname?, bio?' },
+      updateMe: { summary: '修改资料', params: 'body: nickname?, bio?, avatar?（预设 emoji，空串回到默认）' },
+      deletePost: { summary: '作者撤下自己已发布的文章（软删除，恢复需联系管理员）', params: 'path: id' },
       checkIn: { summary: '每日签到，当天重复调用返回 409 ALREADY_CHECKED_IN' },
       getMyFavorites: { summary: '我的收藏', params: 'query: page, pageSize' },
       getMyPosts: { summary: '我的分享', params: 'query: page, pageSize' },
@@ -62,6 +63,8 @@ const GROUPS: { title: string; routes: Partial<Record<ApiRouteName, { summary: s
       putFavorite: { summary: '收藏或取消收藏', params: 'body: targetType, targetId, favorited' },
       getComments: { summary: '评论列表，回复在 replies 内', params: 'query: targetType, targetId, page, pageSize' },
       createComment: { summary: '发表评论或一层回复，登录后发布即公开，有频率限制', params: 'body: targetType, targetId, content（1~2000 字）, parentId?' },
+      deleteComment: { summary: '作者删除自己的评论。有人回复时保留「该评论已删除」占位，回复不跟着消失', params: 'path: id' },
+      createReport: { summary: '举报文章/站点/评论，进人工队列；不会自动下架，同一对象未处理时重复举报返回 409 ALREADY_REPORTED', params: 'body: targetType=post|station|comment, targetId, reason（1~200 字）, detail?' },
     },
   },
   {
