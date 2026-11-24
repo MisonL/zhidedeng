@@ -5,7 +5,9 @@ import Markdown from '../src/components/Markdown';
 import { makePost, page, station, vendors } from './fixtures';
 import { apiError, callsTo, renderApp, renderWithProviders, stubApi } from './helpers';
 
-const DISCLAIMER = '当前为演示数据，不构成消费建议';
+// 演示来源现在有统一的来源标签（sourceLabel 的 demo 分支），
+// 站点详情里那句提示是「标签 + 不构成消费建议」，不再走单独的兜底常量。
+const DEMO_NOTICE = '演示数据，虚构样例';
 
 describe('数据诚信声明', () => {
   it('全站页脚常驻，站点详情顶部也显示', async () => {
@@ -18,7 +20,8 @@ describe('数据诚信声明', () => {
 
     expect(within(screen.getByRole('contentinfo')).getByText(/不构成消费建议/)).toBeInTheDocument();
     expect(await screen.findByRole('heading', { name: '云栈' })).toBeInTheDocument();
-    expect(within(screen.getByRole('main')).getByText(new RegExp(DISCLAIMER))).toBeInTheDocument();
+    // 页脚声明里也有「演示数据」四个字，所以按 note 角色定位顶部那条提示。
+    expect(await within(screen.getByRole('main')).findByRole('note')).toHaveTextContent(DEMO_NOTICE);
     expect(screen.getByText('0.6x')).toBeInTheDocument();
   });
 
@@ -267,4 +270,40 @@ describe('补录模型', () => {
     expect(notice.textContent).toContain('演示数据');
   });
 
+});
+
+describe('投稿后的落点', () => {
+  it('补录模型后落到「我的投稿」，那里才有这条记录', async () => {
+    // 原来跳 /me?tab=posts（我的分享），而模型补录的结果在「我的投稿」里。
+    // 用户会落到「还没有分享」并以为提交失败，然后重复投一遍。
+    stubApi({
+      'POST /api/models/suggest': { id: 'sub-1', slug: 'claude-x', status: 'pending', deduplicated: false },
+      'GET /api/me/submissions': page([]),
+    });
+    renderApp('/submit?kind=model');
+    // 厂商下拉的选项来自目录接口。目录没回来时 <select> 里没有这一项，
+    // 设值会被浏览器归一成空串（HTMLSelectElement.value 对不存在的 option 返回 ''），
+    // 于是提交被自己的必填校验挡住——这条等待不是装饰。
+    await screen.findByRole('option', { name: 'OpenAI' });
+    fireEvent.change(screen.getByLabelText('模型 slug'), { target: { value: 'claude-x' } });
+    fireEvent.change(screen.getByLabelText('厂商'), { target: { value: 'openai' } });
+    fireEvent.change(screen.getByLabelText('模型名称'), { target: { value: 'Claude X' } });
+    fireEvent.change(screen.getByLabelText('一句话说明'), { target: { value: '说明' } });
+    fireEvent.click(screen.getByRole('button', { name: '提交审核' }));
+
+    expect(await screen.findByRole('tab', { name: '我的投稿' })).toHaveAttribute('aria-selected', 'true');
+  });
+
+  it('推荐中转站后也落到「我的投稿」，不落到「我的分享」', async () => {
+    stubApi({
+      'POST /api/stations/suggest': { slug: 'new-station', status: 'pending', deduplicated: false, submissionId: 'sub-2' },
+      'GET /api/me/submissions': page([]),
+    });
+    renderApp('/submit?kind=station');
+    fireEvent.change(screen.getByLabelText('站点名称'), { target: { value: '新中转站' } });
+    fireEvent.change(screen.getByLabelText('网址'), { target: { value: 'https://new.example.com' } });
+    fireEvent.click(screen.getByRole('button', { name: '提交审核' }));
+
+    expect(await screen.findByRole('tab', { name: '我的投稿' })).toHaveAttribute('aria-selected', 'true');
+  });
 });

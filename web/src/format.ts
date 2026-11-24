@@ -4,9 +4,9 @@ export const KIND_LABEL: Record<PostKind, string> = {
   deal: '爆料', review: '评测', community: '社区', guide: '指南',
 };
 
-export const DISCLAIMER = '当前为演示数据，不构成消费建议';
 export const SUBMISSION_LABEL = '群友提交，未经平台核实';
 export const AGENT_LABEL = 'AI 采集，未经平台核实';
+export const DEMO_LABEL = '演示数据，虚构样例';
 /**
  * 页脚总声明。三种来源必须各自点名：
  * - demo：种子数据，但界面上会和真实内容混在一起；
@@ -15,9 +15,32 @@ export const AGENT_LABEL = 'AI 采集，未经平台核实';
  * 少写 agent 一类时，页脚只说「演示数据」和「群友提交」，读者会把 AI 采集的内容
  * 当成这两者之一——而它是程序写的，性质既不是演示也不是人工提交。
  */
-export const SITE_NOTICE = '带「虚构」字样的站点与内容是演示数据；标注「群友提交」的内容来自群友表单、标注「AI 采集」的内容来自 AI Agent 提交，两类均为用户或程序提供、未经平台核实。以上均不构成消费建议';
+export const SITE_NOTICE = '标注「演示数据」的站点与内容是虚构样例；标注「群友提交」的内容来自群友表单、标注「AI 采集」的内容来自 AI Agent 提交，两类均为用户或程序提供、未经平台核实。以上均不构成消费建议';
 
+/**
+ * 正文按纯文本显示（不走 Markdown）的来源。
+ *
+ * 判据是「这段正文由外部程序或第三方表单写入，我们不知道里面写了什么」：
+ * submission 来自飞书表单、agent 来自公开接口。user 是登录用户在站内写的，
+ * demo 是我们自己写的种子内容——这两类照常渲染 Markdown。
+ *
+ * 以前这里直接用 `sourceLabel(x) !== null` 兼职做判断，demo 一旦有了标签就被
+ * 误归到「不可信」里。标签是给读者看的，信任判定是给渲染器用的，两件事。
+ */
+export function isUntrustedSource(source: ContentSource | 'user' | undefined): boolean {
+  return source === 'submission' || source === 'agent';
+}
+
+/**
+ * 来源标签。**demo 也要给标签**。
+ *
+ * 原先这里对 demo 返回 null，注释里说「演示数据靠名称里的『虚构』二字区分」。
+ * 那个约定只在种子数据里成立：卡片、详情页、对比表、将来的 sitemap 都只管
+ * 调 sourceLabel，拿不到标签就等于「和真实内容长得一样」。
+ * 一旦这些入口增多，漏标记只是时间问题。
+ */
 export function sourceLabel(source: ContentSource | 'user' | undefined): string | null {
+  if (source === 'demo') return DEMO_LABEL;
   if (source === 'submission') return SUBMISSION_LABEL;
   if (source === 'agent') return AGENT_LABEL;
   return null;

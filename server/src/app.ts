@@ -539,7 +539,16 @@ function orderByMaterializeDependency(store: Store, ids: string[]): string[] {
       // 不加这层的话，分享链接带上 utm_source、监控面板带上 _t 这类无关参数就会
       // 被 strictObject 拒成 400，而调用方完全看不出是自己多带了一个参数；
       // `?vendor=` 这种空值同理（前端靠过滤空值绕过去了，外部调用方不会）。
-      const raw: unknown = method === 'GET' ? normalizeQuery(schema, { ...c.req.query(), ...c.req.param() }) : JSON.parse(body || '{}');
+      //
+      // 非 GET 的 path 参数要单独合并进来：原来这里只 `JSON.parse(body)`，
+      // 所以 DELETE /api/posts/:id 这类路由的 handler 根本拿不到 id，
+      // 而 handler 签名里没有 `c`，也没法自己读。此前 39 条路由里恰好
+      // 没有一条「非 GET + path 参数」的，这个洞才一直没暴露。
+      // 语义有冲突时以 body 为准（body 是显式提交的内容，path 是定位信息）。
+      const pathParams = c.req.param();
+      const raw: unknown = method === 'GET'
+        ? normalizeQuery(schema, { ...c.req.query(), ...pathParams })
+        : { ...pathParams, ...JSON.parse(body || '{}') };
  //公开读接口的响应体含登录态（currentUserVote/favorited），是按 Cookie变体的：
  //不下 no-store的话，前面一旦加 CDN/代理缓存，A用户的投票状态会被发给 B用户。
  c.header('cache-control', 'no-store');

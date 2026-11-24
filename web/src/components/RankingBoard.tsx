@@ -91,6 +91,21 @@ export default function RankingBoard({ tab: controlled, onTabChange, pageSize = 
       <AsyncView
         state={state}
         skeleton={<ol className="rank-grid " aria-busy="true">{Array.from({ length: 6 }, (_, index) => <li key={index} className="rank-placeholder" />)}</ol>}
+        // 空库时这里原来渲染一个空的 .rank-grid——首页最显眼的模块是个白块，
+        // 看起来像坏了。榜单没有数据是正常状态（真实内容还没起来），
+        // 所以给一句话说清「为什么空」和「能做什么」。
+        // 返回的是 {items,total,tab} 而不是数组，默认的空态判定（看数组长度）不生效，
+        // 必须显式给 isEmpty，否则空库时那段文案永远不出现。
+        isEmpty={(data) => data.items.length === 0}
+        empty={(
+          <p className="state">
+            {tab === 'model'
+              ? <>还没有站点报出可比的报价，模型榜暂时为空。 <Link to="/submit?kind=station">推荐一个站</Link></>
+              : tab === 'community'
+                ? <>还没有被投票的文章，社区榜暂时为空。 <Link to="/community">去社区看看</Link></>
+                : <>还没有人分享过内容，达人榜暂时为空。 <Link to="/submit">去写第一篇</Link></>}
+          </p>
+        )}
       >
         {(data) => <ol className="rank-grid"><RankCards data={data} /></ol>}
       </AsyncView>

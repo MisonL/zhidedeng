@@ -163,9 +163,7 @@ function importCatalog(store: Store, input: CatalogImportRequest): CatalogImport
       // 已下架的行走不到，于是这份 put 会把标记清掉、文章原样回来——下架等于白做。
       // 走 submissions 队列的那条物化路径有同样的守卫（见 submissions.ts 的 materialize），
       // 两条路都得拦住，否则换个入口就能绕过。
-      const withdrawn = store.db.prepare("SELECT removedAt FROM entities WHERE kind = 'post' AND id = ?").get(id) as
-        { removedAt: string | null } | undefined;
-      if (withdrawn?.removedAt != null) continue;
+      if (store.postRemovedAt(id) !== null) continue;
       store.put('post', id, { ...post, id, kind: 'review', authorHandle: 'feishu-submission', authorNickname: authorName, modelSlug: null, cover: null, source: 'submission', status: 'approved' });
     }
     return { changed: unknown.length > 0 || submissionFingerprint(store) !== before, stations: stations.length, offers: offers.length, posts: input.posts.length, createdModels: unknown.sort() };

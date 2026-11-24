@@ -809,9 +809,7 @@ function materialize(store: Store, submission: SubmissionRecord, reviewedAt: str
     // 人再点一次「通过」，所以必须显式拦住，让人走恢复接口。
     // 返回原因即表示「本条没有产生新版本」，调用方据此不清理旧的下架请求。
     // removedAt 是独立列，不在 PostRecord 里（业务层不该看见它），所以单查一次。
-    const withdrawn = store.db.prepare("SELECT removedAt FROM entities WHERE kind = 'post' AND id = ?").get(postId) as
-      { removedAt: string | null } | undefined;
-    if (withdrawn?.removedAt != null) return '此前已被下架，本次同步跳过';
+    if (store.postRemovedAt(postId) !== null) return '此前已被下架，本次同步跳过';
     store.put('post', postId, {
       id: postId, kind: 'review', title: payload.title, summary: payload.summary, body: payload.body,
       authorHandle: payload.authorHandle ?? 'anonymous-submission', authorNickname: payload.authorName,

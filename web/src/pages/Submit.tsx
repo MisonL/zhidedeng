@@ -67,7 +67,9 @@ export default function Submit() {
         await api.suggestModel(fields);
         me.refreshMe();
         toast('已提交，审核通过后进入模型库');
-        navigate('/me?tab=posts');
+        // 模型补录的进度在「我的投稿」（getMySubmissions），不在「我的分享」。
+        // 跳到 posts 会落到「还没有分享」，用户以为提交失败而重复投一遍。
+        navigate('/me?tab=submissions');
       } catch (error) {
         setServerError((error as Error).message);
         setSubmitting(false);
@@ -107,7 +109,8 @@ export default function Submit() {
         });
         me.refreshMe();
         toast('已提交，审核通过后进入中转站库');
-        navigate('/me?tab=posts');
+        // 同上：站点推荐也在「我的投稿」里。
+        navigate('/me?tab=submissions');
       } catch (error) {
         setServerError((error as Error).message);
         setSubmitting(false);

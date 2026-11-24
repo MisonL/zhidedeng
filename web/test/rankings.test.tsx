@@ -25,6 +25,25 @@ describe('排行榜', () => {
     expect(screen.getByRole('link', { name: /查看更多/ })).toHaveAttribute('href', '/rank?tab=expert');
   });
 
+  it('榜单为空时给出说明与下一步，而不是一个白块', async () => {
+    // 空库时原来渲染的是空的 .rank-grid：首页最显眼的模块是一片空白，
+    // 看起来像页面坏了。返回体是 {items,total,tab} 而不是数组，
+    // 所以 AsyncView 的默认空态判定根本不生效，必须显式传 isEmpty。
+    const empty = (tab: 'model' | 'community' | 'expert') => ({ total: 0, page: 1, pageSize: 6, tab, items: [] });
+    stubApi({
+      'GET /api/rankings': ({ url }: { url: URL }) => empty(url.searchParams.get('tab') as 'model'),
+    });
+    renderWithProviders(<RankingBoard />);
+    expect(await screen.findByText(/模型榜暂时为空/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('tab', { name: '社区' }));
+    expect(await screen.findByText(/社区榜暂时为空/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('tab', { name: '达人' }));
+    expect(await screen.findByText(/达人榜暂时为空/)).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: '去写第一篇' })).toHaveAttribute('href', '/submit');
+  });
+
   it('取数失败显示错误，可重试', async () => {
     let attempts = 0;
     stubApi({ 'GET /api/rankings': () => (++attempts === 1 ? apiError(500, 'INTERNAL', '榜单异常') : rankings('model')) });

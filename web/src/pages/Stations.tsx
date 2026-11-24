@@ -10,7 +10,7 @@ import PostCard from '../components/PostCard';
 import StationCard from '../components/StationCard';
 import { StationTile } from '../components/visuals';
 import VoteButtons from '../components/VoteButtons';
-import { DISCLAIMER, formatLatency, formatQuotedAt, formatRate, formatRateBasis, formatStatus, formatUptime, NOT_AVAILABLE, SITE_NOTICE, sourceLabel } from '../format';
+import { formatLatency, formatQuotedAt, formatRate, formatRateBasis, formatStatus, formatUptime, NOT_AVAILABLE, SITE_NOTICE, sourceLabel } from '../format';
 import { useAsync, usePaged } from '../hooks';
 import { useCatalog } from '../state';
 
@@ -80,9 +80,10 @@ export function StationDetailPage() {
   const state = useAsync((signal) => api.getStation(slug, signal), [slug]);
   const posts = useAsync((signal) => api.getPosts({ station: slug, pageSize: 5 }, signal), [slug]);
   const { vendorBySlug } = useCatalog();
+  // 四种来源现在都能拿到标签（demo 也有），只剩 user 与「字段缺失」两种要兜底。
+  // 后者按 user 处理：服务端读出来时 source 缺省就是 'user'，能走到这里说明是老数据。
   const label = sourceLabel(state.data?.source);
-  const notice = label ? `${label}，不构成消费建议`
-    : state.data?.source === 'user' ? '用户投稿，未经平台核实，不构成消费建议' : DISCLAIMER;
+  const notice = label ? `${label}，不构成消费建议` : '用户投稿，未经平台核实，不构成消费建议';
 
   return (
     <>

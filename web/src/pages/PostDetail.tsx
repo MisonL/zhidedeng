@@ -6,7 +6,7 @@ import FavoriteButton from '../components/FavoriteButton';
 import Markdown from '../components/Markdown';
 import { Avatar } from '../components/visuals';
 import VoteButtons from '../components/VoteButtons';
-import { formatDate, formatRate, KIND_LABEL, sourceLabel } from '../format';
+import { formatDate, formatRate, isUntrustedSource, KIND_LABEL, sourceLabel } from '../format';
 import { useAsync } from '../hooks';
 import { useCatalog } from '../state';
 
@@ -46,7 +46,7 @@ export default function PostDetail() {
                   </p>
                 </header>
                 <p className="article-summary">{post.summary}</p>
-                {sourceLabel(post.source)
+                {isUntrustedSource(post.source)
                   ? <p className="article-plain">{post.body}</p>
                   : <Markdown>{post.body}</Markdown>}
                 <footer className="article-foot">

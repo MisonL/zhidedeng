@@ -44,7 +44,8 @@ describe('群友提交的内容要标明来源', () => {
   it('演示站点详情不显示外链行，声明仍是演示数据', async () => {
     stubApi({ 'GET /api/stations/yunzhan': { ...station, offers: [] }, 'GET /api/posts': page([]) });
     renderApp('/stations/yunzhan');
-    expect(await within(screen.getByRole('main')).findByRole('note')).toHaveTextContent('当前为演示数据');
+    // 演示来源现在有统一标签（sourceLabel 的 demo 分支），不再靠 name 里的「虚构」二字区分。
+    expect(await within(screen.getByRole('main')).findByRole('note')).toHaveTextContent('演示数据，虚构样例');
     expect(screen.queryByText('站点网址')).not.toBeInTheDocument();
   });
 
@@ -69,7 +70,7 @@ describe('群友提交的内容要标明来源', () => {
     stubApi();
     renderApp('/');
     const footer = within(screen.getByRole('contentinfo'));
-    expect(footer.getByText(/虚构.*演示数据.*群友提交.*未经平台核实.*不构成消费建议/)).toBeInTheDocument();
+    expect(footer.getByText(/演示数据.*群友提交.*未经平台核实.*不构成消费建议/)).toBeInTheDocument();
     await screen.findAllByText('云栈');
   });
 });
@@ -164,5 +165,30 @@ describe('没有测量数据时显示暂无', () => {
     renderApp('/models/gpt-5');
     const row = (await screen.findByRole('link', { name: '群友站' })).closest('tr')!;
     expect(within(row).getAllByText('暂无')).toHaveLength(3);
+  });
+});
+
+describe('演示来源也有标签', () => {
+  it('演示站点卡片带「演示数据」标签，不再只靠名称里的「虚构」二字', () => {
+    // 原先 sourceLabel 对 demo 返回 null，注释说靠名称里的「虚构」区分。
+    // 那个约定只在种子数据的命名里成立：任何新入口（对比表、sitemap、导出）
+    // 只要忘了拼「虚构」二字，虚构内容就和真实内容长得一样。
+    renderWithProviders(<StationCard station={{ ...station, name: '某个中转站' }} />);
+    expect(screen.getByText('演示数据，虚构样例')).toBeInTheDocument();
+  });
+
+  it('演示文章卡片同样带标签', () => {
+    renderWithProviders(<PostCard post={makePost('demo-post-1')} />);
+    expect(screen.getByText('演示数据，虚构样例')).toBeInTheDocument();
+  });
+
+  it('演示正文仍按 Markdown 渲染，不因为有了标签就退化成纯文本', () => {
+    // 标签是给读者看的，信任判定是给渲染器用的。混成一个函数时，
+    // demo 一拿到标签就被误判成「不可信内容」，标题会变成纯文本。
+    stubApi({ 'GET /api/posts/p2': makePost('p2', { source: 'demo', body: '# 演示标题' }) });
+    renderApp('/posts/p2');
+    return screen.findByRole('heading', { name: '演示标题' }).then((heading) => {
+      expect(heading).toBeInTheDocument();
+    });
   });
 });
