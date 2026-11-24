@@ -1,10 +1,14 @@
 import { fireEvent, screen, waitFor, within } from '@testing-library/react';
+import { useState } from 'react';
+import { MemoryRouter } from 'react-router';
+import { Providers } from '../src/state';
 import type { StationDetail } from '@zhidedeng/shared';
 import { describe, expect, it } from 'vitest';
 import Comments from '../src/components/Comments';
 import Markdown from '../src/components/Markdown';
 import { makePost, page, station, vendors } from './fixtures';
 import { apiError, callsTo, renderApp, renderWithProviders, stubApi } from './helpers';
+import { me } from './fixtures';
 
 // 演示来源现在有统一的来源标签（sourceLabel 的 demo 分支），
 // 站点详情里那句提示是「标签 + 不构成消费建议」，不再走单独的兜底常量。
@@ -341,7 +345,7 @@ describe('评论自删', () => {
     // 只点一次不会发请求：必须再点「删除」确认。
     expect(callsTo(fetchMock, 'DELETE', '/api/comments/c-mine')).toHaveLength(0);
     expect(screen.getByText(/删除后无法恢复/)).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: '删除' }));
+    fireEvent.click(screen.getByRole('button', { name: '确认删除' }));
     await waitFor(() => expect(callsTo(fetchMock, 'DELETE', '/api/comments/c-mine')).toHaveLength(1));
     await waitFor(() => expect(screen.queryByText('要被删掉的话')).not.toBeInTheDocument());
   });
@@ -397,9 +401,105 @@ describe('预设头像', () => {
     });
     renderApp('/me?tab=settings');
     // 当前是默认（空），选中 🦊 后保存。
-    fireEvent.click(await screen.findByRole('radio', { name: /🦊/ }));
+    fireEvent.click(await screen.findByRole('button', { name: /🦊/ }));
     fireEvent.click(screen.getByRole('button', { name: '保存' }));
     await waitFor(() => expect(callsTo(fetchMock, 'PATCH', '/api/me')[0].body).toMatchObject({ avatar: '🦊' }));
     expect(await screen.findByText('已保存')).toBeInTheDocument();
+  });
+});
+
+describe('删除与头像的回归（审查修复）', () => {
+  it('删回复会真的从列表消失，而不是只请求成功', async () => {
+    const mine = { handle: 'demo-pedal', nickname: '我自己', avatar: '' };
+    const fetchMock = stubApi({
+      'GET /api/comments': page([{
+        id: 'c1', targetType: 'post', targetId: 'p1', author: mine, content: '父评论',
+        parentId: null, createdAt: '2026-11-03T08:00:00.000Z',
+        replies: [{ id: 'r1', targetType: 'post', targetId: 'p1', author: mine, content: '我的回复', parentId: 'c1', createdAt: '2026-11-03T09:00:00.000Z' }],
+      }]),
+      'DELETE /api/comments/r1': { id: 'r1', deleted: 'removed' },
+    });
+    renderWithProviders(<Comments targetType="post" targetId="p1" />);
+    expect(await screen.findByText('我的回复')).toBeInTheDocument();
+    // 父评论与回复各有一个「删除」，回复的是第二个。
+    fireEvent.click(screen.getAllByRole('button', { name: '删除' })[1]);
+    fireEvent.click(await screen.findByRole('button', { name: '确认删除' }));
+    await waitFor(() => expect(callsTo(fetchMock, 'DELETE', '/api/comments/r1')).toHaveLength(1));
+    await waitFor(() => expect(screen.queryByText('我的回复')).not.toBeInTheDocument());
+    // 父评论还在。
+    expect(screen.getByText('父评论')).toBeInTheDocument();
+  });
+
+  it('删除失败时说清原因，而不是静默当作删掉了', async () => {
+    const mine = { handle: 'demo-pedal', nickname: '我自己', avatar: '' };
+    stubApi({
+      'GET /api/comments': page([{
+        id: 'c1', targetType: 'post', targetId: 'p1', author: mine, content: '删不掉的评论',
+        parentId: null, createdAt: '2026-11-03T08:00:00.000Z', replies: [],
+      }]),
+      'DELETE /api/comments/c1': apiError(404, 'NOT_FOUND', '评论不存在'),
+    });
+    renderWithProviders(<Comments targetType="post" targetId="p1" />);
+    fireEvent.click(await screen.findByRole('button', { name: '删除' }));
+    fireEvent.click(await screen.findByRole('button', { name: '确认删除' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('评论不存在');
+    // 失败的评论不能从列表消失（否则用户以为删掉了，刷新又回来）。
+    expect(screen.getByText('删不掉的评论')).toBeInTheDocument();
+  });
+
+  it('切到另一篇文章时不带着上一页的本地状态', async () => {
+    const mine = { handle: 'demo-pedal', nickname: '我自己', avatar: '' };
+    stubApi({
+      'GET /api/comments': ({ url }: { url: URL }) => page(url.searchParams.get('targetId') === 'p1'
+        ? [{ id: 'c1', targetType: 'post', targetId: 'p1', author: mine, content: 'p1 的评论', parentId: null, createdAt: '2026-11-03T08:00:00.000Z', replies: [] }]
+        : [{ id: 'c2', targetType: 'post', targetId: 'p2', author: mine, content: 'p2 的评论', parentId: null, createdAt: '2026-11-03T09:00:00.000Z', replies: [] }]),
+      'POST /api/comments': { id: 'local-new', targetType: 'post', targetId: 'p1', author: mine, content: 'p1 新写的', parentId: null, createdAt: '2026-11-03T10:00:00.000Z', replies: [] },
+    });
+    // 真实路由里换文章时，PostDetail/Comments **不会卸载**，只是 props 变了
+    // （同一个 route 元素，id 参数不同）。所以这里必须保住同一个 Router 实例，
+    // 用组件内部状态切换 targetId，才测得到「没重置」这个 bug。
+    function Harness() {
+      const [target, setTarget] = useState('p1');
+      return (
+        <>
+          <button type="button" onClick={() => setTarget('p2')}>换一篇</button>
+          <Comments targetType="post" targetId={target} />
+        </>
+      );
+    }
+    renderWithProviders(<Harness />);
+    expect(await screen.findByText('p1 的评论')).toBeInTheDocument();
+    // 在 p1 发一条评论（本地 added 列表），它不属于 p2。
+    fireEvent.change(screen.getByLabelText('写评论'), { target: { value: 'p1 新写的' } });
+    fireEvent.click(screen.getByRole('button', { name: '发表评论' }));
+    expect(await screen.findByText('p1 新写的')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '换一篇' }));
+    expect(await screen.findByText('p2 的评论')).toBeInTheDocument();
+    // 本地新增的评论不能跟着串到另一篇下面。
+    expect(screen.queryByText('p1 新写的')).not.toBeInTheDocument();
+  });
+
+  it('还有后续页时，物理删一条会重取，避免「加载更多」漏掉补位的那条', async () => {
+    const mine = { handle: 'demo-pedal', nickname: '我自己', avatar: '' };
+    const fetchMock = stubApi({
+      // total 25 但第一页只给 1 条 → hasMore 为 true。
+      'GET /api/comments': { items: [{ id: 'c1', targetType: 'post', targetId: 'p1', author: mine, content: '会被删的', parentId: null, createdAt: '2026-11-03T08:00:00.000Z', replies: [] }], total: 25, page: 1, pageSize: 20 },
+      'DELETE /api/comments/c1': { id: 'c1', deleted: 'removed' },
+    });
+    renderWithProviders(<Comments targetType="post" targetId="p1" />);
+    fireEvent.click(await screen.findByRole('button', { name: '删除' }));
+    fireEvent.click(await screen.findByRole('button', { name: '确认删除' }));
+    await waitFor(() => expect(callsTo(fetchMock, 'GET', '/api/comments')).toHaveLength(2));
+  });
+
+  it('头像设置后真的渲染出预设图案，而不只是存了个字段', async () => {
+    const withAvatar = { ...me, avatar: '🦊' };
+    stubApi({ 'GET /api/me': withAvatar });
+    renderApp('/me?tab=settings');
+    // 个人中心页头的头像（Avatar 组件）必须画出预设图案。只看「页面上出现过 🦊」
+    // 会被选择器里的选项按钮骗过——那些 emoji 是候选，不是当前头像。
+    await screen.findByRole('heading', { name: me.nickname });
+    const avatar = document.querySelector('.avatar-preset-fill');
+    expect(avatar?.textContent).toBe('🦊');
   });
 });

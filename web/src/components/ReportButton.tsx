@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { api } from '../api';
-import { useRequireLogin, useMe } from '../state';
+import { useMe } from '../state';
 
 /** 常见举报原因。点一下填上，也可以自己写。 */
 const REASONS = ['内容不实或夸大', '含广告或推广', '人身攻击或辱骂', '泄露他人隐私', '其他违规内容'];
@@ -16,7 +16,6 @@ const REASONS = ['内容不实或夸大', '含广告或推广', '人身攻击或
  */
 export default function ReportButton({ targetType, targetId }: { targetType: 'post' | 'station' | 'comment'; targetId: string }) {
   const me = useMe();
-  const requireLogin = useRequireLogin();
   const [open, setOpen] = useState(false);
   const [reason, setReason] = useState('');
   const [detail, setDetail] = useState('');
@@ -29,11 +28,8 @@ export default function ReportButton({ targetType, targetId }: { targetType: 'po
   if (done) return <span className="hint">已举报，等待处理</span>;
 
   if (!open) {
-    return (
-      <button type="button" className="text-btn" onClick={() => { if (requireLogin()) setOpen(true); }}>
-        举报
-      </button>
-    );
+    // 上面已经因未登录返回 null，这里不需要再问一次登录态。
+    return <button type="button" className="text-btn" onClick={() => setOpen(true)}>举报</button>;
   }
 
   async function submit() {

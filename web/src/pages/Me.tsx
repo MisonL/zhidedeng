@@ -8,7 +8,7 @@ import AsyncView, { Empty, LoadMore, Skeleton } from '../components/AsyncView';
 import ConfirmButton from '../components/ConfirmButton';
 import PostCard from '../components/PostCard';
 import StationCard from '../components/StationCard';
-import { Avatar } from '../components/visuals';
+import { Avatar, AvatarPresetGlyph } from '../components/visuals';
 import { AVATAR_PRESETS } from '@zhidedeng/shared';
 import { loginPath } from '../format';
 import { usePaged } from '../hooks';
@@ -162,7 +162,7 @@ function Settings({ user }: { user: CurrentUser }) {
     setSaving(true);
     setMessage(undefined);
     try {
-      setMe(await api.updateMe({ nickname: nickname.trim(), bio: bio.trim(), ...(avatar ? { avatar } : { avatar: '' }) }));
+      setMe(await api.updateMe({ nickname: nickname.trim(), bio: bio.trim(), avatar }));
       setMessage({ ok: true, text: '已保存' });
     } catch (error) {
       setMessage({ ok: false, text: (error as Error).message });
@@ -183,21 +183,24 @@ function Settings({ user }: { user: CurrentUser }) {
       </div>
       <fieldset className="field">
         <legend className="field-label">头像</legend>
-        <div className="avatar-picker" role="radiogroup" aria-label="选择预设头像">
+        {/* 用「一组开关按钮」而不是 radiogroup：radiogroup 要求方向键导航
+            （roving tabindex），只给 role 不给键盘行为反而误导读屏用户。
+            这里每个按钮都能 Tab 到、Enter/Space 切换，语义完整。 */}
+        <div className="avatar-picker" role="group" aria-label="选择预设头像">
           <button
-            type="button" role="radio" aria-checked={avatar === ''}
+            type="button" aria-pressed={avatar === ''}
             className={`avatar-option ${avatar === '' ? 'selected' : ''}`}
             onClick={() => setAvatar('')}
           >
-            <Avatar nickname={nickname} /> <span>默认</span>
+            <Avatar nickname={nickname} avatar={avatar || undefined} /> <span>默认</span>
           </button>
           {AVATAR_PRESETS.map((preset) => (
             <button
-              key={preset} type="button" role="radio" aria-checked={avatar === preset}
+              key={preset} type="button" aria-pressed={avatar === preset}
               className={`avatar-option ${avatar === preset ? 'selected' : ''}`}
               onClick={() => setAvatar(preset)}
             >
-              <span className="avatar-preset" aria-hidden="true">{preset}</span> <span>{preset}</span>
+              <AvatarPresetGlyph preset={preset} /> <span>{preset}</span>
             </button>
           ))}
         </div>
@@ -271,7 +274,7 @@ export default function Me() {
         {(user) => (user === null ? <Empty title="登录后查看个人中心" action={{ to: loginPath(here), label: '登录' }} /> : (
           <>
             <header className="page-head me-head">
-              <Avatar nickname={user.nickname} size={64} />
+              <Avatar nickname={user.nickname} avatar={user.avatar} size={64} />
               <div className="me-head-main">
                 <h1 className="page-title">{user.nickname}</h1>
                 <p className="page-sub">{user.bio || '这个人还没有写简介'}</p>

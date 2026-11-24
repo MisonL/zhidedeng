@@ -133,6 +133,11 @@ textarea { display: block; resize: vertical; line-height: 1.6; }
 /* 删除后用墓碑提示取代正文：空心字色，不要让人误以为加载失败。 */
 .comment-deleted { color: var(--text-3); font-style: italic; }
 .comment-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-top: 4px; }
+/* 举报表单：整块占满一行，否则在 flex 的 article-foot 里被挤成一条细缝。 */
+.report-box { flex-basis: 100%; margin-top: 8px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-warm); display: grid; gap: 8px; }
+.report-box input, .report-box textarea { width: 100%; }
+.station-report { margin-top: 8px; }
+
 /* 统一的二次确认：展开后原地换成追问 + 两个按钮，不弹窗、不遮挡内容。 */
 .confirm-inline { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .confirm-ask { color: var(--text-2); font-size: 13px; }

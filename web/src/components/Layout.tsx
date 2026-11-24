@@ -4,6 +4,7 @@ import { Link, NavLink, Outlet, useLocation, useNavigate, useSearchParams } from
 import { api } from '../api';
 import { loginPath, SITE_NOTICE } from '../format';
 import { useAsync } from '../hooks';
+import { Avatar } from './visuals';
 import { useHere, useMe, useToast } from '../state';
 import Icon from './Icon';
 
@@ -73,7 +74,7 @@ function ShareMenu() {
   );
 }
 
-function UserMenu({ nickname }: { nickname: string }) {
+function UserMenu({ nickname, avatar }: { nickname: string; avatar?: string }) {
   const { signOut } = useMe();
   const toast = useToast();
   const navigate = useNavigate();
@@ -89,7 +90,7 @@ function UserMenu({ nickname }: { nickname: string }) {
   }
 
   return (
-    <DropMenu label={nickname} className="nav-me">
+    <DropMenu label={<span className="nav-me-label"><Avatar nickname={nickname} avatar={avatar} size={20} />{nickname}</span>} className="nav-me">
       {(close) => (
         <>
           <Link to="/me" onClick={close}>我的</Link>
@@ -100,7 +101,7 @@ function UserMenu({ nickname }: { nickname: string }) {
   );
 }
 
-function DropMenu({ label, className = '', children }: { label: string; className?: string; children: (close: () => void) => ReactNode }) {
+function DropMenu({ label, className = '', children }: { label: ReactNode; className?: string; children: (close: () => void) => ReactNode }) {
   const [open, setOpen] = useState(false);
   const root = useRef<HTMLDivElement>(null);
 
@@ -144,7 +145,7 @@ function SiteNav() {
           <NavLink className={link(' nav-secondary')} to="/docs">API文档</NavLink>
           <NavLink className={link(' nav-secondary')} to="/business">商务合作</NavLink>
           <ShareMenu />
-          {me.data && <UserMenu nickname={me.data.nickname} />}
+          {me.data && <UserMenu nickname={me.data.nickname} avatar={me.data.avatar} />}
           {me.data === null && (
             <span className="nav-auth">
               <Link className="nav-link" to={loginPath(here)}>登录</Link>

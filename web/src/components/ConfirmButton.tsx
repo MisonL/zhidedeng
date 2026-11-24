@@ -8,8 +8,9 @@ import { useEffect, useId, useRef, useState } from 'react';
  * 一个个打桩，于是**大部分调用点干脆没有测试**，误点下架、误点「全部通过」
  * 这类不可撤销的操作就一直没有回归保护。
  *
- * 行为：点一下变成「确认 / 取消」两个按钮，确认后执行。展开时焦点自动落到
- * 确认按钮上，取消或成功后焦点还给原按钮，键盘用户不会掉到页面顶部。
+ * 行为：点一下在原按钮旁边展开「追问 + 确认 / 取消」，确认后执行。展开时焦点
+ * 落到确认按钮上，收起后还给原按钮。原按钮始终留在 DOM 里（只是禁用），
+ * 这样焦点不会掉到 body、`aria-expanded` 也始终指向一个真实存在的节点。
  */
 export default function ConfirmButton({
   label, description, confirmLabel = '确认', busy = false, tone = 'ghost', onConfirm,
@@ -34,33 +35,37 @@ export default function ConfirmButton({
 
   function close() {
     setOpen(false);
-    // 展开时确认按钮接管了焦点，收起后原按钮已经重新挂载，要把焦点还回去。
+    // 展开时确认按钮接管了焦点，收起后要把焦点还回去。
     requestAnimationFrame(() => triggerRef.current?.focus());
   }
 
-  if (!open) {
-    return (
+  return (
+    <span className="confirm-slot">
       <button
-        ref={triggerRef} type="button" className="text-btn" disabled={busy}
-        aria-expanded={false} aria-controls={id}
+        ref={triggerRef} type="button" className="text-btn"
+        disabled={busy || open}
+        aria-expanded={open} aria-controls={id}
         onClick={() => setOpen(true)}
       >
         {label}
       </button>
-    );
-  }
-
-  return (
-    <span className="confirm-inline" id={id} role="group" aria-label={description}>
-      <span className="confirm-ask">{description}</span>
-      <button
-        ref={confirmRef} type="button" disabled={busy}
-        className={tone === 'red' ? 'btn btn-small btn-red' : 'btn btn-small btn-ghost'}
-        onClick={() => { void Promise.resolve(onConfirm()).then(() => close()); }}
-      >
-        {busy ? '处理中…' : confirmLabel}
-      </button>
-      <button type="button" className="btn btn-small btn-ghost" onClick={close}>取消</button>
+      {open && (
+        <span className="confirm-inline" id={id} role="group" aria-label={description}>
+          <span className="confirm-ask">{description}</span>
+          <button
+            ref={confirmRef} type="button" disabled={busy}
+            className={tone === 'red' ? 'btn btn-small btn-red' : 'btn btn-small btn-ghost'}
+            onClick={() => {
+              // 失败也要收起：每个调用点自己负责把错误显示出来。留在这里不收，
+              // 用户会面对一个「处理中…」永远不会变的按钮。
+              void Promise.resolve(onConfirm()).then(close, () => close());
+            }}
+          >
+            {busy ? '处理中…' : confirmLabel}
+          </button>
+          <button type="button" className="btn btn-small btn-ghost" onClick={close}>取消</button>
+        </span>
+      )}
     </span>
   );
 }

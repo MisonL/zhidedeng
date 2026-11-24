@@ -46,8 +46,10 @@ describe('前端产物不含 zod', () => {
     expect(result.error).toBeUndefined();
     expect(result.ok).toBe(true);
     expect(result.files).toBeGreaterThan(0);
-    // 基线是 521,690 字节。放宽一点余量，但绝不能翻倍到 600K。
-    expect(result.bytes).toBeLessThan(560_000);
+    // 基线是 521,690 字节；批次 1 新增评论删除/举报/头像选择器后又涨了约 5K。
+    // 真正的判据是上面两条（构建通过 + 没有 zod 标识），这里只留一道「没翻倍」
+    // 的粗线：带 zod 的产物是 606,000+，所以 570K 仍然能抓住它。
+    expect(result.bytes).toBeLessThan(570_000);
     expect(result.markers, '产物里出现了 zod 的内部标识').toBe(0);
   }, 300_000);
 

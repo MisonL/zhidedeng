@@ -157,6 +157,11 @@ export default function Admin() {
     setRemoved(undefined);
  setRemovedPosts(undefined);
  setPublished(undefined);
+    setReports(undefined);
+    // 切页签/换密钥时收起处理中的举报表单并丢掉备注：
+    // 上一条举报的备注跟到另一条上，是很典型的误提交来源。
+    setOpenReportId(undefined);
+    setReportNotes({});
     void load(tab, controller.signal);
     return () => controller.abort();
     // 只在密钥或页签变化时重取；load 每次渲染都是新函数，不参与依赖。
@@ -178,6 +183,7 @@ export default function Admin() {
     setReasons({});
     setPostReasons({});
     setPostReasonError(undefined);
+    setReports(undefined);
     setOpenReportId(undefined);
     setReportNotes({});
   }

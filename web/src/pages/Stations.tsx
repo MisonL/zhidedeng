@@ -137,10 +137,12 @@ export function StationDetailPage() {
           )}
         </AsyncView>
       </section>
-      {state.data && (
-        <p className="hint station-report">
+      {/* 演示数据不显示举报入口：它必然 400（服务端拒绝举报演示站），
+          摆一个点了就报错的按钮比没有更糟。 */}
+      {state.data && state.data.source !== 'demo' && (
+        <div className="station-report">
           <ReportButton targetType="station" targetId={slug} />
-        </p>
+        </div>
       )}
       {state.data && <Comments targetType="station" targetId={slug} />}
       <section className="module page" aria-label="相关文章">

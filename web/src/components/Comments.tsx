@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { FormEvent } from 'react';
 import { Link } from 'react-router';
 import type { Comment, CommentReply, TargetType } from '@zhidedeng/shared';
@@ -58,14 +58,30 @@ export default function Comments({ targetType, targetId }: { targetType: TargetT
   const [added, setAdded] = useState<Comment[]>([]);
   const [replies, setReplies] = useState<Record<string, CommentReply[]>>({});
   const [replyTo, setReplyTo] = useState<string>();
-  // 本地已删除/已墓碑的 id。删除后就地更新，不再整页重取：
+  // 本地已删除/已墓碑的 id。删除后就地更新，不整页重取：
   // 重取会让列表跳回第一页，用户正看到第 3 页时删一条会莫名其妙回到顶部。
   const [removedIds, setRemovedIds] = useState<Set<string>>(new Set());
   const [tombstones, setTombstones] = useState<Set<string>>(new Set());
-  const [deleting, setDeleting] = useState<string>();
+  // 用集合而不是单个 id：同时删两条时后者会把前者的「处理中」清掉，
+  // 两条按钮就都变回可点，能重复提交。
+  const [deleting, setDeleting] = useState<Set<string>>(new Set());
+  const [deleteError, setDeleteError] = useState<string>();
   const me = useMe();
   const here = useHere();
   const requireLogin = useRequireLogin();
+
+  // 换了一篇文章/站点就清空所有本地状态。不清的话，A 页删掉/新增的评论
+  // 会在 B 页凭空出现（这些 id 在 B 的列表里当然找不到，但墓碑标记、
+  // 新发表的评论是直接拼进列表的）。
+  useEffect(() => {
+    setAdded([]);
+    setReplies({});
+    setReplyTo(undefined);
+    setRemovedIds(new Set());
+    setTombstones(new Set());
+    setDeleting(new Set());
+    setDeleteError(undefined);
+  }, [targetType, targetId]);
 
   async function addComment(content: string) {
     const created = await api.createComment({ targetType, targetId, content }) as Comment;
@@ -75,13 +91,39 @@ export default function Comments({ targetType, targetId }: { targetType: TargetT
   async function removeComment(id: string) {
     // 只有自己写的评论才会渲染这个按钮，所以不用再问一次「这是你的吗」；
     // 但服务端仍会校验（不是自己的回 404），前端不是权限边界。
-    setDeleting(id);
+    if (deleting.has(id)) return;
+    setDeleting((set) => new Set(set).add(id));
+    setDeleteError(undefined);
     try {
       const result = await api.deleteComment(id);
-      if (result.deleted === 'tombstoned') setTombstones((set) => new Set(set).add(id));
-      else setRemovedIds((set) => new Set(set).add(id));
+      if (result.deleted === 'tombstoned') {
+        setTombstones((set) => new Set(set).add(id));
+        // 服务端把正文清空了，本地这份要跟着清，否则墓碑还显示着原文。
+        setAdded((list) => list.map((item) => (item.id === id ? { ...item, content: '', deleted: true } : item)));
+        setReplies((map) => {
+          const next: Record<string, CommentReply[]> = {};
+          for (const [parent, list] of Object.entries(map)) {
+            next[parent] = list.map((reply) => (reply.id === id ? { ...reply, content: '' } : reply));
+          }
+          return next;
+        });
+      } else {
+        setRemovedIds((set) => new Set(set).add(id));
+        // 顶层评论是物理删：服务端 total 少了一条，本地却还把后面的页偏移当没变。
+        // 有后续页时就地重取，否则「加载更多」会跳过正好补位的那一条。
+        if (paged.hasMore) paged.reload();
+        setReplies((map) => {
+          const next: Record<string, CommentReply[]> = {};
+          for (const [parent, list] of Object.entries(map)) next[parent] = list.filter((reply) => reply.id !== id);
+          return next;
+        });
+      }
+    } catch (cause) {
+      // 失败必须说出来：静默失败会让用户以为删掉了，刷新后评论又回来。
+      setDeleteError((cause as Error).message);
+      throw cause;
     } finally {
-      setDeleting(undefined);
+      setDeleting((set) => { const next = new Set(set); next.delete(id); return next; });
     }
   }
 
@@ -97,6 +139,7 @@ export default function Comments({ targetType, targetId }: { targetType: TargetT
       {me.data === null
         ? <p className="hint comment-login"><Link to={loginPath(here)}>登录</Link>后发表评论</p>
         : <CommentForm label="写评论" submitLabel="发表评论" onSubmit={addComment} />}
+      {deleteError && <p className="form-error" role="alert">{deleteError}</p>}
       <AsyncView
         state={paged}
         isEmpty={(items) => items.length + added.length === 0}
@@ -113,7 +156,7 @@ export default function Comments({ targetType, targetId }: { targetType: TargetT
                 const tombstoned = tombstones.has(comment.id) || comment.deleted;
                 return (
               <li key={comment.id} className="comment">
-                <Avatar nickname={comment.author.nickname} />
+                <Avatar nickname={comment.author.nickname} avatar={comment.author.avatar} />
                 <div className="comment-main">
                   <p className="comment-meta">
                     <strong>{comment.author.nickname}</strong>
@@ -131,9 +174,9 @@ export default function Comments({ targetType, targetId }: { targetType: TargetT
                     )}
                     {!tombstoned && me.data?.handle === comment.author.handle && (
                       <ConfirmButton
-                        label="删除" tone="red" busy={deleting === comment.id}
+                        label="删除" tone="red" busy={deleting.has(comment.id)}
                         description="删除后无法恢复，确定删除这条评论？"
-                        confirmLabel="删除"
+                        confirmLabel="确认删除"
                         onConfirm={() => removeComment(comment.id)}
                       />
                     )}
@@ -144,26 +187,36 @@ export default function Comments({ targetType, targetId }: { targetType: TargetT
                       onSubmit={(content) => addReply(comment.id, content)}
                     />
                   )}
-                  {[...comment.replies, ...(replies[comment.id] ?? [])].map((reply) => (
+                  {[...comment.replies, ...(replies[comment.id] ?? [])]
+                    // 回复和顶层评论走同一套规则：删掉的滤除、墓碑保留文案。
+                    // 漏掉这一层时，删回复会请求成功但列表还显示原文和删除按钮。
+                    .filter((reply) => !removedIds.has(reply.id))
+                    .filter((reply, index, list) => list.findIndex(({ id }) => id === reply.id) === index)
+                    .map((reply) => {
+                      const replyGone = tombstones.has(reply.id) || reply.deleted;
+                      return (
                     <div key={reply.id} className="comment-reply">
-                      <Avatar nickname={reply.author.nickname} size={24} />
+                      <Avatar nickname={reply.author.nickname} avatar={reply.author.avatar} size={24} />
                       <div className="comment-main">
                         <p className="comment-meta">
                           <strong>{reply.author.nickname}</strong>
                           <time className="num" dateTime={reply.createdAt}>{formatDate(reply.createdAt)}</time>
                         </p>
-                        <p className="comment-content">{reply.content}</p>
-                        {me.data?.handle === reply.author.handle && (
+                        {replyGone
+                          ? <p className="comment-content comment-deleted">该回复已删除</p>
+                          : <p className="comment-content">{reply.content}</p>}
+                        {!replyGone && me.data?.handle === reply.author.handle && (
                           <ConfirmButton
-                            label="删除" tone="red" busy={deleting === reply.id}
+                            label="删除" tone="red" busy={deleting.has(reply.id)}
                             description="删除后无法恢复，确定删除这条回复？"
-                            confirmLabel="删除"
+                            confirmLabel="确认删除"
                             onConfirm={() => removeComment(reply.id)}
                           />
                         )}
                       </div>
                     </div>
-                  ))}
+                      );
+                    })}
                 </div>
               </li>
                 );

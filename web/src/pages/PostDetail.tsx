@@ -9,12 +9,13 @@ import { Avatar } from '../components/visuals';
 import VoteButtons from '../components/VoteButtons';
 import { formatDate, formatRate, isUntrustedSource, KIND_LABEL, sourceLabel } from '../format';
 import { useAsync } from '../hooks';
-import { useCatalog } from '../state';
+import { useCatalog, useMe } from '../state';
 
 export default function PostDetail() {
   const { id = '' } = useParams();
   const state = useAsync((signal) => api.getPost(id, signal), [id]);
   const { stationBySlug, modelBySlug } = useCatalog();
+  const me = useMe();
   const label = sourceLabel(state.data?.source);
 
   return (
@@ -39,7 +40,7 @@ export default function PostDetail() {
                   <span className={`tag tag-${post.kind}`}>{KIND_LABEL[post.kind]}</span>
                   <h1 className="article-title">{post.title}</h1>
                   <p className="article-meta">
-                    <Avatar nickname={post.author.nickname} size={24} />
+                    <Avatar nickname={post.author.nickname} avatar={post.author.avatar} size={24} />
                     <span>{post.author.nickname}</span>
                     <time className="num" dateTime={post.publishedAt}>{formatDate(post.publishedAt)}</time>
                     {station && <Link to={`/stations/${station.slug}`}>{station.name}{station.lowestRate !== null && ` · 低至 ${formatRate(station.lowestRate)}`}</Link>}
@@ -53,8 +54,11 @@ export default function PostDetail() {
                 <footer className="article-foot">
                   <VoteButtons targetType="post" targetId={post.id} votes={post.votes} currentUserVote={post.currentUserVote} />
                   <FavoriteButton targetType="post" targetId={post.id} favorited={post.favorited} favoriteCount={post.favoriteCount} />
-                  {/* 只在已通过的公开文章上给举报入口：待审的还没公开，别人看不到。 */}
-                  {post.status === 'approved' && <ReportButton targetType="post" targetId={post.id} />}
+                  {/* 只在已通过的公开文章上给举报入口：待审的还没公开，别人看不到。
+                      自己的文章不显示——那不是举报，是撤下，入口在「我的分享」。 */}
+                  {post.status === 'approved' && me.data?.handle !== post.author.handle && (
+                    <ReportButton targetType="post" targetId={post.id} />
+                  )}
                 </footer>
               </>
             );

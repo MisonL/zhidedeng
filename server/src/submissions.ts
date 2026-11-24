@@ -236,9 +236,17 @@ export function enqueueSubmission(store: Store, input: {
     // 幂等返回旧 id 会变成幽灵：响应说 approved、前端以为已上线，详情却是 404
     // （removedAt 还在）。撤下是人的决定，同内容重投应当按新投稿处理：
     // 走下面的正常插入（新 id、重新物化），而不是复活旧行、绕过这次撤下。
-    // existing.id 在 SQLite 返回行里是 unknown，这里明确转成 string 再判断。
-    const approvedPostWithdrawn = auto && validated.kind === 'post' && validated.channel === 'web'
-      && existing?.status === 'approved' && (existing.id === undefined || store.removedAt('post', String(existing.id)) !== null);
+    // 命中已 approved 的投稿时，实体可能已经不在线（作者撤下/管理员下架/从未物化）。
+    // 直接幂等返回会变成幽灵：响应说 approved，前端以为已上线，详情却是 404。
+    // 判据必须按通道取实体 id（见 materializedPostId），否则这里拿投稿 id 去查
+    // agent/feishu 的 `sub-<id>` 永远查不到，守卫静默失效。
+    const approvedPostGone = auto && validated.kind === 'post' && validated.action === 'upsert'
+      && existing?.status === 'approved'
+      && (() => {
+        const submission = submissionRecord(existing);
+        const postId = materializedPostId(store, submission);
+        return store.getWithRemoved('post', postId) === undefined || store.removedAt('post', postId) !== null;
+      })();
     const reviewedAt = validated.now.toISOString();
     // 飞书 www/裸域切换会更新同一实体，版本应取实际实体当前 URL 的 hostname。
     const currentOriginKey = auto && existing?.status === 'approved' && validated.kind === 'station'
@@ -248,8 +256,8 @@ export function enqueueSubmission(store: Store, input: {
       ? store.db.prepare("SELECT id FROM submissions WHERE kind = ? AND originKey = ? AND status = 'approved' ORDER BY reviewedAt DESC, rowid DESC LIMIT 1").get(validated.kind, currentOriginKey)
       : undefined;
     // approved 只在仍是最新版本时去重，否则需要重新物化本次提交的内容。
-    // approvedPostWithdrawn 时视作未命中（见上方注释），避免返回幽灵。
-    if (!approvedPostWithdrawn && existing && (existing.status === 'pending' || latest?.id === existing.id)) {
+    // approvedPostGone 时视作未命中（见上方注释），避免返回幽灵。
+    if (!approvedPostGone && existing && (existing.status === 'pending' || latest?.id === existing.id)) {
       const submission = submissionRecord(existing);
       if (auto && submission.status === 'pending') {
         materialize(store, submission, reviewedAt);
@@ -714,6 +722,24 @@ export function submissionState(store: Store): AdminSubmissionStateResponse {
   return { stations: stations.sort((a, b) => a.originKey.localeCompare(b.originKey) || a.slug.localeCompare(b.slug)) };
 }
 
+/**
+ * 一条 post 投稿物化后对应的实体 id。
+ *
+ * 站内投稿直接用投稿 id；agent/feishu 走 `sub-<投稿id>`，老式飞书导入还可能是
+ * `feishu-<originKey>`。这个映射原本只写在 materialize 里，任何别处想按投稿找
+ * 实体都得再抄一遍——抄错一次（例如拿投稿 id 直接查 removedAt）就会静默失效，
+ * 因为查不到行时 removedAt 返回 null，看起来像「没撤下」。
+ */
+function materializedPostId(store: Store, submission: SubmissionRecord): string {
+  if (submission.channel === 'web') return submission.id;
+  const legacyId = `feishu-${submission.originKey}`;
+  if (submission.channel === 'feishu' && store.getWithRemoved('post', legacyId)?.source === 'submission') return legacyId;
+  const first = submission.channel === 'feishu'
+    ? store.db.prepare("SELECT id FROM submissions WHERE kind = 'post' AND channel = 'feishu' AND originKey = ? AND status = 'approved' ORDER BY rowid LIMIT 1").get(submission.originKey) as { id: string } | undefined
+    : undefined;
+  return `sub-${first?.id ?? submission.id}`;
+}
+
 /** 把一条投稿写进 entities。不自己开事务，由调用方决定边界。 */
 function materialize(store: Store, submission: SubmissionRecord, reviewedAt: string): string | undefined {
   if (submission.action === 'remove') {
@@ -801,16 +827,11 @@ function materialize(store: Store, submission: SubmissionRecord, reviewedAt: str
     // 「单条通道物化成 `sub-<投稿id>`」与「导入通道算成 `feishu-<recordId>`」之间
     // 来回翻转——id 一变，读者投票和收藏就又成了孤儿。判据必须和 catalog.ts
     // 的 `postIds` 逐字一致：只认 channel，不认 batchId。
-    const first = submission.channel === 'feishu'
-      ? store.db.prepare("SELECT id FROM submissions WHERE kind = 'post' AND channel = 'feishu' AND originKey = ? AND status = 'approved' ORDER BY rowid LIMIT 1").get(submission.originKey)
-      : undefined;
-    const legacyId = `feishu-${submission.originKey}`;
     // 必须用 getWithRemoved：store.get 看不见已下架的行，于是「老文章还在吗」
     // 这个判断会把已下架的老文章当成不存在，改用 `sub-<投稿id>` 建出一篇新的。
     // 软删除只认 id，换个 id 就是复活——实测下架旧式导入的文章后同步一次，
     // 前台立刻又多出一篇内容相同的新文章。
-    const legacy = submission.channel === 'feishu' && store.getWithRemoved('post', legacyId)?.source === 'submission';
-    const postId = legacy ? legacyId : `sub-${first?.id ?? submission.id}`;
+    const postId = materializedPostId(store, submission);
     // 管理员下架过的文章不能被下一次同步复活。软删除标记的含义是「人已经决定这篇
     // 不该在线」，而这里每次同步都无条件写 status: 'approved'——实测：下架后重同步，
     // 文章原样回来。站点靠 put 清标记来表达「重新上架」，那是有意的；文章这里没有

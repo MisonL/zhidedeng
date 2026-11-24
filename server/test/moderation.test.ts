@@ -528,6 +528,8 @@ describe('评论自删', () => {
       '/api/comments?targetType=post&targetId=post-1',
     );
     const tomb = list.items.find(item => item.id === parent.id)!;
+    // 正文在库里保留（举报处理要看原文），接口侧必须是空串：
+    // 作者删掉的话不该还能被任何人读到。
     expect(tomb).toMatchObject({ deleted: true, content: '' });
     expect(tomb.replies.map(reply => reply.content)).toEqual(['别人的回复']);
   });
@@ -545,7 +547,8 @@ describe('评论自删', () => {
     // 墓碑没有可见回复，按设计不出现在列表里，但行还在库里（外键要它）。
     const row = server.db.prepare('SELECT deletedAt, content FROM comments WHERE id = ?').get(parent.id) as { deletedAt: string | null; content: string };
     expect(row.deletedAt).not.toBeNull();
-    expect(row.content).toBe('');
+    // 正文留在库里（举报处理要看原文），但对外接口一律读不到。
+    expect(row.content).toBe('父评论');
   });
 
   it('删别人的评论回 404，不泄露该 id 是否存在', async () => {
@@ -699,8 +702,10 @@ describe('举报最小闭环', () => {
   it('举报评论：不能举报自己的评论，看不到的（隐藏的/删除的）也不能举报', async () => {
     const a = await account('alice');
     const b = await account('bobby');
+    // 不能挂在演示文章下面：演示数据一律拒绝举报（没有处置出口）。
+    const post = await approvedPost(a, '评论挂靠的文章');
     const comment = await (async () => {
-      const response = await b.call('POST', '/api/comments', { targetType: 'post', targetId: 'post-1', content: '一条可举报的评论' });
+      const response = await b.call('POST', '/api/comments', { targetType: 'post', targetId: post.id, content: '一条可举报的评论' });
       return await response.json() as { id: string };
     })();
     expect((await a.call('POST', '/api/reports', { targetType: 'comment', targetId: comment.id, reason: '人身攻击' })).status).toBe(200);
@@ -727,5 +732,52 @@ describe('预设头像', () => {
     // 只有头像的更新能成功。
     expect((await a.call('PATCH', '/api/me', { avatar: '🐼' })).status).toBe(200);
     expect((await b.get<CurrentUser>('/api/me')).nickname).toBe('bobby');
+  });
+});
+
+describe('审查修复：举报与删除的证据边界', () => {
+  it('墓碑评论不能举报，已撤下文章下的评论也不能举报', async () => {
+    const a = await account('alice');
+    const b = await account('bobby');
+    const post = await submit(a, '评论挂靠');
+    await admin(`/api/admin/posts/${post.id}/review`, { status: 'approved' });
+    const comment = await (await b.call('POST', '/api/comments', { targetType: 'post', targetId: post.id, content: '会变成墓碑的评论' })).json() as { id: string };
+    await b.call('DELETE', `/api/comments/${comment.id}`);
+    // 墓碑：读者看不到，允许举报等于把评论 id 变成存在性探针。
+    expect((await a.call('POST', '/api/reports', { targetType: 'comment', targetId: comment.id, reason: 'x' })).status).toBe(404);
+
+    const comment2 = await (await b.call('POST', '/api/comments', { targetType: 'post', targetId: post.id, content: '文章撤下前写的' })).json() as { id: string };
+    await a.call('DELETE', `/api/posts/${post.id}`);
+    // 第三人视角：文章已撤下，评论在详情里读不到，举报它同样没有处置出口。
+    const c = await account('charlie');
+    expect((await c.call('POST', '/api/reports', { targetType: 'comment', targetId: comment2.id, reason: 'x' })).status).toBe(404);
+  });
+
+  it('管理员隐藏的评论被作者删除时留墓碑，不销毁审核证据', async () => {
+    const a = await account('alice');
+    const b = await account('bobby');
+    const comment = await (await b.call('POST', '/api/comments', { targetType: 'post', targetId: 'post-1', content: '被管理员隐藏的话' })).json() as { id: string };
+    await admin(`/api/admin/comments/${comment.id}/hide`, { hidden: true });
+    const removed = await b.call('DELETE', `/api/comments/${comment.id}`);
+    expect(await removed.json()).toMatchObject({ deleted: 'tombstoned' });
+    // 行还在，正文还在——举报/审核处理时还要看原文。
+    const row = server.db.prepare('SELECT content, deletedAt FROM comments WHERE id = ?').get(comment.id) as { content: string; deletedAt: string | null };
+    expect(row.content).toBe('被管理员隐藏的话');
+    expect(row.deletedAt).not.toBeNull();
+  });
+
+  it('撤下文章后 shareCount 跟着减，不会出现「分享 3、列表 2」', async () => {
+    const a = await account('alice');
+    const post = await submit(a, '会撤下的分享');
+    await admin(`/api/admin/posts/${post.id}/review`, { status: 'approved' });
+    expect((await a.get<CurrentUser>('/api/me')).shareCount).toBe(1);
+    await a.call('DELETE', `/api/posts/${post.id}`);
+    expect((await a.get<CurrentUser>('/api/me')).shareCount).toBe(0);
+  });
+
+  it('演示文章不能举报：下架接口对 demo 是 409，举报了也没有出口', async () => {
+    const a = await account('alice');
+    const response = await a.call('POST', '/api/reports', { targetType: 'post', targetId: 'post-1', reason: 'x' });
+    expect(response.status).toBe(400);
   });
 });

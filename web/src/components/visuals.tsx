@@ -52,14 +52,13 @@ export function VendorIcon({ iconKey, size = 20 }: { iconKey: string; size?: num
   return <img className="vendor-icon" src={VENDOR_ART_OR_FALLBACK(iconKey).src} alt="" width={size} height={size} />;
 }
 
-export function Avatar({ nickname, size = 32 }: { nickname: string; size?: number }) {
-  // 预设头像优先。实际展示时不会带 emoji（nickname 是纯字），
-  // 这个分支保留给将来 Avatar 直接接收 preset 时用；现在入口统一走
-  // 「nickname 里有 emoji？」的近似判断，在 Settings 里由 AvatarPresetGlyph 负责。
-  const preset = AVATAR_PRESETS.find((value) => value === nickname);
+export function Avatar({ nickname, avatar, size = 32 }: { nickname: string; avatar?: string; size?: number }) {
+  // 预设头像来自用户资料。认不出的值（历史脏数据、手工改库）一律回退到
+  // 昵称首字，别渲染成一片空白——头像位置空着很像加载失败。
+  const preset = avatar && AVATAR_PRESETS.some((value) => value === avatar) ? avatar : undefined;
   if (preset) {
     return (
-      <span className="avatar avatar-preset" aria-hidden="true" style={{ width: size, height: size, fontSize: size * 0.5 }}>
+      <span className="avatar avatar-preset-fill" aria-hidden="true" style={{ width: size, height: size, fontSize: size * 0.55, background: accentOf(nickname) }}>
         {preset}
       </span>
     );

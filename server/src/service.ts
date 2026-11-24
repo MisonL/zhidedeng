@@ -475,7 +475,9 @@ export class Service {
 
   /** 该账号一共投过多少篇（已物化 + 队列里待审的）。 */
   private countOwnPosts(): number {
-    const materialized = Number(this.store.db.prepare(`SELECT count(*) AS count FROM entities WHERE ${POST_AUTHOR}`).get(this.user)!.count);
+    // 只算还在线的：撤下的文章在「我的分享」里已经看不到，把它算进 shareCount
+    // 会出现「分享 3、列表 2 条」这种对不上的数字（专家榜同样只算在线的）。
+    const materialized = Number(this.store.db.prepare(`SELECT count(*) AS count FROM entities WHERE ${POST_AUTHOR} AND removedAt IS NULL`).get(this.user)!.count);
     const queued = Number(this.store.db.prepare(
       "SELECT count(*) AS count FROM submissions WHERE kind = 'post' AND channel = 'web' AND actorHandle = ? AND status = 'pending'",
     ).get(this.user)!.count);
@@ -848,10 +850,13 @@ export class Service {
   }
 
   private comment(row: CommentRow) {
-    const { userHandle, deletedAt, ...fields } = row;
+    const { userHandle, deletedAt, content, ...fields } = row;
     // deletedAt 不外泄成时间戳，只暴露一个布尔 —— 前端要的是「显示成已删除」，
     // 精确到秒的删除时间没有用处，反而让人以为能查到操作记录。
-    return { ...fields, author: this.author(userHandle), ...(deletedAt ? { deleted: true } : {}) };
+    //
+    // 墓碑的正文在库里保留（举报处理要看原文），但**对外一律为空串**：
+    // 作者删掉的话不该还能被任何人读到。
+    return { ...fields, content: deletedAt ? '' : content, author: this.author(userHandle), ...(deletedAt ? { deleted: true } : {}) };
   }
 
   createComment(input: CreateCommentRequest): Comment | CommentReply {
@@ -886,15 +891,30 @@ export class Service {
       const post = this.readablePost(input.targetId);
       if (!post) throw new ApiError(404, 'NOT_FOUND', '内容不存在');
       if (post.authorHandle === this.user) throw new ApiError(400, 'INVALID_INPUT', '不能举报自己发布的内容');
+      // 演示文章没有处置出口（下架接口对 demo 回 409），举报了也只能挂着。
+      if (post.source === 'demo') throw new ApiError(400, 'INVALID_INPUT', '演示数据不需要举报');
     } else if (targetType === 'station') {
       const station = this.store.get('station', input.targetId);
       if (!station) throw new ApiError(404, 'NOT_FOUND', '内容不存在');
       if (station.source === 'demo') throw new ApiError(400, 'INVALID_INPUT', '演示数据不需要举报');
     } else {
-      const comment = this.store.db.prepare('SELECT userHandle FROM comments WHERE id = ? AND hidden = 0').get(input.targetId) as
-        { userHandle: string } | undefined;
+      // 隐藏的和已删除（墓碑）的评论都不能举报：读者根本看不到它们，
+      // 允许举报等于把评论 id 变成一个存在性探针；而且也没法处理——内容已经不在。
+      const comment = this.store.db.prepare('SELECT userHandle, targetType, targetId FROM comments WHERE id = ? AND hidden = 0 AND deletedAt IS NULL').get(input.targetId) as
+        { userHandle: string; targetType: 'post' | 'station'; targetId: string } | undefined;
       if (!comment) throw new ApiError(404, 'NOT_FOUND', '内容不存在');
       if (comment.userHandle === this.user) throw new ApiError(400, 'INVALID_INPUT', '不能举报自己发布的评论');
+      // 评论所属的对象也得还在线：文章撤下后，其评论在详情里已经读不到，
+      // 举报它同样没有处置出口。
+      const ownerVisible = comment.targetType === 'post'
+        ? this.readablePost(comment.targetId) !== undefined
+        : this.store.get('station', comment.targetId) !== undefined;
+      if (!ownerVisible) throw new ApiError(404, 'NOT_FOUND', '内容不存在');
+      // 演示数据同样没有处置路径（下架接口对 demo 一律 409），别给一个点了也没用的入口。
+      const ownerSource = comment.targetType === 'post'
+        ? this.readablePost(comment.targetId)?.source
+        : this.store.get('station', comment.targetId)?.source;
+      if (ownerSource === 'demo') throw new ApiError(400, 'INVALID_INPUT', '演示数据不需要举报');
     }
     const reason = input.reason.trim();
     if (!reason) throw new ApiError(400, 'INVALID_INPUT', '请选择或填写举报原因');
@@ -970,9 +990,17 @@ export class Service {
     // 不是自己的评论一律 404：回 403 等于告诉对方「这个 id 存在但不是你的」。
     if (!row || row.userHandle !== this.user) throw new ApiError(404, 'NOT_FOUND', '评论不存在');
     const children = Number(this.store.db.prepare('SELECT count(*) AS count FROM comments WHERE parentId = ?').get(id)!.count);
-    if (children > 0) {
+    // 管理员已经隐藏、或正处于举报处理中时，物理删会把审核证据一起删掉
+    // （reports 表只存 id，不存正文快照）。这种情况一律留墓碑：
+    // 读者看到的仍是「已删除」，库里的原文保留给处理举报的人。
+    const row2 = this.store.db.prepare('SELECT hidden FROM comments WHERE id = ?').get(id) as { hidden: number };
+    const reported = this.store.db.prepare(
+      "SELECT 1 FROM reports WHERE targetType = 'comment' AND targetId = ? AND status = 'open' LIMIT 1",
+    ).get(id) !== undefined;
+    const mustKeep = children > 0 || Number(row2.hidden) === 1 || reported;
+    if (mustKeep) {
       // 已经是墓碑就当作成功，重复点不该报错。
-      this.store.db.prepare("UPDATE comments SET deletedAt = COALESCE(deletedAt, ?), content = '' WHERE id = ?")
+      this.store.db.prepare('UPDATE comments SET deletedAt = COALESCE(deletedAt, ?) WHERE id = ?')
         .run(this.now().toISOString(), id);
       return { id, deleted: 'tombstoned' as const };
     }
