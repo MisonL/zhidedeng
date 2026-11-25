@@ -311,6 +311,13 @@ export default function Admin() {
       setReportTotal(data.total);
       setReportCursor(data.nextCursor);
     } catch (caught) {
+      // 密钥在翻页途中失效（401/403）：必须和 load/act 一样退回输入态，
+      // 否则旧列表还留在屏幕上，而之后每个请求都会失败。
+      if (caught instanceof AdminError && (caught.code === 'NO_TOKEN' || caught.unauthorized)) {
+        reset();
+        setError(caught.code === 'NO_TOKEN' ? '请填写管理密钥' : '管理密钥无效，请重新输入');
+        return;
+      }
       if (sessionRef.current !== generation) return;
       setError((caught as Error).message);
     } finally {

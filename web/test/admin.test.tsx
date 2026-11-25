@@ -600,3 +600,34 @@ describe('退出后用同一密钥重进', () => {
     expect(screen.getByRole('tab', { name: /举报/ }).textContent).toContain('(25)');
   });
 });
+
+describe('翻页途中密钥失效', () => {
+  it('翻页请求 401 时退回输入态，而不是留着旧列表', async () => {
+    stubApi({
+      'GET /api/admin/reports': ({ url }: { url: URL }) => {
+        if (url.searchParams.get('cursor') === null) {
+          return {
+            items: [{
+              id: 'a', targetType: 'comment' as const, targetId: 'c-a', reporterHandle: 'demo-pedal',
+              reason: '理由 a', detail: null, status: 'open' as const,
+              createdAt: '2026-11-20T00:00:00.000Z', handledAt: null, targetAlive: true, targetLabel: '评论 a',
+            }],
+            total: 2, pageSize: 20, nextCursor: 'cur-1',
+          };
+        }
+        // 翻页时密钥已经在服务端失效。
+        return apiError(401, 'UNAUTHORIZED', '管理密钥无效');
+      },
+    });
+    await unlock();
+    fireEvent.click(await screen.findByRole('tab', { name: /举报/ }));
+    await screen.findByText('理由 a');
+    fireEvent.click(screen.getByRole('button', { name: /加载更多/ }));
+
+    // 退回输入态并说明原因。
+    expect(await screen.findByLabelText('管理密钥')).toBeInTheDocument();
+    expect(screen.getByText('管理密钥无效，请重新输入')).toBeInTheDocument();
+    // 旧列表不能还留在屏幕上。
+    expect(screen.queryByText('理由 a')).not.toBeInTheDocument();
+  });
+});
