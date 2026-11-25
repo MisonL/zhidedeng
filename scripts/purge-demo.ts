@@ -35,6 +35,24 @@ export interface PurgePlan {
 
 const inList = (values: readonly string[]) => values.map(() => '?').join(', ');
 
+/**
+ * 当前库里「这一份清理计划会删掉的举报」有多少条。
+ *
+ * plan 里的 `reports` 只是拍快照那一刻的计数；从 plan 到 apply 之间库还可能变，
+ * 所以 main 用这个函数按同一条 WHERE 现场再数一次，决定「到底有没有活干」。
+ */
+export function countOrphanReports(store: ReturnType<typeof openStore>, plan: PurgePlan): number {
+  const parts: string[] = [];
+  if (plan.stations.length > 0) parts.push(`(targetType = 'station' AND targetId IN (${inList(plan.stations)}))`);
+  if (plan.posts.length > 0) parts.push(`(targetType = 'post' AND targetId IN (${inList(plan.posts)}))`);
+  if (plan.comments.length > 0) parts.push(`(targetType = 'comment' AND targetId IN (${inList(plan.comments)}))`);
+  if (plan.users.length > 0) parts.push(`reporterHandle IN (${inList(plan.users)})`);
+  if (parts.length === 0) return 0;
+  const row = store.db.prepare(`SELECT COUNT(*) AS c FROM reports WHERE ${parts.join(' OR ')}`)
+    .get(...plan.stations, ...plan.posts, ...plan.comments, ...plan.users) as { c: number };
+  return Number(row.c);
+}
+
 export function planPurge(store: ReturnType<typeof openStore>): PurgePlan {
   // station 的身份是 slug，post 的身份是 id：分开取，别用一个联合类型硬凑。
   const stations = store.allWithRemoved('station').filter(item => item.source === 'demo').map(item => item.slug);
@@ -107,13 +125,18 @@ export function applyPurge(store: ReturnType<typeof openStore>, plan: PurgePlan)
       }
     }
     // 举报行最后清：它按 id 引用上面被删掉的对象，早删或漏删都会留下死举报。
-    if (plan.reports > 0) {
-      const parts: string[] = [];
-      if (plan.stations.length > 0) parts.push(`(targetType = 'station' AND targetId IN (${inList(plan.stations)}))`);
-      if (plan.posts.length > 0) parts.push(`(targetType = 'post' AND targetId IN (${inList(plan.posts)}))`);
-      if (plan.comments.length > 0) parts.push(`(targetType = 'comment' AND targetId IN (${inList(plan.comments)}))`);
-      if (plan.users.length > 0) parts.push(`reporterHandle IN (${inList(plan.users)})`);
-      store.db.prepare(`DELETE FROM reports WHERE ${parts.join(' OR ')}`)
+    //
+    // 不能拿 `plan.reports > 0` 当开关：plan 是之前拍的快照，从 plan 到 apply 之间
+    // 可能又插进来一条匹配的举报（实删 2 > 计划 1），也可能 plan 时是 0 而之后
+    // 变成了孤儿举报——那样整块被跳过，删完留下一堆指向不存在对象的死举报。
+    // 所以这里有条件就执行，删多少让 DELETE 自己决定。
+    const reportParts: string[] = [];
+    if (plan.stations.length > 0) reportParts.push(`(targetType = 'station' AND targetId IN (${inList(plan.stations)}))`);
+    if (plan.posts.length > 0) reportParts.push(`(targetType = 'post' AND targetId IN (${inList(plan.posts)}))`);
+    if (plan.comments.length > 0) reportParts.push(`(targetType = 'comment' AND targetId IN (${inList(plan.comments)}))`);
+    if (plan.users.length > 0) reportParts.push(`reporterHandle IN (${inList(plan.users)})`);
+    if (reportParts.length > 0) {
+      store.db.prepare(`DELETE FROM reports WHERE ${reportParts.join(' OR ')}`)
         .run(...plan.stations, ...plan.posts, ...plan.comments, ...plan.users);
     }
     // 实体本身直接物理删除：软删除（removedAt）会让它们继续参与 slug 认领，
@@ -144,11 +167,15 @@ export async function main(argv: readonly string[]): Promise<number> {
     console.log(`关联数据：报价 ${plan.offers}、投票 ${plan.votes}、收藏 ${plan.favorites}、评论 ${plan.commentCount}、举报 ${plan.reports}`);
     if (plan.stations.length > 0) console.log(`  站点：${plan.stations.join(', ')}`);
     if (plan.posts.length > 0) console.log(`  文章：${plan.posts.slice(0, 10).join(', ')}${plan.posts.length > 10 ? ` …共 ${plan.posts.length} 篇` : ''}`);
-    // 孤儿举报（目标已删、举报人已删）也要能清，所以不能只看实体数。
-    const orphans = plan.offers + plan.votes + plan.favorites + plan.commentCount + plan.reports;
-    if (total === 0 && orphans === 0) {
-      console.log('没有演示数据，无需清理。');
-      return 0;
+    if (total === 0) {
+      // 实体为 0 不代表没得清：指向已删对象的孤儿举报只有这里能发现。
+      // 用同一条判定再查一次当前库，而不是信 plan 的快照。
+      const orphan = countOrphanReports(store, plan);
+      if (orphan === 0) {
+        console.log('没有演示数据，无需清理。');
+        return 0;
+      }
+      console.log(`没有演示数据，但还有 ${orphan} 条指向已删对象的举报要清理。`);
     }
     if (!apply) {
       console.log('\n当前是 dry-run，没有写库。确认无误后加 --apply 执行。');

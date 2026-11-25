@@ -293,6 +293,13 @@ export interface MySubmission {
   id: string;
   kind: 'station' | 'model' | 'post';
   status: SubmissionStatus;
+  /**
+   * 已通过、但当前不在线上（最常见的是作者自己撤下了，或管理员下架）。
+   *
+   * 没有这个字段时，「我的投稿」只能显示「已通过」却不给链接——作者刚撤下
+   * 一篇文章，回头看到的是「已通过」，会以为撤下没生效。
+   */
+  withdrawn?: boolean;
   /** 驳回理由；通过或待审时为 null。 */
   reason: string | null;
   /** 人可读的标题：文章取标题，模型取名称，站点取站名。 */

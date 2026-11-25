@@ -522,7 +522,8 @@ function orderByMaterializeDependency(store: Store, ids: string[]): string[] {
     // 举报会一直攒着，必须分页。上面几类管理列表（帖子/站点）走的是另一套
     // 整表返回的路径，它们有明确上限；举报没有，只能翻页。
     const status = reportStatus.parse(c.req.query('status') ?? 'open');
-    return c.json(listReports(store, status, clampInt(c.req.query('page'), 1, 1, 100_000), clampInt(c.req.query('pageSize'), 20, 1, 50)));
+    // 游标分页：offset 在「翻页期间有人新提交举报」时会重复/漏条（实测漏过）。
+    return c.json(listReports(store, status, clampInt(c.req.query('pageSize'), 20, 1, 50), c.req.query('cursor') ?? null));
   });
   app.post('/api/admin/reports/:id/resolve', async c => {
     const input = z.strictObject({

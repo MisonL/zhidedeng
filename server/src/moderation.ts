@@ -140,55 +140,109 @@ export interface ReportRow {
   targetLabel: string;
 }
 
-export function listReports(store: Store, status: 'open' | 'resolved' | 'dismissed' = 'open', page = 1, pageSize = 20) {
-  // 分页 + 批量取目标，不再逐条查。
-  //
-  // 之前是全量 SELECT 再对每一行查一次目标（N+1）：举报攒到几百条时，打开
-  // 审核台就是几百次点查，而它偏偏是管理员最常开的页。这里按 targetType 各做
-  // 一次 IN 查询，复杂度从 O(举报数) 次查询降到 3 次。
+/**
+ * 举报列表：**游标分页 + 两批查询**。
+ *
+ * 两处都是踩过的坑：
+ *
+ * 1. 游标而不是 offset。offset 分页在「翻页期间有人新提交举报」时会整体错位：
+ *    第 2 页会重复第 1 页的最后一条，而真正该出现的那条永远看不到（实测漏过）。
+ *    游标用 (createdAt, rowid) 定位「从哪之后继续」，插入新行不改变已有位置。
+ * 2. 目标状态一次查完。原来对每一行分别 getWithRemoved + removedAt（一条举报两次
+ *    点查），举报攒到几十条就是上百次查询；现在整个一页最多 3 次：post 与 station
+ *    合并成一条 entities 的 IN，评论一条 comments 的 IN。
+ *
+ * 游标编码成 `<createdAt>|<rowid>`，不含用户可控内容，只用来定位。
+ */
+export interface ReportPage {
+  items: ReportRow[];
+  total: number;
+  pageSize: number;
+  /** 下一页的游标；null 表示没有更多。 */
+  nextCursor: string | null;
+}
+
+export function listReports(
+  store: Store,
+  status: 'open' | 'resolved' | 'dismissed' = 'open',
+  pageSize = 20,
+  cursor?: string | null,
+): ReportPage {
   const total = Number((store.db.prepare('SELECT count(*) AS count FROM reports WHERE status = ?').get(status) as { count: number }).count);
-  const rows = store.db.prepare(
-    `SELECT id,targetType,targetId,reporterHandle,reason,detail,status,createdAt,handledAt
-     FROM reports WHERE status = ? ORDER BY createdAt DESC, rowid DESC LIMIT ? OFFSET ?`,
-  ).all(status, pageSize, (page - 1) * pageSize) as unknown as Array<Omit<ReportRow, 'targetAlive' | 'targetLabel'>>;
+
+  const after = parseCursor(cursor);
+  const rows = (after === null
+    ? store.db.prepare(
+      `SELECT rowid, id,targetType,targetId,reporterHandle,reason,detail,status,createdAt,handledAt
+       FROM reports WHERE status = ? ORDER BY createdAt DESC, rowid DESC LIMIT ?`,
+    ).all(status, pageSize)
+    : store.db.prepare(
+      `SELECT rowid, id,targetType,targetId,reporterHandle,reason,detail,status,createdAt,handledAt
+       FROM reports WHERE status = ? AND (createdAt < ? OR (createdAt = ? AND rowid < ?))
+       ORDER BY createdAt DESC, rowid DESC LIMIT ?`,
+    ).all(status, after.createdAt, after.createdAt, after.rowid, pageSize)) as unknown as Array<
+      Omit<ReportRow, 'targetAlive' | 'targetLabel'> & { rowid: number }>;
 
   const idsOf = (type: string) => [...new Set(rows.filter(row => row.targetType === type).map(row => row.targetId))];
   const postIds = idsOf('post');
   const stationIds = idsOf('station');
   const commentIds = idsOf('comment');
+  const inList = (ids: readonly string[]) => ids.map(() => '?').join(', ');
 
-  const postAlive = new Map<string, { alive: boolean; label: string }>();
-  for (const id of postIds) {
-    const post = store.getWithRemoved('post', id);
-    postAlive.set(id, { alive: post !== undefined && store.removedAt('post', id) === null, label: post?.title ?? id });
+  // post 与 station 都是 entities 里的行，一次查完两种 kind。
+  const entityInfo = new Map<string, { alive: boolean; label: string }>();
+  const entityIds = [...postIds, ...stationIds];
+  if (entityIds.length > 0) {
+    const found = store.db.prepare(
+      `SELECT kind, id, data, removedAt FROM entities WHERE kind IN ('post','station') AND id IN (${inList(entityIds)})`,
+    ).all(...entityIds) as Array<{ kind: string; id: string; data: string; removedAt: string | null }>;
+    for (const row of found) {
+      const data = JSON.parse(row.data) as { title?: string; name?: string };
+      entityInfo.set(`${row.kind}:${row.id}`, {
+        alive: row.removedAt === null,
+        label: (row.kind === 'post' ? data.title : data.name) ?? row.id,
+      });
+    }
   }
-  const stationAlive = new Map<string, { alive: boolean; label: string }>();
-  for (const id of stationIds) {
-    const station = store.getWithRemoved('station', id);
-    stationAlive.set(id, { alive: station !== undefined && store.removedAt('station', id) === null, label: station?.name ?? id });
-  }
-  const commentAlive = new Map<string, { alive: boolean; label: string }>();
+  const commentInfo = new Map<string, { alive: boolean; label: string }>();
   if (commentIds.length > 0) {
     const found = store.db.prepare(
-      `SELECT id, content, hidden, deletedAt FROM comments WHERE id IN (${commentIds.map(() => '?').join(', ')})`,
+      `SELECT id, content, hidden, deletedAt FROM comments WHERE id IN (${inList(commentIds)})`,
     ).all(...commentIds) as Array<{ id: string; content: string; hidden: number; deletedAt: string | null }>;
     for (const comment of found) {
-      commentAlive.set(comment.id, {
+      commentInfo.set(comment.id, {
         alive: comment.hidden === 0 && comment.deletedAt === null,
         label: comment.content.slice(0, 40) || '（已删除的评论）',
       });
     }
   }
 
-  const items = rows.map((row) => {
-    const info = row.targetType === 'post' ? postAlive.get(row.targetId)
-      : row.targetType === 'station' ? stationAlive.get(row.targetId)
-        : commentAlive.get(row.targetId);
-    // 查不到 = 对象已经不在库里（被物理删掉了）。这仍然是「不在线」，
-    // 而且比「已下架」更该让审核员一眼看出来，所以标签保留 id 而不是空白。
+  const items = rows.map(({ rowid: _rowid, ...row }) => {
+    const info = row.targetType === 'post'
+      ? entityInfo.get(`post:${row.targetId}`)
+      : row.targetType === 'station' ? entityInfo.get(`station:${row.targetId}`) : commentInfo.get(row.targetId);
+    // 查不到 = 对象已经不在库里。这仍然是「不在线」，标签回落到 id 而不是留空，
+    // 让审核员一眼看出这是个已经消失的对象。
     return { ...row, targetAlive: info?.alive ?? false, targetLabel: info?.label ?? row.targetId };
   });
-  return { items, total, page, pageSize };
+
+  const last = rows.at(-1);
+  return {
+    items,
+    total,
+    pageSize,
+    nextCursor: rows.length === pageSize && last !== undefined ? `${last.createdAt}|${last.rowid}` : null,
+  };
+}
+
+function parseCursor(cursor?: string | null): { createdAt: string; rowid: number } | null {
+  if (!cursor) return null;
+  const index = cursor.lastIndexOf('|');
+  if (index <= 0) return null;
+  const createdAt = cursor.slice(0, index);
+  const rowid = Math.trunc(Number(cursor.slice(index + 1)));
+  if (!Number.isFinite(rowid)) return null;
+  return { createdAt, rowid };
 }
 
 /**

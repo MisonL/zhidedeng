@@ -159,9 +159,9 @@ export const admin = {
   restorePost: (id: string) =>
     request<{ id: string; restored: true }>(`/api/admin/posts/${encodeURIComponent(id)}/restore`, { method: 'POST', body: {} }),
   listRemovedPosts: (signal?: AbortSignal) => request<{ items: RemovedPost[] }>('/api/admin/posts/removed', { signal }),
-  listReports: (status: string, page: number, pageSize: number, signal?: AbortSignal) =>
-    request<{ items: AdminReport[]; total: number; page: number; pageSize: number }>(
-      `/api/admin/reports?status=${encodeURIComponent(status)}&page=${page}&pageSize=${pageSize}`,
+  listReports: (status: string, pageSize: number, cursor: string | null, signal?: AbortSignal) =>
+    request<{ items: AdminReport[]; total: number; pageSize: number; nextCursor: string | null }>(
+      `/api/admin/reports?status=${encodeURIComponent(status)}&pageSize=${pageSize}${cursor === null ? '' : `&cursor=${encodeURIComponent(cursor)}`}`,
       { signal },
     ),
   resolveReport: (id: string, status: 'resolved' | 'dismissed', note?: string) =>

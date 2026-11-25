@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { openDatabase, openStore } from '../../server/src/node-app.ts';
 import { seed } from '../../server/src/seed.ts';
-import { applyPurge, planPurge } from '../purge-demo.ts';
+import { applyPurge, countOrphanReports, planPurge } from '../purge-demo.ts';
 
 const at = new Date('2026-11-20T00:00:00.000Z');
 const demoStore = () => {
@@ -113,5 +113,36 @@ describe('清理演示数据时不留死举报', () => {
 
     const left = store.db.prepare('SELECT id FROM reports ORDER BY id').all() as Array<{ id: string }>;
     expect(left.map(row => row.id)).toEqual(['r5']);
+  });
+});
+
+describe('清理举报的时点问题', () => {
+  it('plan 之后才插进来的匹配举报，也会被清掉（不能用快照计数当开关）', () => {
+    const store = demoStore();
+    const post = store.allWithRemoved('post').find(item => item.source === 'demo')!;
+    const plan = planPurge(store);
+    expect(plan.reports).toBe(0);
+
+    // 规划之后、执行之前，又有人举报了一条演示文章。
+    store.db.prepare("INSERT INTO reports (id,targetType,targetId,reporterHandle,reason,status,createdAt) VALUES ('late','post',?,'realuser','事后补的','open',?)")
+      .run(post.id, at.toISOString());
+    applyPurge(store, plan);
+
+    const left = store.db.prepare('SELECT id FROM reports').all() as Array<{ id: string }>;
+    expect(left).toEqual([]);
+    // 而按快照计数的现场复算也应当看到它。
+    expect(countOrphanReports(store, plan)).toBe(0);
+  });
+
+  it('实体已经清空、只剩孤儿举报时，现场复算仍能发现并清掉', () => {
+    const store = demoStore();
+    const post = store.allWithRemoved('post').find(item => item.source === 'demo')!;
+    store.db.prepare("INSERT INTO reports (id,targetType,targetId,reporterHandle,reason,status,createdAt) VALUES ('orphan','post',?,'realuser','x','open',?)")
+      .run(post.id, at.toISOString());
+    const plan = planPurge(store);
+    applyPurge(store, plan);
+    // 演示实体已经没了，只剩这条孤儿举报；现场复算必须是 0（已经清干净）。
+    expect(countOrphanReports(store, plan)).toBe(0);
+    expect(store.db.prepare('SELECT COUNT(*) c FROM reports').get()).toMatchObject({ c: 0 });
   });
 });

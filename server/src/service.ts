@@ -620,11 +620,15 @@ export class Service {
     // 站点 slug 由 hostname 决定而不是 originKey，模型 slug 就是 payload.slug。
     const items = rows.map((row) => {
       const payload = JSON.parse(row.payload) as { title?: string; name?: string; slug?: string };
+      const targetSlug = this.materializedSlug(row, payload);
       return {
         id: row.id, kind: row.kind, status: row.status, reason: row.reason ?? null,
         title: payload.title ?? payload.name ?? payload.slug ?? row.id,
         createdAt: row.createdAt, reviewedAt: row.reviewedAt ?? null,
-        targetSlug: this.materializedSlug(row, payload),
+        targetSlug,
+        // 已通过却拿不到链接 = 曾经上线、现在被撤下/下架了。区分出来，
+        // 否则前端只能显示「已通过」而没有任何链接，作者会以为撤下没生效。
+        ...(row.status === 'approved' && targetSlug === null ? { withdrawn: true } : {}),
       };
     });
     return paginate(items, query);

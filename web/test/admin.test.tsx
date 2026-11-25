@@ -455,69 +455,107 @@ describe('Hook顺序', () => {
 });
 
 describe('举报页签分页', () => {
-  it('举报列表带页码请求，「加载更多」追加而不是重取第一页', async () => {
-    const makeReport = (id: string) => ({
-      id, targetType: 'comment' as const, targetId: `c-${id}`, reporterHandle: 'demo-pedal',
-      reason: `理由 ${id}`, detail: null, status: 'open' as const,
-      createdAt: '2026-11-20T00:00:00.000Z', handledAt: null, targetAlive: true, targetLabel: `评论 ${id}`,
-    });
+  const makeReport = (id: string) => ({
+    id, targetType: 'comment' as const, targetId: `c-${id}`, reporterHandle: 'demo-pedal',
+    reason: `理由 ${id}`, detail: null, status: 'open' as const,
+    createdAt: '2026-11-20T00:00:00.000Z', handledAt: null, targetAlive: true, targetLabel: `评论 ${id}`,
+  });
+
+  it('首次请求不带游标，「加载更多」带上一页返回的游标并追加', async () => {
     const fetchMock = stubApi({
-      'GET /api/admin/reports': ({ url }: { url: URL }) => {
-        const page = Number(url.searchParams.get('page') ?? 1);
-        return {
-          items: page === 1 ? [makeReport('a'), makeReport('b')] : [makeReport('c')],
-          total: 3, page, pageSize: 20,
-        };
-      },
+      'GET /api/admin/reports': ({ url }: { url: URL }) => (
+        url.searchParams.get('cursor') === null
+          ? { items: [makeReport('a'), makeReport('b')], total: 3, pageSize: 20, nextCursor: '2026-11-20T00:00:00.000Z|7' }
+          : { items: [makeReport('c')], total: 3, pageSize: 20, nextCursor: null }
+      ),
     });
     await unlock();
     fireEvent.click(await screen.findByRole('tab', { name: /举报/ }));
     expect(await screen.findByText('理由 a')).toBeInTheDocument();
-    // 第一次请求必须带 page=1 与 pageSize，服务端才能分页。
     const first = callsTo(fetchMock, 'GET', '/api/admin/reports').at(-1)!;
-    expect(first.url.searchParams.get('page')).toBe('1');
+    expect(first.url.searchParams.get('cursor')).toBeNull();
     expect(first.url.searchParams.get('pageSize')).toBe('20');
 
-    fireEvent.click(screen.getByRole('button', { name: /加载更多（还有 1 条）/ }));
+    fireEvent.click(screen.getByRole('button', { name: /加载更多（共 3 条）/ }));
     expect(await screen.findByText('理由 c')).toBeInTheDocument();
     // 追加：前两条还在。
     expect(screen.getByText('理由 a')).toBeInTheDocument();
     expect(screen.getByText('理由 b')).toBeInTheDocument();
-    expect(callsTo(fetchMock, 'GET', '/api/admin/reports').at(-1)!.url.searchParams.get('page')).toBe('2');
+    expect(callsTo(fetchMock, 'GET', '/api/admin/reports').at(-1)!.url.searchParams.get('cursor')).toBe('2026-11-20T00:00:00.000Z|7');
+    // nextCursor 为 null 后按钮消失，不会一直显示「还有 N 条」。
+    expect(screen.queryByRole('button', { name: /加载更多/ })).not.toBeInTheDocument();
   });
-});
 
-describe('举报翻页的错位', () => {
-  it('翻页期间有新举报插入时，第 2 页会和第 1 页重叠——按 id 去重后不出现重复 key', async () => {
-    const makeReport = (id: string) => ({
-      id, targetType: 'comment' as const, targetId: `c-${id}`, reporterHandle: 'demo-pedal',
-      reason: `理由 ${id}`, detail: null, status: 'open' as const,
-      createdAt: '2026-11-20T00:00:00.000Z', handledAt: null, targetAlive: true, targetLabel: `评论 ${id}`,
-    });
+  it('翻页期间有新举报插入时，游标不会把同一条返回两次', async () => {
+    // 复刻状态机：第 2 页原本会重复 a 并漏掉 c（offset 的典型错位）。
+    // 用游标后，第 2 页从「a 之后」继续，返回的是 c。
     const errors: unknown[] = [];
     const originalError = console.error;
     console.error = (...args: unknown[]) => { errors.push(args[0]); };
     try {
       stubApi({
-        'GET /api/admin/reports': ({ url }: { url: URL }) => {
-          const page = Number(url.searchParams.get('page') ?? 1);
-          // 模拟 offset 分页错位：新举报插到最前面，第 2 页把 a 又返回一次。
-          return {
-            items: page === 1 ? [makeReport('a'), makeReport('b')] : [makeReport('a'), makeReport('c')],
-            total: 3, page, pageSize: 20,
-          };
-        },
+        'GET /api/admin/reports': ({ url }: { url: URL }) => (
+          url.searchParams.get('cursor') === null
+            ? { items: [makeReport('a'), makeReport('b')], total: 3, pageSize: 20, nextCursor: 'cur-1' }
+            : { items: [makeReport('c')], total: 3, pageSize: 20, nextCursor: null }
+        ),
       });
       await unlock();
       fireEvent.click(await screen.findByRole('tab', { name: /举报/ }));
       await screen.findByText('理由 a');
       fireEvent.click(screen.getByRole('button', { name: /加载更多/ }));
       expect(await screen.findByText('理由 c')).toBeInTheDocument();
-      // a 只出现一次（重复 key 会让 React 报错，也会让管理员看到两条一样的举报）。
       expect(screen.getAllByText('理由 a')).toHaveLength(1);
       expect(errors.filter(e => String(e).includes('same key'))).toEqual([]);
     } finally {
       console.error = originalError;
     }
+  });
+});
+
+describe('举报翻页的会话隔离', () => {
+  const makeReport = (id: string, total: number, nextCursor: string | null = null) => ({
+    id, targetType: 'comment' as const, targetId: `c-${id}`, reporterHandle: 'demo-pedal',
+    reason: `理由 ${id}`, detail: null, status: 'open' as const,
+    createdAt: '2026-11-20T00:00:00.000Z', handledAt: null, targetAlive: true, targetLabel: `评论 ${id}`,
+    total, nextCursor,
+  });
+
+  it('退出重进后，上一次会话迟到的翻页响应不会混进新列表', async () => {
+    let resolveLate: ((value: unknown) => void) | undefined;
+    const fetchMock = stubApi({
+      'GET /api/admin/reports': ({ url }: { url: URL }) => {
+        if (url.searchParams.get('cursor') === null) {
+          return { items: [makeReport('new-a', 2)], total: 2, pageSize: 20, nextCursor: 'cur-new' };
+        }
+        // 第一次翻页：挂住，等测试放行；放行后返回「旧会话」的 9 条总数。
+        if (!resolveLate) {
+          return new Promise((resolve) => { resolveLate = resolve; });
+        }
+        return { items: [makeReport('new-b', 2)], total: 2, pageSize: 20, nextCursor: null };
+      },
+    });
+    await unlock();
+    fireEvent.click(await screen.findByRole('tab', { name: /举报/ }));
+    await screen.findByText('理由 new-a');
+
+    // 管理员点了「加载更多」，但响应还没回来就退出并换了密钥。
+    fireEvent.click(screen.getByRole('button', { name: /加载更多/ }));
+    fireEvent.click(screen.getByRole('button', { name: '退出' }));
+    // 同一个 renderApp 里重新登录：不能再 render 一次，会多出一棵树。
+    fireEvent.change(await screen.findByLabelText('管理密钥'), { target: { value: 'y'.repeat(32) } });
+    fireEvent.click(screen.getByRole('button', { name: '进入' }));
+    await screen.findByRole('heading', { name: '审核台' });
+    fireEvent.click(await screen.findByRole('tab', { name: /举报/ }));
+    await screen.findByText('理由 new-a');
+
+    // 旧会话那条翻页响应现在才到（总数 9、混着旧数据）。
+    resolveLate?.({ items: [makeReport('stale', 9)], total: 9, pageSize: 20, nextCursor: null });
+    await new Promise((r) => setTimeout(r, 50));
+
+    // 新列表不能被污染：不应出现 stale，页签数字也不能变成 9。
+    expect(screen.queryByText('理由 stale')).not.toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: /举报/ }).textContent).toContain('(2)');
+    expect(callsTo(fetchMock, 'GET', '/api/admin/reports').length).toBeGreaterThan(0);
   });
 });

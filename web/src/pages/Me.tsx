@@ -54,13 +54,18 @@ function MySubmissions() {
                 <article key={item.id} className="card">
                   <div className="tags">
                     <span className="tag">{KIND_LABEL[item.kind]}</span>
-                    <span className={`tag ${item.status === 'rejected' ? 'tag-warn' : ''}`}>{STATUS_LABEL[item.status] ?? item.status}</span>
+                    <span className={`tag ${item.status === 'rejected' || item.withdrawn ? 'tag-warn' : ''}`}>
+                      {item.withdrawn ? '已撤下' : STATUS_LABEL[item.status] ?? item.status}
+                    </span>
                   </div>
                   <h3 className="post-title">{to ? <Link to={to}>{item.title}</Link> : item.title}</h3>
                   {/* 驳回理由必须能看见：否则作者只知道没通过，不知道改什么。 */}
                   {reason && <p className="post-review-reason">未通过原因：{reason}</p>}
                   <p className="hint">
                     {item.status === 'approved' && to ? '已上线，点标题查看'
+                      // 已通过但没有落地链接：作者自己撤下了，或管理员下架了。
+                      // 这时说「已通过」会让人以为撤下没生效。
+                      : item.withdrawn ? '已撤下，需要恢复请站内联系管理员'
                       : item.status === 'approved' ? '已通过'
                       // superseded 说明线上已经是同站的新版本，这条不必再等也不必改。
                       // 原先一律落到「审核后才会公开」，和上面的「已被新提交替代」互相矛盾。
@@ -100,7 +105,7 @@ function MyPosts() {
   const paged = usePaged((page, signal) => api.getMyPosts({ page, pageSize: 10 }, signal), []);
   // 页头的「分享 N」读的是 /api/me。撤下后不刷新它，页头还显示撤之前的数字，
   // 而下面的列表已经少了一篇——同一屏里两个互相矛盾的数字（实测见过 1 vs 0）。
-  const { refreshMe } = useMe();
+  const { refreshMe, setMe, data: me } = useMe();
   // 本地已撤下的 id。撤下后不整页重取：重取会让列表跳回第一页，
   // 而作者往往是从第 2 页翻到某篇才决定撤的。
   const [withdrawn, setWithdrawn] = useState<Set<string>>(new Set());
@@ -113,6 +118,9 @@ function MyPosts() {
     try {
       await api.deletePost(id);
       setWithdrawn((set) => new Set(set).add(id));
+      // 先在本地把页头的「分享」减一，再去取真实值：refreshMe 失败时只会 toast，
+      // 不会抛错，但如果只依赖它，网络抖动就会让页头停在撤之前的数字。
+      if (me) setMe({ ...me, shareCount: Math.max(0, me.shareCount - 1) });
       // 刷新失败不该把「已撤下」这条成功信息吞掉：refreshMe 自己会 toast。
       await refreshMe();
     } catch (cause) {

@@ -828,44 +828,87 @@ describe('演示站点下的真实评论', () => {
 });
 
 describe('举报列表分页', () => {
-  it('分页取数、总数正确，两页之间没有重复', async () => {
+  it('游标翻页不重不漏，翻页期间插入新举报也不影响已有位置', async () => {
     const a = await account('alice');
     const post = await submit(a, '被多人举报的文章');
     await admin(`/api/admin/posts/${post.id}/review`, { status: 'approved' });
     // 直接写库造量：注册接口有按 IP 的每小时上限，25 个账号会把测试自己限流掉。
-    // 这里要验的是分页，不是注册。
     const insert = server.db.prepare(
       "INSERT INTO reports (id,targetType,targetId,reporterHandle,reason,status,createdAt) VALUES (?,?,?,?,?,'open',?)",
     );
     for (let i = 0; i < 25; i++) {
-      // createdAt 递增，确保排序有确定的先后（相同的 createdAt 会退化成 rowid 顺序）。
       insert.run(`r-${String(i).padStart(2, '0')}`, 'post', post.id, `reporter${i}`, `第 ${i} 条举报`,
         `2026-11-2${Math.floor(i / 10)}T0${i % 10}:00:00.000Z`);
     }
     const get = async (query: string) => await (await server.app.request(`/api/admin/reports?${query}`, { headers: bearer })).json() as
-      { items: Array<{ id: string }>; total: number; page: number; pageSize: number };
+      { items: Array<{ id: string }>; total: number; pageSize: number; nextCursor: string | null };
 
-    const first = await get('page=1&pageSize=10');
+    const first = await get('pageSize=10');
     expect(first.total).toBe(25);
     expect(first.items).toHaveLength(10);
-    expect(first.page).toBe(1);
-    const second = await get('page=2&pageSize=10');
-    expect(second.items).toHaveLength(10);
-    // 分页最典型的 bug：排序不稳定，第 2 页又出现第 1 页的条目。
-    const firstIds = new Set(first.items.map(item => item.id));
-    expect(second.items.some(item => firstIds.has(item.id))).toBe(false);
-    const last = await get('page=3&pageSize=10');
-    expect(last.items).toHaveLength(5);
-    // pageSize 有上限，不能让一次请求把全表拉出来。
-    expect((await get('page=1&pageSize=9999')).items.length).toBeLessThanOrEqual(50);
+    expect(first.nextCursor).not.toBeNull();
+
+    // 翻到一半时插入一条**最新**的举报：offset 分页会让后续页重复/漏条。
+    insert.run('r-new', 'post', post.id, 'late-reporter', '翻页期间插进来的', '2026-11-29T00:00:00.000Z');
+
+    const seen = new Set(first.items.map(item => item.id));
+    let cursor = first.nextCursor;
+    let guard = 0;
+    while (cursor !== null && guard++ < 10) {
+      const next = await get(`pageSize=10&cursor=${encodeURIComponent(cursor)}`);
+      for (const item of next.items) {
+        expect(seen.has(item.id)).toBe(false); // 不重
+        seen.add(item.id);
+      }
+      cursor = next.nextCursor;
+    }
+    // 不重且不漏：原来的 25 条一条不少（新插入那条因为排在游标之前，本来就不该出现在后面的页）。
+    expect(seen.size).toBe(25);
+    // pageSize 有上限。
+    expect((await get('pageSize=9999')).items.length).toBeLessThanOrEqual(50);
     // 参数写错必须是「按默认/上限处理」，不能 500：
     // Infinity 曾是 truthy 直接进 LIMIT，小数进 LIMIT/OFFSET 会抛异常。
-    for (const bad of ['page=1&pageSize=Infinity', 'page=1&pageSize=1.5', 'page=1.5&pageSize=10', 'page=-3&pageSize=0', 'page=abc&pageSize=abc']) {
+    for (const bad of ['pageSize=Infinity', 'pageSize=1.5', 'pageSize=0', 'pageSize=abc', 'pageSize=10&cursor=garbage', 'pageSize=10&cursor=']) {
       const response = await server.app.request(`/api/admin/reports?${bad}`, { headers: bearer });
       expect(response.status, bad).toBe(200);
       const body = await response.json() as { items: unknown[]; pageSize: number };
       expect(body.items.length, bad).toBeLessThanOrEqual(50);
       expect(Number.isInteger(body.pageSize), bad).toBe(true);
+    }
+  });
+});
+
+describe('举报列表的查询次数', () => {
+  it('一页无论多少条不同目标，查询次数都不随条数增长', async () => {
+    const a = await account('alice');
+    const post = await submit(a, '被测查询次数的文章');
+    await admin(`/api/admin/posts/${post.id}/review`, { status: 'approved' });
+    const insert = server.db.prepare(
+      "INSERT INTO reports (id,targetType,targetId,reporterHandle,reason,status,createdAt) VALUES (?,?,?,?,?,'open',?)",
+    );
+    // 20 条举报指向 20 个**不同**的文章 id：旧实现对每条各查两次。
+    for (let i = 0; i < 20; i++) {
+      insert.run(`q-${i}`, 'post', `fake-post-${i}`, `reporter${i}`, `理由 ${i}`, `2026-11-25T0${i % 10}:00:00.000Z`);
+    }
+    let statements = 0;
+    const originalPrepare = server.db.prepare.bind(server.db);
+    (server.db as unknown as { prepare: typeof server.db.prepare }).prepare = ((sql: string) => {
+      statements += 1;
+      return originalPrepare(sql);
+    }) as typeof server.db.prepare;
+    try {
+      statements = 0;
+      const body = await (await server.app.request('/api/admin/reports?pageSize=20', { headers: bearer })).json() as
+        { items: Array<{ targetAlive: boolean; targetLabel: string }> };
+      expect(body.items).toHaveLength(20);
+      // 目标都不存在 → 全部「不在线」，标签回落到 id（与旧版语义一致）。
+      expect(body.items.every(item => item.targetAlive === false)).toBe(true);
+      // 倒序：i=9 与 i=19 都是 T09，靠 rowid DESC 让后插入的 i=19 排在最前。
+      expect(body.items[0].targetLabel).toBe('fake-post-19');
+      // 3 次：count、分页 SELECT、entities IN。评论为空所以没有第四条。
+      expect(statements).toBeLessThanOrEqual(4);
+    } finally {
+      (server.db as unknown as { prepare: typeof server.db.prepare }).prepare = originalPrepare as typeof server.db.prepare;
     }
   });
 });

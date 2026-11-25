@@ -418,6 +418,29 @@ describe('撤下自己的文章', () => {
     await waitFor(() => expect(callsTo(fetchMock, 'GET', '/api/me').length).toBeGreaterThan(1));
     await waitFor(() => expect(shareCell()).toBe('0'));
   });
+
+  it('撤下后刷新 /api/me 失败，页头数字也不该停在撤之前', async () => {
+    // refreshMe 失败只 toast、不抛错。若只依赖它，网络一抖页头就与列表矛盾。
+    let failRefresh = false;
+    const published = makePost('mine-1', { title: '我写的那篇', status: 'approved' });
+    stubApi({
+      'GET /api/me/posts': page([published]),
+      'GET /api/me': () => (failRefresh ? apiError(503, 'UNAVAILABLE', '暂时不可用') : { ...me, shareCount: 1 }),
+      'DELETE /api/posts/mine-1': () => { failRefresh = true; return { id: 'mine-1', removed: true }; },
+    });
+    renderApp('/me?tab=posts');
+    expect(await screen.findByText('我写的那篇')).toBeInTheDocument();
+    const shareCell = () => {
+      const cell = [...document.querySelectorAll('.me-stats div')].find(node => node.querySelector('dt')?.textContent === '分享');
+      return cell?.querySelector('dd')?.textContent ?? '';
+    };
+    expect(shareCell()).toBe('1');
+    fireEvent.click(screen.getByRole('button', { name: '撤下这篇文章' }));
+    fireEvent.click(screen.getByRole('button', { name: '撤下' }));
+    await screen.findByText(/已撤下。需要恢复请站内联系管理员/);
+    // 刷新失败，但本地先减一，所以页头不能还写着 1。
+    await waitFor(() => expect(shareCell()).toBe('0'));
+  });
 });
 
 describe('预设头像', () => {
@@ -609,5 +632,23 @@ describe('切页期间的写请求', () => {
     await waitFor(() => expect(screen.queryByText('p1 晚到的评论')).not.toBeInTheDocument());
     expect(screen.getByText('p2 的评论')).toBeInTheDocument();
     await waitFor(() => expect((screen.getByLabelText('写评论') as HTMLTextAreaElement).value).toBe('p2 的新草稿'));
+  });
+});
+
+describe('我的投稿里的撤下状态', () => {
+  it('已撤下的投稿显示「已撤下」而不是「已通过」', async () => {
+    stubApi({
+      'GET /api/me/submissions': page([{
+        id: 's1', kind: 'post', status: 'approved', reason: null, title: '我撤下的那篇',
+        createdAt: '2026-11-24T00:00:00.000Z', reviewedAt: '2026-11-24T01:00:00.000Z',
+        targetSlug: null, withdrawn: true,
+      }]),
+    });
+    renderApp('/me?tab=submissions');
+    expect(await screen.findByText('我撤下的那篇')).toBeInTheDocument();
+    expect(screen.getByText('已撤下', { selector: '.tag' })).toBeInTheDocument();
+    expect(screen.getByText(/需要恢复请站内联系管理员/)).toBeInTheDocument();
+    // 正文里不能再出现「已通过」——那是两套互相矛盾的说法。
+    expect(screen.queryByText('已通过')).not.toBeInTheDocument();
   });
 });

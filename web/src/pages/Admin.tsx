@@ -71,6 +71,9 @@ type Tab = 'submissions' | 'posts' | 'published' | 'removed' | 'removedPosts' | 
 
 export default function Admin() {
   const [token, setToken] = useState(adminToken.get());
+  // 令牌代际。换密钥时更新；异步回调据此判断自己是不是上一个会话的遗留。
+  const tokenRef = useRef(token);
+  tokenRef.current = token;
   const [draft, setDraft] = useState('');
   const [tab, setTab] = useState<Tab>('submissions');
   const [submissions, setSubmissions] = useState<SubmissionRecord[]>();
@@ -79,9 +82,10 @@ export default function Admin() {
   const [removedPosts, setRemovedPosts] = useState<RemovedPost[]>();
   const [published, setPublished] = useState<AdminPostRow[]>();
   const [reports, setReports] = useState<AdminReport[]>();
-  // 举报是唯一会无限增长的列表，必须分页；总数单独存，用来显示「还有多少」。
+  // 举报是唯一会无限增长的列表，必须分页。用**游标**而不是页码：
+  // offset 在「翻页期间有人新提交举报」时会重复上一条、并永久漏掉真正该出现的那条。
   const [reportTotal, setReportTotal] = useState(0);
-  const [reportPage, setReportPage] = useState(1);
+  const [reportCursor, setReportCursor] = useState<string | null>(null);
   const [moreReports, setMoreReports] = useState(false);
   const [error, setError] = useState<string>();
   const [message, setMessage] = useState<string>();
@@ -137,11 +141,11 @@ export default function Admin() {
         if (!signal?.aborted) setRemovedPosts(data);
       }
       if (active === 'reports') {
-        const data = await admin.listReports('open', 1, REPORTS_PAGE_SIZE, signal);
+        const data = await admin.listReports('open', REPORTS_PAGE_SIZE, null, signal);
         if (!signal?.aborted) {
           setReports(data.items);
           setReportTotal(data.total);
-          setReportPage(1);
+          setReportCursor(data.nextCursor);
         }
       }
     } catch (caught) {
@@ -170,7 +174,7 @@ export default function Admin() {
  setPublished(undefined);
     setReports(undefined);
     setReportTotal(0);
-    setReportPage(1);
+    setReportCursor(null);
     setMoreReports(false);
     // 切页签/换密钥时收起处理中的举报表单并丢掉备注：
     // 上一条举报的备注跟到另一条上，是很典型的误提交来源。
@@ -199,7 +203,7 @@ export default function Admin() {
     setPostReasonError(undefined);
     setReports(undefined);
     setReportTotal(0);
-    setReportPage(1);
+    setReportCursor(null);
     setMoreReports(false);
     setOpenReportId(undefined);
     setReportNotes({});
@@ -276,25 +280,34 @@ export default function Admin() {
     }
   }
 
-  /** 举报列表翻页。就地追加而不是重取第一页：管理员可能正看着第 2 页。 */
+  /**
+   * 举报列表翻页。就地追加而不是重取第一页：管理员可能正看着后面的条目。
+   *
+   * 必须带上 token 代际校验：换密钥/退出重进之后，上一次会话的翻页响应可能
+   * 晚到并被追加进新列表（实测出现过列表 2 条却显示「(9)」）。`load()` 的
+   * 其他分支靠 AbortSignal 挡这个，这里同样挡。
+   */
   async function loadMoreReports() {
+    if (reportCursor === null) return;
+    const generation = token;
     setMoreReports(true);
     setError(undefined);
     try {
-      const next = reportPage + 1;
-      const data = await admin.listReports('open', next, REPORTS_PAGE_SIZE);
-      // 按 id 去重再追加：offset 分页在「翻页期间有人新提交举报」时会整体错位，
-      // 第 2 页可能又包含第 1 页的条目。React 的 key 重复会直接报错。
+      const data = await admin.listReports('open', REPORTS_PAGE_SIZE, reportCursor);
+      if (tokenRef.current !== generation) return;
+      // 游标分页本身不会重，但翻页期间那条举报可能刚被处置；仍按 id 去重一次，
+      // 重复的 key 会让 React 直接报错。
       setReports((current) => {
         const seen = new Set((current ?? []).map(report => report.id));
         return [...(current ?? []), ...data.items.filter(report => !seen.has(report.id))];
       });
       setReportTotal(data.total);
-      setReportPage(next);
+      setReportCursor(data.nextCursor);
     } catch (caught) {
+      if (tokenRef.current !== generation) return;
       setError((caught as Error).message);
     } finally {
-      setMoreReports(false);
+      if (tokenRef.current === generation) setMoreReports(false);
     }
   }
 
@@ -764,10 +777,10 @@ export default function Admin() {
               ))}
               {/* 举报会一直攒着，翻页比一次全取更稳：管理员正在处理第 1 页时，
                   后面几百条不该一起塞进 DOM。 */}
-              {reports.length < reportTotal && (
+              {reportCursor !== null && (
                 <li>
                   <button type="button" className="btn btn-small btn-ghost" disabled={moreReports} onClick={() => { void loadMoreReports(); }}>
-                    {moreReports ? '加载中…' : `加载更多（还有 ${reportTotal - reports.length} 条）`}
+                    {moreReports ? '加载中…' : `加载更多（共 ${reportTotal} 条）`}
                   </button>
                 </li>
               )}
