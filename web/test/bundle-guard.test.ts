@@ -68,6 +68,16 @@ describe('前端产物不含 zod', () => {
     expect(result.description).toBe(notice);
   }, 300_000);
 
+  it('robots.txt 在清演示数据之前是全站禁止，而不是放开抓取', () => {
+    // 计划文档三处都写「robots.txt 保持 Disallow: /」，实际文件一度是
+    // Allow: /——文档和代码各说一套。虚构内容被索引后不可撤回，这条必须钉死。
+    const robots = readFileSync(join(webRoot, 'public/robots.txt'), 'utf8');
+    const directives = robots.split('\n').filter(line => /^\s*(Allow|Disallow):/.test(line)).map(line => line.trim());
+    expect(directives).toContain('Disallow: /');
+    // 不能同时出现 Allow: /（后者会把全站放行，等于白写）。
+    expect(directives).not.toContain('Allow: /');
+  });
+
   it('检查器本身能发现真正把 zod 带进产物的写法', () => {
     // 养一条能抓人的狗。这段是审查实测能绕过静态扫描的写法：
     // 字符串里的 // 曾让剥注释的正则吞掉同一行真实的导入。

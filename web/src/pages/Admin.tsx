@@ -8,6 +8,9 @@ import { Skeleton } from '../components/AsyncView';
 import ConfirmButton from '../components/ConfirmButton';
 import { useCatalog } from '../state';
 
+/** 举报每页条数。跟服务端 /api/admin/reports 的上限（50）留出余量。 */
+const REPORTS_PAGE_SIZE = 20;
+
 /** 服务端 ids 模式的单批上限，与 submissions.ts 的 schema 保持一致。 */
 const BATCH_REVIEW_LIMIT = 100;
 
@@ -76,6 +79,10 @@ export default function Admin() {
   const [removedPosts, setRemovedPosts] = useState<RemovedPost[]>();
   const [published, setPublished] = useState<AdminPostRow[]>();
   const [reports, setReports] = useState<AdminReport[]>();
+  // 举报是唯一会无限增长的列表，必须分页；总数单独存，用来显示「还有多少」。
+  const [reportTotal, setReportTotal] = useState(0);
+  const [reportPage, setReportPage] = useState(1);
+  const [moreReports, setMoreReports] = useState(false);
   const [error, setError] = useState<string>();
   const [message, setMessage] = useState<string>();
   const [busy, setBusy] = useState(false);
@@ -130,8 +137,12 @@ export default function Admin() {
         if (!signal?.aborted) setRemovedPosts(data);
       }
       if (active === 'reports') {
-        const data = (await admin.listReports('open', signal)).items;
-        if (!signal?.aborted) setReports(data);
+        const data = await admin.listReports('open', 1, REPORTS_PAGE_SIZE, signal);
+        if (!signal?.aborted) {
+          setReports(data.items);
+          setReportTotal(data.total);
+          setReportPage(1);
+        }
       }
     } catch (caught) {
       if (signal?.aborted) return;
@@ -158,6 +169,9 @@ export default function Admin() {
  setRemovedPosts(undefined);
  setPublished(undefined);
     setReports(undefined);
+    setReportTotal(0);
+    setReportPage(1);
+    setMoreReports(false);
     // 切页签/换密钥时收起处理中的举报表单并丢掉备注：
     // 上一条举报的备注跟到另一条上，是很典型的误提交来源。
     setOpenReportId(undefined);
@@ -184,6 +198,9 @@ export default function Admin() {
     setPostReasons({});
     setPostReasonError(undefined);
     setReports(undefined);
+    setReportTotal(0);
+    setReportPage(1);
+    setMoreReports(false);
     setOpenReportId(undefined);
     setReportNotes({});
   }
@@ -256,6 +273,23 @@ export default function Admin() {
       setError((caught as Error).message);
     } finally {
       setBusy(false);
+    }
+  }
+
+  /** 举报列表翻页。就地追加而不是重取第一页：管理员可能正看着第 2 页。 */
+  async function loadMoreReports() {
+    setMoreReports(true);
+    setError(undefined);
+    try {
+      const next = reportPage + 1;
+      const data = await admin.listReports('open', next, REPORTS_PAGE_SIZE);
+      setReports((current) => [...(current ?? []), ...data.items]);
+      setReportTotal(data.total);
+      setReportPage(next);
+    } catch (caught) {
+      setError((caught as Error).message);
+    } finally {
+      setMoreReports(false);
     }
   }
 
@@ -408,7 +442,7 @@ export default function Admin() {
           已下架文章 {removedPosts ? `(${withdrawnPosts.length})` : ''}
         </button>
         <button type="button" role="tab" aria-selected={tab === 'reports'} className={`btn btn-small ${tab === 'reports' ? 'btn-red' : 'btn-ghost'}`} onClick={() => setTab('reports')}>
-          举报 {reports ? `(${reports.length})` : ''}
+          举报 {reports ? `(${reportTotal})` : ''}
         </button>
       </div>
       {/* 退出不是页签：它不切换内容区，放在 tablist 外面，否则读屏会把它
@@ -723,6 +757,15 @@ export default function Admin() {
                   )}
                 </li>
               ))}
+              {/* 举报会一直攒着，翻页比一次全取更稳：管理员正在处理第 1 页时，
+                  后面几百条不该一起塞进 DOM。 */}
+              {reports.length < reportTotal && (
+                <li>
+                  <button type="button" className="btn btn-small btn-ghost" disabled={moreReports} onClick={() => { void loadMoreReports(); }}>
+                    {moreReports ? '加载中…' : `加载更多（还有 ${reportTotal - reports.length} 条）`}
+                  </button>
+                </li>
+              )}
             </ul>
           )
       )}

@@ -826,3 +826,37 @@ describe('演示站点下的真实评论', () => {
     expect(list.items.some(item => item.id === comment.id)).toBe(false);
   });
 });
+
+describe('举报列表分页', () => {
+  it('分页取数、总数正确，两页之间没有重复', async () => {
+    const a = await account('alice');
+    const post = await submit(a, '被多人举报的文章');
+    await admin(`/api/admin/posts/${post.id}/review`, { status: 'approved' });
+    // 直接写库造量：注册接口有按 IP 的每小时上限，25 个账号会把测试自己限流掉。
+    // 这里要验的是分页，不是注册。
+    const insert = server.db.prepare(
+      "INSERT INTO reports (id,targetType,targetId,reporterHandle,reason,status,createdAt) VALUES (?,?,?,?,?,'open',?)",
+    );
+    for (let i = 0; i < 25; i++) {
+      // createdAt 递增，确保排序有确定的先后（相同的 createdAt 会退化成 rowid 顺序）。
+      insert.run(`r-${String(i).padStart(2, '0')}`, 'post', post.id, `reporter${i}`, `第 ${i} 条举报`,
+        `2026-11-2${Math.floor(i / 10)}T0${i % 10}:00:00.000Z`);
+    }
+    const get = async (query: string) => await (await server.app.request(`/api/admin/reports?${query}`, { headers: bearer })).json() as
+      { items: Array<{ id: string }>; total: number; page: number; pageSize: number };
+
+    const first = await get('page=1&pageSize=10');
+    expect(first.total).toBe(25);
+    expect(first.items).toHaveLength(10);
+    expect(first.page).toBe(1);
+    const second = await get('page=2&pageSize=10');
+    expect(second.items).toHaveLength(10);
+    // 分页最典型的 bug：排序不稳定，第 2 页又出现第 1 页的条目。
+    const firstIds = new Set(first.items.map(item => item.id));
+    expect(second.items.some(item => firstIds.has(item.id))).toBe(false);
+    const last = await get('page=3&pageSize=10');
+    expect(last.items).toHaveLength(5);
+    // pageSize 有上限，不能让一次请求把全表拉出来。
+    expect((await get('page=1&pageSize=9999')).items.length).toBeLessThanOrEqual(50);
+  });
+});

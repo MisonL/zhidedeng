@@ -24,10 +24,13 @@ export interface PurgePlan {
   posts: string[];
   users: string[];
   banners: string[];
+  /** 会被一并删除的评论 id：举报行里按评论 id 引用它们，得先记下来。 */
+  comments: string[];
   offers: number;
   votes: number;
   favorites: number;
-  comments: number;
+  commentCount: number;
+  reports: number;
 }
 
 const inList = (values: readonly string[]) => values.map(() => '?').join(', ');
@@ -64,12 +67,26 @@ export function planPurge(store: ReturnType<typeof openStore>): PurgePlan {
     return parts.length === 0 ? null : `${table} WHERE ${parts.join(' OR ')}`;
   };
 
+  // 举报行按 id 引用对象，不跟着实体删除就会变成孤儿：
+  // 审核台会列出「目标已不在线」的死举报，占着队列还没法处理。
+  // 先把将被删掉的评论 id 取出来，它们的举报同样要清。
+  const commentRows = store.db.prepare(
+    `${where('SELECT id FROM comments') ?? 'SELECT id FROM comments WHERE 0'}`,
+  ).all(...targetParams.concat(users)) as Array<{ id: string }>;
+  const commentIds = commentRows.map(row => row.id);
+
+  const reportParts = [...orphanTargets];
+  if (commentIds.length > 0) reportParts.push(`(targetType = 'comment' AND targetId IN (${inList(commentIds)}))`);
+  if (users.length > 0) reportParts.push(`reporterHandle IN (${inList(users)})`);
+  const reportParams = [...targetParams, ...commentIds, ...users];
+
   return {
-    stations, posts, users, banners,
+    stations, posts, users, banners, comments: commentIds,
     offers: count(stations.length > 0 ? `SELECT COUNT(*) c FROM offers WHERE stationSlug IN (${inList(stations)})` : 'SELECT 0 c', stations),
     votes: count(`${where('SELECT COUNT(*) c FROM votes') ?? 'SELECT 0 c'}`, targetParams.concat(users)),
     favorites: count(`${where('SELECT COUNT(*) c FROM favorites') ?? 'SELECT 0 c'}`, targetParams.concat(users)),
-    comments: count(`${where('SELECT COUNT(*) c FROM comments') ?? 'SELECT 0 c'}`, targetParams.concat(users)),
+    commentCount: count(`${where('SELECT COUNT(*) c FROM comments') ?? 'SELECT 0 c'}`, targetParams.concat(users)),
+    reports: reportParts.length === 0 ? 0 : count(`SELECT COUNT(*) c FROM reports WHERE ${reportParts.join(' OR ')}`, reportParams),
   };
 }
 
@@ -88,6 +105,16 @@ export function applyPurge(store: ReturnType<typeof openStore>, plan: PurgePlan)
       for (const table of ['votes', 'favorites', 'comments', 'checkins']) {
         store.db.prepare(`DELETE FROM ${table} WHERE userHandle IN (${inList(plan.users)})`).run(...plan.users);
       }
+    }
+    // 举报行最后清：它按 id 引用上面被删掉的对象，早删或漏删都会留下死举报。
+    if (plan.reports > 0) {
+      const parts: string[] = [];
+      if (plan.stations.length > 0) parts.push(`(targetType = 'station' AND targetId IN (${inList(plan.stations)}))`);
+      if (plan.posts.length > 0) parts.push(`(targetType = 'post' AND targetId IN (${inList(plan.posts)}))`);
+      if (plan.comments.length > 0) parts.push(`(targetType = 'comment' AND targetId IN (${inList(plan.comments)}))`);
+      if (plan.users.length > 0) parts.push(`reporterHandle IN (${inList(plan.users)})`);
+      store.db.prepare(`DELETE FROM reports WHERE ${parts.join(' OR ')}`)
+        .run(...plan.stations, ...plan.posts, ...plan.comments, ...plan.users);
     }
     // 实体本身直接物理删除：软删除（removedAt）会让它们继续参与 slug 认领，
     // 反而更容易和新投稿撞车。
@@ -114,10 +141,12 @@ export async function main(argv: readonly string[]): Promise<number> {
     const plan = planPurge(store);
     const total = plan.stations.length + plan.posts.length + plan.users.length + plan.banners.length;
     console.log(`演示数据：站点 ${plan.stations.length}、文章 ${plan.posts.length}、用户 ${plan.users.length}、横幅 ${plan.banners.length}（共 ${total} 条实体）`);
-    console.log(`关联数据：报价 ${plan.offers}、投票 ${plan.votes}、收藏 ${plan.favorites}、评论 ${plan.comments}`);
+    console.log(`关联数据：报价 ${plan.offers}、投票 ${plan.votes}、收藏 ${plan.favorites}、评论 ${plan.commentCount}、举报 ${plan.reports}`);
     if (plan.stations.length > 0) console.log(`  站点：${plan.stations.join(', ')}`);
     if (plan.posts.length > 0) console.log(`  文章：${plan.posts.slice(0, 10).join(', ')}${plan.posts.length > 10 ? ` …共 ${plan.posts.length} 篇` : ''}`);
-    if (total === 0) {
+    // 孤儿举报（目标已删、举报人已删）也要能清，所以不能只看实体数。
+    const orphans = plan.offers + plan.votes + plan.favorites + plan.commentCount + plan.reports;
+    if (total === 0 && orphans === 0) {
       console.log('没有演示数据，无需清理。');
       return 0;
     }

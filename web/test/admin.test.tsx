@@ -453,3 +453,36 @@ describe('Hook顺序', () => {
  }
  });
 });
+
+describe('举报页签分页', () => {
+  it('举报列表带页码请求，「加载更多」追加而不是重取第一页', async () => {
+    const makeReport = (id: string) => ({
+      id, targetType: 'comment' as const, targetId: `c-${id}`, reporterHandle: 'demo-pedal',
+      reason: `理由 ${id}`, detail: null, status: 'open' as const,
+      createdAt: '2026-11-20T00:00:00.000Z', handledAt: null, targetAlive: true, targetLabel: `评论 ${id}`,
+    });
+    const fetchMock = stubApi({
+      'GET /api/admin/reports': ({ url }: { url: URL }) => {
+        const page = Number(url.searchParams.get('page') ?? 1);
+        return {
+          items: page === 1 ? [makeReport('a'), makeReport('b')] : [makeReport('c')],
+          total: 3, page, pageSize: 20,
+        };
+      },
+    });
+    await unlock();
+    fireEvent.click(await screen.findByRole('tab', { name: /举报/ }));
+    expect(await screen.findByText('理由 a')).toBeInTheDocument();
+    // 第一次请求必须带 page=1 与 pageSize，服务端才能分页。
+    const first = callsTo(fetchMock, 'GET', '/api/admin/reports').at(-1)!;
+    expect(first.url.searchParams.get('page')).toBe('1');
+    expect(first.url.searchParams.get('pageSize')).toBe('20');
+
+    fireEvent.click(screen.getByRole('button', { name: /加载更多（还有 1 条）/ }));
+    expect(await screen.findByText('理由 c')).toBeInTheDocument();
+    // 追加：前两条还在。
+    expect(screen.getByText('理由 a')).toBeInTheDocument();
+    expect(screen.getByText('理由 b')).toBeInTheDocument();
+    expect(callsTo(fetchMock, 'GET', '/api/admin/reports').at(-1)!.url.searchParams.get('page')).toBe('2');
+  });
+});

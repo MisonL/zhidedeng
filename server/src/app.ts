@@ -503,7 +503,14 @@ function orderByMaterializeDependency(store: Store, ids: string[]): string[] {
   });
   app.get('/api/admin/posts', c => c.json(listPosts(store, postStatus.parse(c.req.query('status')))));
   // 举报只读列表 + 人工处置。没有「一键下架」：处置内容要走对应的下架接口。
-  app.get('/api/admin/reports', c => c.json(listReports(store, reportStatus.parse(c.req.query('status') ?? 'open'))));
+  app.get('/api/admin/reports', c => {
+    // 举报会一直攒着，必须分页。上面几类管理列表（帖子/站点）走的是另一套
+    // 整表返回的路径，它们有明确上限；举报没有，只能翻页。
+    const status = reportStatus.parse(c.req.query('status') ?? 'open');
+    const page = Math.max(1, Number(c.req.query('page') ?? 1) || 1);
+    const pageSize = Math.min(50, Math.max(1, Number(c.req.query('pageSize') ?? 20) || 20));
+    return c.json(listReports(store, status, page, pageSize));
+  });
   app.post('/api/admin/reports/:id/resolve', async c => {
     const input = z.strictObject({
       status: z.enum(['resolved', 'dismissed']),

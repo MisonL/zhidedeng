@@ -20,7 +20,8 @@ describe('清除演示数据', () => {
     // 演示站 12 个，每个 6~15 条报价，不能是 0。
     expect(plan.offers).toBeGreaterThan(0);
     expect(plan.votes).toBeGreaterThan(0);
-    expect(plan.comments).toBeGreaterThan(0);
+    expect(plan.commentCount).toBeGreaterThan(0);
+    expect(plan.comments.length).toBe(plan.commentCount);
   });
 
   it('只删演示数据，真实投稿与真实账号一条不动', () => {
@@ -78,5 +79,39 @@ describe('清除演示数据', () => {
     // 目录不该被清理波及。
     expect(store.all('vendor').length).toBeGreaterThan(0);
     expect(store.all('model').length).toBeGreaterThan(0);
+  });
+});
+
+describe('清理演示数据时不留死举报', () => {
+  it('指向演示内容的举报、以及演示用户发出的举报，一并删掉', () => {
+    const store = demoStore();
+    const post = store.allWithRemoved('post').find(item => item.source === 'demo')!;
+    const station = store.allWithRemoved('station').find(item => item.source === 'demo')!;
+    const demoUser = store.all('user').find(user => user.handle.startsWith('demo-'))!;
+    const comment = store.db.prepare("SELECT id FROM comments WHERE targetType = 'post' AND targetId = ? LIMIT 1")
+      .get(post.id) as { id: string } | undefined;
+
+    // 真实用户举报演示内容（正常情况下服务端会拒，但历史数据可能有）。
+    store.db.prepare("INSERT INTO reports (id,targetType,targetId,reporterHandle,reason,status,createdAt) VALUES ('r1','post',?,'realuser','内容不实','open',?)")
+      .run(post.id, at.toISOString());
+    store.db.prepare("INSERT INTO reports (id,targetType,targetId,reporterHandle,reason,status,createdAt) VALUES ('r2','station',?,'realuser','广告','open',?)")
+      .run(station.slug, at.toISOString());
+    if (comment) {
+      store.db.prepare("INSERT INTO reports (id,targetType,targetId,reporterHandle,reason,status,createdAt) VALUES ('r3','comment',?,'realuser','辱骂','open',?)")
+        .run(comment.id, at.toISOString());
+    }
+    // 演示用户发出的举报（举报目标可以是真实内容，但举报人本身要被清掉）。
+    store.db.prepare("INSERT INTO reports (id,targetType,targetId,reporterHandle,reason,status,createdAt) VALUES ('r4','post','real-post','" + demoUser.handle + "','x','open',?)")
+      .run(at.toISOString());
+    // 真实用户举报真实内容：**不能动**。
+    store.db.prepare("INSERT INTO reports (id,targetType,targetId,reporterHandle,reason,status,createdAt) VALUES ('r5','post','real-post','realuser','x','open',?)")
+      .run(at.toISOString());
+
+    const plan = planPurge(store);
+    expect(plan.reports).toBe(comment ? 4 : 3);
+    applyPurge(store, plan);
+
+    const left = store.db.prepare('SELECT id FROM reports ORDER BY id').all() as Array<{ id: string }>;
+    expect(left.map(row => row.id)).toEqual(['r5']);
   });
 });

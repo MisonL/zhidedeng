@@ -168,7 +168,7 @@ channel 是队列的来源渠道，source 是物化内容的展示来源，二�
 | POST / GET | /api/admin/invite-codes | 创建邀请码（note?、maxUses?、expiresAt?）/ 列出元数据，明文只在创建响应里出现一次 |
 | POST | /api/admin/invite-codes/:id/revoke | 吊销邀请码，重复调用保留首次吊销时间 |
 | POST | /api/admin/comments/:id/hide | hidden=true/false，隐藏父评论时回复也不公开 |
-| GET | /api/admin/reports | 默认 status=open；按 createdAt 倒序，逐条带 targetAlive（被举报对象是否还在线）与 targetLabel |
+| GET | /api/admin/reports | 默认 status=open；按 createdAt DESC、rowid DESC 分页（page/pageSize，pageSize 上限 50，默认 20），返回 `{items,total,page,pageSize}`；逐条带 targetAlive（对象是否还在线）与 targetLabel。一页内按 targetType 各做一次 IN 查询，不做逐行点查 |
 | POST | /api/admin/reports/:id/resolve | status=resolved/dismissed，note 可选；**只改举报状态，不动被举报内容**（下架要走 withdraw/撤下/隐藏）。重复处置 409 ALREADY_HANDLED |
 | POST | /api/admin/users/:handle/disable | disabled=true/false，按用户名查账号；禁用时删除会话，公开内容保留 |
 

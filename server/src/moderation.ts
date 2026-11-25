@@ -140,32 +140,55 @@ export interface ReportRow {
   targetLabel: string;
 }
 
-export function listReports(store: Store, status: 'open' | 'resolved' | 'dismissed' = 'open') {
+export function listReports(store: Store, status: 'open' | 'resolved' | 'dismissed' = 'open', page = 1, pageSize = 20) {
+  // 分页 + 批量取目标，不再逐条查。
+  //
+  // 之前是全量 SELECT 再对每一行查一次目标（N+1）：举报攒到几百条时，打开
+  // 审核台就是几百次点查，而它偏偏是管理员最常开的页。这里按 targetType 各做
+  // 一次 IN 查询，复杂度从 O(举报数) 次查询降到 3 次。
+  const total = Number((store.db.prepare('SELECT count(*) AS count FROM reports WHERE status = ?').get(status) as { count: number }).count);
   const rows = store.db.prepare(
-    'SELECT id,targetType,targetId,reporterHandle,reason,detail,status,createdAt,handledAt FROM reports WHERE status = ? ORDER BY createdAt DESC',
-  ).all(status) as unknown as Array<Omit<ReportRow, 'targetAlive' | 'targetLabel'>>;
-  const items = rows.map((row) => {
-    // 一次一条地查目标，而不是先取全量对象再匹配：举报量小，但这里要保证
-    // 「已下架/已删除」也能被认出来，所以查实体（含 removedAt）而不是公开接口。
-    let targetAlive = false;
-    let targetLabel = row.targetId;
-    if (row.targetType === 'post') {
-      const post = store.getWithRemoved('post', row.targetId);
-      targetAlive = post !== undefined && store.removedAt('post', row.targetId) === null;
-      if (post) targetLabel = post.title;
-    } else if (row.targetType === 'station') {
-      const station = store.getWithRemoved('station', row.targetId);
-      targetAlive = station !== undefined && store.removedAt('station', row.targetId) === null;
-      if (station) targetLabel = station.name;
-    } else {
-      const comment = store.db.prepare('SELECT content, hidden, deletedAt FROM comments WHERE id = ?').get(row.targetId) as
-        { content: string; hidden: number; deletedAt: string | null } | undefined;
-      targetAlive = comment !== undefined && comment.hidden === 0 && comment.deletedAt === null;
-      if (comment) targetLabel = comment.content.slice(0, 40) || '（已删除的评论）';
+    `SELECT id,targetType,targetId,reporterHandle,reason,detail,status,createdAt,handledAt
+     FROM reports WHERE status = ? ORDER BY createdAt DESC, rowid DESC LIMIT ? OFFSET ?`,
+  ).all(status, pageSize, (page - 1) * pageSize) as unknown as Array<Omit<ReportRow, 'targetAlive' | 'targetLabel'>>;
+
+  const idsOf = (type: string) => [...new Set(rows.filter(row => row.targetType === type).map(row => row.targetId))];
+  const postIds = idsOf('post');
+  const stationIds = idsOf('station');
+  const commentIds = idsOf('comment');
+
+  const postAlive = new Map<string, { alive: boolean; label: string }>();
+  for (const id of postIds) {
+    const post = store.getWithRemoved('post', id);
+    postAlive.set(id, { alive: post !== undefined && store.removedAt('post', id) === null, label: post?.title ?? id });
+  }
+  const stationAlive = new Map<string, { alive: boolean; label: string }>();
+  for (const id of stationIds) {
+    const station = store.getWithRemoved('station', id);
+    stationAlive.set(id, { alive: station !== undefined && store.removedAt('station', id) === null, label: station?.name ?? id });
+  }
+  const commentAlive = new Map<string, { alive: boolean; label: string }>();
+  if (commentIds.length > 0) {
+    const found = store.db.prepare(
+      `SELECT id, content, hidden, deletedAt FROM comments WHERE id IN (${commentIds.map(() => '?').join(', ')})`,
+    ).all(...commentIds) as Array<{ id: string; content: string; hidden: number; deletedAt: string | null }>;
+    for (const comment of found) {
+      commentAlive.set(comment.id, {
+        alive: comment.hidden === 0 && comment.deletedAt === null,
+        label: comment.content.slice(0, 40) || '（已删除的评论）',
+      });
     }
-    return { ...row, targetAlive, targetLabel };
+  }
+
+  const items = rows.map((row) => {
+    const info = row.targetType === 'post' ? postAlive.get(row.targetId)
+      : row.targetType === 'station' ? stationAlive.get(row.targetId)
+        : commentAlive.get(row.targetId);
+    // 查不到 = 对象已经不在库里（被物理删掉了）。这仍然是「不在线」，
+    // 而且比「已下架」更该让审核员一眼看出来，所以标签保留 id 而不是空白。
+    return { ...row, targetAlive: info?.alive ?? false, targetLabel: info?.label ?? row.targetId };
   });
-  return { items, total: items.length };
+  return { items, total, page, pageSize };
 }
 
 /**

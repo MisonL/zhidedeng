@@ -210,6 +210,8 @@ rs-ops 指出：仓库 `docker-compose.yml:14` 绑 `127.0.0.1:8788`，而生产�
 
 **缓解**：SEO 主体必须排在清 demo 之后；在此之前 `robots.txt` 保持 `Disallow: /`。
 
+> 现状（2026-11-25）：`web/public/robots.txt` 已是 `Disallow: /`，并有一条守卫用例锁住「不能同时出现 `Allow: /`」——之前文档写 Disallow、文件里却是 Allow，两边各说一套。放开抓取的三行写法作为注释留在文件里，等「清完 demo + 有稳定域名」时启用。
+
 ### R2｜账号注销的身份串号
 
 如果释放用户名而不改写内容引用，新注册的同名用户会**继承旧用户的文章作者身份、榜单位置、历史投票**。`votes` 表没有外键（只有 `(userHandle, targetType, targetId)` 主键），删不掉也挡不住。
