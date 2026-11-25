@@ -13,8 +13,12 @@ import { openDatabase, openStore } from '../server/src/node-app.ts';
  * - 用户：种子用户的 handle 都在 `demo-` 前缀下（真实用户的 handle 由注册流程生成，不受影响）
  * - 横幅：种子里只有三条，且真实运营也不会建 banner，整类清掉
  *
- * 关联数据一起清：demo 站的报价、指向 demo 内容的投票/收藏/评论、
- * 以及 demo 用户自己发出的投票/收藏/评论。留着会变成指向不存在条目的孤儿行。
+ * 关联数据一起清：demo 站的报价、指向 demo 内容的投票/收藏/评论/举报，
+ * 以及 demo 用户自己发出的投票/收藏/评论/举报。留着会变成指向不存在条目的孤儿行。
+ *
+ * **已知不覆盖**：如果演示实体早先被别的途径删掉、只剩指向它们的举报行，
+ * 这个脚本认不出这些孤儿（它们的目标 id 已不在库里，无从判断属于哪一批）。
+ * 那种情况要人工按 `targets 已不在线` 在审核台逐条处置。
  *
  * 默认 dry-run 只打印，加 --apply 才写库——删数据没有回滚。
  */
@@ -34,24 +38,6 @@ export interface PurgePlan {
 }
 
 const inList = (values: readonly string[]) => values.map(() => '?').join(', ');
-
-/**
- * 当前库里「这一份清理计划会删掉的举报」有多少条。
- *
- * plan 里的 `reports` 只是拍快照那一刻的计数；从 plan 到 apply 之间库还可能变，
- * 所以 main 用这个函数按同一条 WHERE 现场再数一次，决定「到底有没有活干」。
- */
-export function countOrphanReports(store: ReturnType<typeof openStore>, plan: PurgePlan): number {
-  const parts: string[] = [];
-  if (plan.stations.length > 0) parts.push(`(targetType = 'station' AND targetId IN (${inList(plan.stations)}))`);
-  if (plan.posts.length > 0) parts.push(`(targetType = 'post' AND targetId IN (${inList(plan.posts)}))`);
-  if (plan.comments.length > 0) parts.push(`(targetType = 'comment' AND targetId IN (${inList(plan.comments)}))`);
-  if (plan.users.length > 0) parts.push(`reporterHandle IN (${inList(plan.users)})`);
-  if (parts.length === 0) return 0;
-  const row = store.db.prepare(`SELECT COUNT(*) AS c FROM reports WHERE ${parts.join(' OR ')}`)
-    .get(...plan.stations, ...plan.posts, ...plan.comments, ...plan.users) as { c: number };
-  return Number(row.c);
-}
 
 export function planPurge(store: ReturnType<typeof openStore>): PurgePlan {
   // station 的身份是 slug，post 的身份是 id：分开取，别用一个联合类型硬凑。
@@ -168,14 +154,8 @@ export async function main(argv: readonly string[]): Promise<number> {
     if (plan.stations.length > 0) console.log(`  站点：${plan.stations.join(', ')}`);
     if (plan.posts.length > 0) console.log(`  文章：${plan.posts.slice(0, 10).join(', ')}${plan.posts.length > 10 ? ` …共 ${plan.posts.length} 篇` : ''}`);
     if (total === 0) {
-      // 实体为 0 不代表没得清：指向已删对象的孤儿举报只有这里能发现。
-      // 用同一条判定再查一次当前库，而不是信 plan 的快照。
-      const orphan = countOrphanReports(store, plan);
-      if (orphan === 0) {
-        console.log('没有演示数据，无需清理。');
-        return 0;
-      }
-      console.log(`没有演示数据，但还有 ${orphan} 条指向已删对象的举报要清理。`);
+      console.log('没有演示数据，无需清理。');
+      return 0;
     }
     if (!apply) {
       console.log('\n当前是 dry-run，没有写库。确认无误后加 --apply 执行。');
