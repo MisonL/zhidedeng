@@ -22,6 +22,21 @@ import { listPosts, listReports, resolveReport, restorePost, reviewPost, setAcco
 import { autoApproveEnabled, enqueueBatch, enqueueSubmission, listSubmissions, reviewSubmission, setAutoApprove, submissionBatchReviewSchema, submissionBatchSchema, submissionQuerySchema, submissionReviewSchema, submissionState } from './submissions.ts';
 
 /**
+ * 把查询参数收敛成一个安全的整数。
+ *
+ * 直接用 `Number(x) || fallback` 挡不住两类输入：
+ * - `pageSize=Infinity` → Number 得到 Infinity，它是 truthy，会原样进 SQLite 的
+ *   LIMIT，直接抛异常变 500；
+ * - `page=1.5` → 同样是 truthy，而 SQLite 的 LIMIT/OFFSET 只接受整数。
+ * 这里统一截断再夹到区间内，让「参数写错」变成「按默认值/上限走」而不是 500。
+ */
+function clampInt(raw: string | undefined, fallback: number, min: number, max: number): number {
+  const value = Math.trunc(Number(raw ?? fallback));
+  if (!Number.isFinite(value)) return fallback;
+  return Math.min(max, Math.max(min, value));
+}
+
+/**
  * GET 参数归一。schema 是 strictObject 的，未知键会让整页 400，
  * 但对读接口来说多一个统计参数就整页失败显然不合理——直接丢掉未知键。
  * 空串按「没传」处理，否则 `?vendor=` 会命中 min(1) 校验。
@@ -507,9 +522,7 @@ function orderByMaterializeDependency(store: Store, ids: string[]): string[] {
     // 举报会一直攒着，必须分页。上面几类管理列表（帖子/站点）走的是另一套
     // 整表返回的路径，它们有明确上限；举报没有，只能翻页。
     const status = reportStatus.parse(c.req.query('status') ?? 'open');
-    const page = Math.max(1, Number(c.req.query('page') ?? 1) || 1);
-    const pageSize = Math.min(50, Math.max(1, Number(c.req.query('pageSize') ?? 20) || 20));
-    return c.json(listReports(store, status, page, pageSize));
+    return c.json(listReports(store, status, clampInt(c.req.query('page'), 1, 1, 100_000), clampInt(c.req.query('pageSize'), 20, 1, 50)));
   });
   app.post('/api/admin/reports/:id/resolve', async c => {
     const input = z.strictObject({

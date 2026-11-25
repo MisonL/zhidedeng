@@ -858,5 +858,14 @@ describe('举报列表分页', () => {
     expect(last.items).toHaveLength(5);
     // pageSize 有上限，不能让一次请求把全表拉出来。
     expect((await get('page=1&pageSize=9999')).items.length).toBeLessThanOrEqual(50);
+    // 参数写错必须是「按默认/上限处理」，不能 500：
+    // Infinity 曾是 truthy 直接进 LIMIT，小数进 LIMIT/OFFSET 会抛异常。
+    for (const bad of ['page=1&pageSize=Infinity', 'page=1&pageSize=1.5', 'page=1.5&pageSize=10', 'page=-3&pageSize=0', 'page=abc&pageSize=abc']) {
+      const response = await server.app.request(`/api/admin/reports?${bad}`, { headers: bearer });
+      expect(response.status, bad).toBe(200);
+      const body = await response.json() as { items: unknown[]; pageSize: number };
+      expect(body.items.length, bad).toBeLessThanOrEqual(50);
+      expect(Number.isInteger(body.pageSize), bad).toBe(true);
+    }
   });
 });
