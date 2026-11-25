@@ -9,7 +9,7 @@ import ConfirmButton from '../components/ConfirmButton';
 import PostCard from '../components/PostCard';
 import StationCard from '../components/StationCard';
 import { Avatar, AvatarPresetGlyph } from '../components/visuals';
-import { AVATAR_PRESETS } from '@zhidedeng/shared';
+import { AVATAR_PRESET_NAMES, AVATAR_PRESETS } from '@zhidedeng/shared';
 import { loginPath } from '../format';
 import { usePaged } from '../hooks';
 import { useHere, useMe } from '../state';
@@ -98,6 +98,9 @@ function Favorites() {
 
 function MyPosts() {
   const paged = usePaged((page, signal) => api.getMyPosts({ page, pageSize: 10 }, signal), []);
+  // 页头的「分享 N」读的是 /api/me。撤下后不刷新它，页头还显示撤之前的数字，
+  // 而下面的列表已经少了一篇——同一屏里两个互相矛盾的数字（实测见过 1 vs 0）。
+  const { refreshMe } = useMe();
   // 本地已撤下的 id。撤下后不整页重取：重取会让列表跳回第一页，
   // 而作者往往是从第 2 页翻到某篇才决定撤的。
   const [withdrawn, setWithdrawn] = useState<Set<string>>(new Set());
@@ -110,6 +113,8 @@ function MyPosts() {
     try {
       await api.deletePost(id);
       setWithdrawn((set) => new Set(set).add(id));
+      // 刷新失败不该把「已撤下」这条成功信息吞掉：refreshMe 自己会 toast。
+      await refreshMe();
     } catch (cause) {
       setError((cause as Error).message);
     } finally {
@@ -200,7 +205,7 @@ function Settings({ user }: { user: CurrentUser }) {
               className={`avatar-option ${avatar === preset ? 'selected' : ''}`}
               onClick={() => setAvatar(preset)}
             >
-              <AvatarPresetGlyph preset={preset} /> <span>{preset}</span>
+              <AvatarPresetGlyph preset={preset} /> <span>{AVATAR_PRESET_NAMES[preset]}</span>
             </button>
           ))}
         </div>

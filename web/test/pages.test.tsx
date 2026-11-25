@@ -390,6 +390,34 @@ describe('撤下自己的文章', () => {
     await waitFor(() => expect(callsTo(fetchMock, 'DELETE', '/api/posts/mine-1')).toHaveLength(1));
     expect(await screen.findByText(/已撤下。需要恢复请站内联系管理员/)).toBeInTheDocument();
   });
+
+  it('撤下后页头的「分享」数字跟着更新，不会和列表自相矛盾', async () => {
+    // 实测见过：列表已经空了，页头还写着「分享 1」。它读的是 /api/me，
+    // 不刷新就停在撤之前的数字。
+    let shareCount = 1;
+    const published = makePost('mine-1', { title: '我写的那篇', status: 'approved' });
+    const fetchMock = stubApi({
+      'GET /api/me/posts': page([published]),
+      'GET /api/me': () => ({ ...me, shareCount }),
+      'DELETE /api/posts/mine-1': () => { shareCount = 0; return { id: 'mine-1', removed: true }; },
+    });
+    renderApp('/me?tab=posts');
+    expect(await screen.findByText('我写的那篇')).toBeInTheDocument();
+    // 只读「分享」那一格的数字：整个 .me-stats 里还有 Token 1280，用包含判断会被它骗过。
+    const shareCell = () => {
+      const cell = [...document.querySelectorAll('.me-stats div')].find(node => node.querySelector('dt')?.textContent === '分享');
+      return cell?.querySelector('dd')?.textContent ?? '';
+    };
+    expect(shareCell()).toBe('1');
+
+    fireEvent.click(screen.getByRole('button', { name: '撤下这篇文章' }));
+    fireEvent.click(screen.getByRole('button', { name: '撤下' }));
+    await screen.findByText(/已撤下。需要恢复请站内联系管理员/);
+
+    // 撤下后必须重新取 /api/me，页头才会变成 0。
+    await waitFor(() => expect(callsTo(fetchMock, 'GET', '/api/me').length).toBeGreaterThan(1));
+    await waitFor(() => expect(shareCell()).toBe('0'));
+  });
 });
 
 describe('预设头像', () => {
@@ -401,7 +429,8 @@ describe('预设头像', () => {
     });
     renderApp('/me?tab=settings');
     // 当前是默认（空），选中 🦊 后保存。
-    fireEvent.click(await screen.findByRole('button', { name: /🦊/ }));
+    // 按钮的可访问名现在是中文动物名（图案本身 aria-hidden），不是重复的 emoji。
+    fireEvent.click(await screen.findByRole('button', { name: /狐狸/ }));
     fireEvent.click(screen.getByRole('button', { name: '保存' }));
     await waitFor(() => expect(callsTo(fetchMock, 'PATCH', '/api/me')[0].body).toMatchObject({ avatar: '🦊' }));
     expect(await screen.findByText('已保存')).toBeInTheDocument();

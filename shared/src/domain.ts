@@ -275,3 +275,14 @@ export const PROFILE_LIMITS = { nickname: 20, bio: 500 } as const;
  */
 export const AVATAR_PRESETS = ['🦊', '🐼', '🐯', '🦁', '🐸', '🐙', '🦄', '🐳', '🦉', '🐧'] as const;
 export type AvatarPreset = (typeof AVATAR_PRESETS)[number];
+
+/**
+ * 每个预设的中文名。
+ *
+ * 选择器里原来把 emoji 显示两遍（图案一次、文字一次），读屏念出来是「🦊 🦊」；
+ * 而单独一个 emoji 也说不出是什么动物。给它一个名字，可见文字和读屏都清楚了。
+ */
+export const AVATAR_PRESET_NAMES: Record<AvatarPreset, string> = {
+  '🦊': '狐狸', '🐼': '熊猫', '🐯': '老虎', '🦁': '狮子', '🐸': '青蛙',
+  '🐙': '章鱼', '🦄': '独角兽', '🐳': '鲸鱼', '🦉': '猫头鹰', '🐧': '企鹅',
+};
