@@ -868,7 +868,8 @@ describe('举报列表分页', () => {
     expect((await get('pageSize=9999')).items.length).toBeLessThanOrEqual(50);
     // 参数写错必须是「按默认/上限处理」，不能 500：
     // Infinity 曾是 truthy 直接进 LIMIT，小数进 LIMIT/OFFSET 会抛异常。
-    for (const bad of ['pageSize=Infinity', 'pageSize=1.5', 'pageSize=0', 'pageSize=abc', 'pageSize=10&cursor=garbage', 'pageSize=10&cursor=']) {
+    // cursor 是用户可控字符串，畸形输入必须退化成「从头开始/空页」，不能 500。
+    for (const bad of ['pageSize=Infinity', 'pageSize=1.5', 'pageSize=0', 'pageSize=abc', 'pageSize=10&cursor=garbage', 'pageSize=10&cursor=', 'pageSize=10&cursor=%7C', 'pageSize=10&cursor=abc%7C1', `pageSize=10&cursor=${'9'.repeat(500)}`]) {
       const response = await server.app.request(`/api/admin/reports?${bad}`, { headers: bearer });
       expect(response.status, bad).toBe(200);
       const body = await response.json() as { items: unknown[]; pageSize: number };

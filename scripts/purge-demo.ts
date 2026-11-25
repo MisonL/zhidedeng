@@ -150,7 +150,9 @@ export async function main(argv: readonly string[]): Promise<number> {
     const plan = planPurge(store);
     const total = plan.stations.length + plan.posts.length + plan.users.length + plan.banners.length;
     console.log(`演示数据：站点 ${plan.stations.length}、文章 ${plan.posts.length}、用户 ${plan.users.length}、横幅 ${plan.banners.length}（共 ${total} 条实体）`);
-    console.log(`关联数据：报价 ${plan.offers}、投票 ${plan.votes}、收藏 ${plan.favorites}、评论 ${plan.commentCount}、举报 ${plan.reports}`);
+    // 举报不用 plan 的数字：plan 之后新插入的举报会被 DELETE 一起清掉，说死一个
+    // 更小的数会让运维以为「没有举报要清」。这里说清它是动态的。
+    console.log(`关联数据：报价 ${plan.offers}、投票 ${plan.votes}、收藏 ${plan.favorites}、评论 ${plan.commentCount}、举报 ${plan.reports}（执行时按同一条件重算，可能更多）`);
     if (plan.stations.length > 0) console.log(`  站点：${plan.stations.join(', ')}`);
     if (plan.posts.length > 0) console.log(`  文章：${plan.posts.slice(0, 10).join(', ')}${plan.posts.length > 10 ? ` …共 ${plan.posts.length} 篇` : ''}`);
     if (total === 0) {
