@@ -559,3 +559,44 @@ describe('举报翻页的会话隔离', () => {
     expect(callsTo(fetchMock, 'GET', '/api/admin/reports').length).toBeGreaterThan(0);
   });
 });
+
+describe('退出后用同一密钥重进', () => {
+  it('旧会话的翻页响应仍不能落进新列表', async () => {
+    // 用密钥字符串当代际挡不住这种情况：退出→同一密钥重进，字符串没变。
+    let resolveLate: ((value: unknown) => void) | undefined;
+    const report = (id: string) => ({
+      id, targetType: 'comment' as const, targetId: `c-${id}`, reporterHandle: 'demo-pedal',
+      reason: `理由 ${id}`, detail: null, status: 'open' as const,
+      createdAt: '2026-11-20T00:00:00.000Z', handledAt: null, targetAlive: true, targetLabel: `评论 ${id}`,
+    });
+    stubApi({
+      'GET /api/admin/reports': ({ url }: { url: URL }) => {
+        if (url.searchParams.get('cursor') === null) {
+          return { items: [report('n1')], total: 25, pageSize: 20, nextCursor: 'cur-1' };
+        }
+        if (!resolveLate) return new Promise((resolve) => { resolveLate = resolve; });
+        return { items: [report('n2')], total: 45, pageSize: 20, nextCursor: null };
+      },
+    });
+    await unlock();
+    fireEvent.click(await screen.findByRole('tab', { name: /举报/ }));
+    await screen.findByText('理由 n1');
+    fireEvent.click(screen.getByRole('button', { name: /加载更多/ }));
+
+    // 退出，再用**同一个**密钥进来。
+    fireEvent.click(screen.getByRole('button', { name: '退出' }));
+    fireEvent.change(await screen.findByLabelText('管理密钥'), { target: { value: 'x'.repeat(32) } });
+    fireEvent.click(screen.getByRole('button', { name: '进入' }));
+    await screen.findByRole('heading', { name: '审核台' });
+    fireEvent.click(await screen.findByRole('tab', { name: /举报/ }));
+    await screen.findByText('理由 n1');
+
+    resolveLate?.({ items: [report('stale')], total: 45, pageSize: 20, nextCursor: null });
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect(screen.queryByText('理由 stale')).not.toBeInTheDocument();
+    // 新会话仍是 1 条、总数 25，没有被旧响应改成 2 条 / 45。
+    expect(screen.getAllByText(/^理由 n/)).toHaveLength(1);
+    expect(screen.getByRole('tab', { name: /举报/ }).textContent).toContain('(25)');
+  });
+});

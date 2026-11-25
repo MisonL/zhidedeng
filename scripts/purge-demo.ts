@@ -98,32 +98,57 @@ export function applyPurge(store: ReturnType<typeof openStore>, plan: PurgePlan)
   store.transaction(() => {
     // 先删关联表再删实体：虽然没有外键约束，但反过来的话中途失败会留下孤儿行。
     if (plan.offers > 0) store.db.prepare(`DELETE FROM offers WHERE stationSlug IN (${inList(plan.stations)})`).run(...plan.stations);
-    const targets = [...plan.stations, ...plan.posts];
-    if (targets.length > 0) {
-      for (const table of ['votes', 'favorites', 'comments']) {
+
+    // 评论的删除条件。举报要按**这个条件现场算出来的评论 id** 去清，
+    // 而不是 plan 里那份快照：plan 之后新评论挂到演示文章下面，实删会带走它，
+    // 但快照里没有它的 id，于是它的举报会留下来变成死举报（实测复现过）。
+    const commentWhere = (() => {
+      const parts: string[] = [];
+      if (plan.stations.length > 0) parts.push(`(targetType = 'station' AND targetId IN (${inList(plan.stations)}))`);
+      if (plan.posts.length > 0) parts.push(`(targetType = 'post' AND targetId IN (${inList(plan.posts)}))`);
+      if (plan.users.length > 0) parts.push(`userHandle IN (${inList(plan.users)})`);
+      return parts.length === 0 ? null : parts.join(' OR ');
+    })();
+    const commentParams = [...plan.stations, ...plan.posts, ...plan.users];
+
+    // 举报必须在评论**删掉之前**清：删完就查不到那些评论 id 了。
+    const reportParts: string[] = [];
+    const reportParams: string[] = [];
+    if (plan.stations.length > 0) {
+      reportParts.push(`(targetType = 'station' AND targetId IN (${inList(plan.stations)}))`);
+      reportParams.push(...plan.stations);
+    }
+    if (plan.posts.length > 0) {
+      reportParts.push(`(targetType = 'post' AND targetId IN (${inList(plan.posts)}))`);
+      reportParams.push(...plan.posts);
+    }
+    if (commentWhere !== null) {
+      reportParts.push(`(targetType = 'comment' AND targetId IN (SELECT id FROM comments WHERE ${commentWhere}))`);
+      reportParams.push(...commentParams);
+    }
+    if (plan.users.length > 0) {
+      reportParts.push(`reporterHandle IN (${inList(plan.users)})`);
+      reportParams.push(...plan.users);
+    }
+    // 不用 plan.reports 当开关：plan 是快照，从 plan 到 apply 之间库还可能变。
+    // 有条件就执行，删多少让 DELETE 自己决定。
+    if (reportParts.length > 0) {
+      store.db.prepare(`DELETE FROM reports WHERE ${reportParts.join(' OR ')}`).run(...reportParams);
+    }
+
+    if (plan.stations.length > 0 || plan.posts.length > 0) {
+      for (const table of ['votes', 'favorites']) {
         store.db.prepare(`DELETE FROM ${table} WHERE (targetType = 'station' AND targetId IN (${inList(plan.stations)})) OR (targetType = 'post' AND targetId IN (${inList(plan.posts)}))`)
           .run(...plan.stations, ...plan.posts);
       }
     }
     if (plan.users.length > 0) {
-      for (const table of ['votes', 'favorites', 'comments', 'checkins']) {
+      for (const table of ['votes', 'favorites', 'checkins']) {
         store.db.prepare(`DELETE FROM ${table} WHERE userHandle IN (${inList(plan.users)})`).run(...plan.users);
       }
     }
-    // 举报行最后清：它按 id 引用上面被删掉的对象，早删或漏删都会留下死举报。
-    //
-    // 不能拿 `plan.reports > 0` 当开关：plan 是之前拍的快照，从 plan 到 apply 之间
-    // 可能又插进来一条匹配的举报（实删 2 > 计划 1），也可能 plan 时是 0 而之后
-    // 变成了孤儿举报——那样整块被跳过，删完留下一堆指向不存在对象的死举报。
-    // 所以这里有条件就执行，删多少让 DELETE 自己决定。
-    const reportParts: string[] = [];
-    if (plan.stations.length > 0) reportParts.push(`(targetType = 'station' AND targetId IN (${inList(plan.stations)}))`);
-    if (plan.posts.length > 0) reportParts.push(`(targetType = 'post' AND targetId IN (${inList(plan.posts)}))`);
-    if (plan.comments.length > 0) reportParts.push(`(targetType = 'comment' AND targetId IN (${inList(plan.comments)}))`);
-    if (plan.users.length > 0) reportParts.push(`reporterHandle IN (${inList(plan.users)})`);
-    if (reportParts.length > 0) {
-      store.db.prepare(`DELETE FROM reports WHERE ${reportParts.join(' OR ')}`)
-        .run(...plan.stations, ...plan.posts, ...plan.comments, ...plan.users);
+    if (commentWhere !== null) {
+      store.db.prepare(`DELETE FROM comments WHERE ${commentWhere}`).run(...commentParams);
     }
     // 实体本身直接物理删除：软删除（removedAt）会让它们继续参与 slug 认领，
     // 反而更容易和新投稿撞车。

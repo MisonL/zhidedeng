@@ -143,3 +143,25 @@ describe('清理举报的时点问题', () => {
     expect(store.db.prepare('SELECT COUNT(*) c FROM reports').get()).toMatchObject({ c: 0 });
   });
 });
+
+describe('清理顺序：举报要在评论之前', () => {
+  it('plan 之后新挂到演示文章下的评论，连同它被举报的那条，一起清掉', () => {
+    const store = demoStore();
+    const post = store.allWithRemoved('post').find(item => item.source === 'demo')!;
+    const plan = planPurge(store);
+    expect(plan.comments.every(id => typeof id === 'string')).toBe(true);
+
+    // 规划之后才出现的评论：它在 plan.comments 里没有，但 applyPurge 会按
+    // 「targetId 是演示文章」把它删掉。它的举报必须一起走，否则留下死举报。
+    store.db.prepare("INSERT INTO comments (id,targetType,targetId,userHandle,content,createdAt) VALUES ('late-c','post',?,'realuser','事后评论','2026-11-24T00:00:00.000Z')")
+      .run(post.id);
+    store.db.prepare("INSERT INTO reports (id,targetType,targetId,reporterHandle,reason,status,createdAt) VALUES ('late-r','comment','late-c','realuser','举报事后评论','open','2026-11-24T00:00:00.000Z')")
+      .run();
+
+    applyPurge(store, plan);
+
+    const comments = store.db.prepare('SELECT id FROM comments').all() as Array<{ id: string }>;
+    expect(comments.map(c => c.id)).not.toContain('late-c');
+    expect(store.db.prepare('SELECT COUNT(*) c FROM reports').get()).toMatchObject({ c: 0 });
+  });
+});

@@ -71,9 +71,13 @@ type Tab = 'submissions' | 'posts' | 'published' | 'removed' | 'removedPosts' | 
 
 export default function Admin() {
   const [token, setToken] = useState(adminToken.get());
-  // 令牌代际。换密钥时更新；异步回调据此判断自己是不是上一个会话的遗留。
-  const tokenRef = useRef(token);
-  tokenRef.current = token;
+  /**
+   * 会话代际。每次退出/换密钥都 +1，异步回调据此判断自己是不是上一个会话的遗留。
+   *
+   * 不能用密钥字符串本身当代际：退出后用**同一个**密钥重进，字符串没变，
+   * 上一会话的翻页响应照样会落进新列表（实测 20 条变 40 条）。
+   */
+  const sessionRef = useRef(0);
   const [draft, setDraft] = useState('');
   const [tab, setTab] = useState<Tab>('submissions');
   const [submissions, setSubmissions] = useState<SubmissionRecord[]>();
@@ -187,6 +191,7 @@ export default function Admin() {
 
   /** 退出或密钥失效时把内存里的列表也清掉，不留残留数据。 */
   function reset() {
+    sessionRef.current += 1;
     setToken('');
     setSubmissions(undefined);
     setPosts(undefined);
@@ -216,6 +221,8 @@ export default function Admin() {
     adminToken.set(value);
     setDraft('');
     setError(undefined);
+    // 不在这里推进代际：进到这里之前一定先经过 reset()（退出或密钥失效），
+    // 代际已经变过。两处都加会让人分不清哪一处才是真正的保护。
     setToken(value);
   }
 
@@ -289,12 +296,12 @@ export default function Admin() {
    */
   async function loadMoreReports() {
     if (reportCursor === null) return;
-    const generation = token;
+    const generation = sessionRef.current;
     setMoreReports(true);
     setError(undefined);
     try {
       const data = await admin.listReports('open', REPORTS_PAGE_SIZE, reportCursor);
-      if (tokenRef.current !== generation) return;
+      if (sessionRef.current !== generation) return;
       // 游标分页本身不会重，但翻页期间那条举报可能刚被处置；仍按 id 去重一次，
       // 重复的 key 会让 React 直接报错。
       setReports((current) => {
@@ -304,10 +311,10 @@ export default function Admin() {
       setReportTotal(data.total);
       setReportCursor(data.nextCursor);
     } catch (caught) {
-      if (tokenRef.current !== generation) return;
+      if (sessionRef.current !== generation) return;
       setError((caught as Error).message);
     } finally {
-      if (tokenRef.current === generation) setMoreReports(false);
+      if (sessionRef.current === generation) setMoreReports(false);
     }
   }
 
