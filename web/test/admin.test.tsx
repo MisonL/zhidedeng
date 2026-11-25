@@ -486,3 +486,38 @@ describe('举报页签分页', () => {
     expect(callsTo(fetchMock, 'GET', '/api/admin/reports').at(-1)!.url.searchParams.get('page')).toBe('2');
   });
 });
+
+describe('举报翻页的错位', () => {
+  it('翻页期间有新举报插入时，第 2 页会和第 1 页重叠——按 id 去重后不出现重复 key', async () => {
+    const makeReport = (id: string) => ({
+      id, targetType: 'comment' as const, targetId: `c-${id}`, reporterHandle: 'demo-pedal',
+      reason: `理由 ${id}`, detail: null, status: 'open' as const,
+      createdAt: '2026-11-20T00:00:00.000Z', handledAt: null, targetAlive: true, targetLabel: `评论 ${id}`,
+    });
+    const errors: unknown[] = [];
+    const originalError = console.error;
+    console.error = (...args: unknown[]) => { errors.push(args[0]); };
+    try {
+      stubApi({
+        'GET /api/admin/reports': ({ url }: { url: URL }) => {
+          const page = Number(url.searchParams.get('page') ?? 1);
+          // 模拟 offset 分页错位：新举报插到最前面，第 2 页把 a 又返回一次。
+          return {
+            items: page === 1 ? [makeReport('a'), makeReport('b')] : [makeReport('a'), makeReport('c')],
+            total: 3, page, pageSize: 20,
+          };
+        },
+      });
+      await unlock();
+      fireEvent.click(await screen.findByRole('tab', { name: /举报/ }));
+      await screen.findByText('理由 a');
+      fireEvent.click(screen.getByRole('button', { name: /加载更多/ }));
+      expect(await screen.findByText('理由 c')).toBeInTheDocument();
+      // a 只出现一次（重复 key 会让 React 报错，也会让管理员看到两条一样的举报）。
+      expect(screen.getAllByText('理由 a')).toHaveLength(1);
+      expect(errors.filter(e => String(e).includes('same key'))).toEqual([]);
+    } finally {
+      console.error = originalError;
+    }
+  });
+});

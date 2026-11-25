@@ -283,7 +283,12 @@ export default function Admin() {
     try {
       const next = reportPage + 1;
       const data = await admin.listReports('open', next, REPORTS_PAGE_SIZE);
-      setReports((current) => [...(current ?? []), ...data.items]);
+      // 按 id 去重再追加：offset 分页在「翻页期间有人新提交举报」时会整体错位，
+      // 第 2 页可能又包含第 1 页的条目。React 的 key 重复会直接报错。
+      setReports((current) => {
+        const seen = new Set((current ?? []).map(report => report.id));
+        return [...(current ?? []), ...data.items.filter(report => !seen.has(report.id))];
+      });
       setReportTotal(data.total);
       setReportPage(next);
     } catch (caught) {
