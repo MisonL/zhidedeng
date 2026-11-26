@@ -652,3 +652,22 @@ describe('我的投稿里的撤下状态', () => {
     expect(screen.queryByText('已通过')).not.toBeInTheDocument();
   });
 });
+
+describe('举报入口的几种结局', () => {
+  it('被判定「不成立」时，收起表单并说明原因，而不是报红让人反复点', async () => {
+    stubApi({
+      // 作者不能是自己，否则不显示举报入口（自己的内容走「撤下」）。
+      'GET /api/posts/p1': makePost('p1', { author: { handle: 'someone-else', nickname: '别人写的', avatar: '' } }),
+      'POST /api/reports': apiError(409, 'ALREADY_DISMISSED', '你举报过这条内容，管理员已判定不成立；如果情况有变，请站内联系管理员'),
+    });
+    renderApp('/posts/p1');
+    fireEvent.click(await screen.findByRole('button', { name: '举报' }));
+    fireEvent.click(screen.getByRole('button', { name: '内容不实或夸大' }));
+    fireEvent.click(screen.getByRole('button', { name: '提交举报' }));
+
+    expect(await screen.findByText(/管理员已判定不成立/)).toBeInTheDocument();
+    // 表单收起来了：不该还留着一个能反复点的「提交举报」。
+    expect(screen.queryByRole('button', { name: '提交举报' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+});

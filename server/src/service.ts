@@ -927,6 +927,19 @@ export class Service {
     }
     const reason = input.reason.trim();
     if (!reason) throw new ApiError(400, 'INVALID_INPUT', '请选择或填写举报原因');
+    // 已经被判定「不成立」的同一条内容，同一个人不能反复再报。
+    //
+    // 部分唯一索引只管 status='open'，所以处置完之后可以立刻再报一次——同一个人
+    // 对同一条内容可以无限次刷，每次都给管理台加一条一模一样的待办。
+    // 而「不成立」意味着管理员已经看过、认定没问题；本站内容目前**不可编辑**
+    // （文章编辑还没做），所以重复举报不可能带来新信息。
+    //
+    // 注意：将来支持文章编辑后，这里必须再加一条「目标在这次处置之后没被改过」
+    // 的判断，否则改了内容就不许再报，等于把回归问题锁死。
+    const dismissed = this.store.db.prepare(
+      "SELECT id FROM reports WHERE targetType = ? AND targetId = ? AND reporterHandle = ? AND status = 'dismissed' LIMIT 1",
+    ).get(targetType, input.targetId, this.user);
+    if (dismissed) throw new ApiError(409, 'ALREADY_DISMISSED', '你举报过这条内容，管理员已判定不成立；如果情况有变，请站内联系管理员');
     const id = crypto.randomUUID();
     const now = this.now().toISOString();
     try {

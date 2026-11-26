@@ -927,3 +927,55 @@ describe('唯一约束冲突的判定', () => {
     expect(await again.json()).toMatchObject({ error: { code: 'ALREADY_REPORTED' } });
   });
 });
+
+describe('举报被驳回后不能反复再报', () => {
+  // 上一个 describe 里的同名 helper 作用域不跨越这里。
+  async function livePost(who: Awaited<ReturnType<typeof account>>, title: string) {
+    const post = await submit(who, title);
+    await admin(`/api/admin/posts/${post.id}/review`, { status: 'approved' });
+    return post;
+  }
+
+  it('判定「不成立」之后，同一个人对同一条内容的再次举报被拒绝', async () => {
+    const a = await account('alice');
+    const post = await livePost(a, '会被反复举报的文章');
+    const b = await account('bobby');
+    const first = await b.call('POST', '/api/reports', { targetType: 'post', targetId: post.id, reason: '内容不实或夸大' });
+    expect(first.status).toBe(200);
+    const { id } = await first.json() as { id: string };
+    // 管理员判定不成立。
+    expect((await admin(`/api/admin/reports/${id}/resolve`, { status: 'dismissed', note: '已核对' })).status).toBe(200);
+
+    const again = await b.call('POST', '/api/reports', { targetType: 'post', targetId: post.id, reason: '内容不实或夸大' });
+    expect(again.status).toBe(409);
+    expect(await again.json()).toMatchObject({ error: { code: 'ALREADY_DISMISSED' } });
+    // 队列里不该多出一条重复的待办。
+    const open = await (await server.app.request('/api/admin/reports?status=open', { headers: bearer })).json() as { total: number };
+    expect(open.total).toBe(0);
+  });
+
+  it('别人举报同一条内容不受影响；「已处理」也不封后续举报', async () => {
+    const a = await account('alice');
+    const post = await livePost(a, '被两个人先后举报的文章');
+    const b = await account('bobby');
+    const c = await account('cathy');
+    const byB = await b.call('POST', '/api/reports', { targetType: 'post', targetId: post.id, reason: '内容不实或夸大' });
+    const { id: bid } = await byB.json() as { id: string };
+    await admin(`/api/admin/reports/${bid}/resolve`, { status: 'dismissed', note: '已核对' });
+
+    // 另一个人照样可以报。
+    expect((await c.call('POST', '/api/reports', { targetType: 'post', targetId: post.id, reason: '内容不实或夸大' })).status).toBe(200);
+    // 而 bobby 换一种原因也不行：判定不成立是针对这条内容的。
+    expect((await b.call('POST', '/api/reports', { targetType: 'post', targetId: post.id, reason: '存在安全风险' })).status).toBe(409);
+  });
+
+  it('「已处理」的举报不封后续举报：问题解决了也可能再犯', async () => {
+    const a = await account('alice');
+    const post = await livePost(a, '处理过还会再犯的文章');
+    const b = await account('bobby');
+    const first = await b.call('POST', '/api/reports', { targetType: 'post', targetId: post.id, reason: '内容不实或夸大' });
+    const { id } = await first.json() as { id: string };
+    await admin(`/api/admin/reports/${id}/resolve`, { status: 'resolved', note: '已处理' });
+    expect((await b.call('POST', '/api/reports', { targetType: 'post', targetId: post.id, reason: '内容不实或夸大' })).status).toBe(200);
+  });
+});

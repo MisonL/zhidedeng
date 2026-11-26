@@ -22,10 +22,13 @@ export default function ReportButton({ targetType, targetId }: { targetType: 'po
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
   const [done, setDone] = useState(false);
+  // 处置结果为「不成立」时后端回 409 ALREADY_DISMISSED，这里换成一句说明。
+  const [dismissed, setDismissed] = useState<string>();
 
   // 未登录不渲染入口：举报必须能追到人，匿名的「有人说」在处置时毫无用处。
   if (!me.data) return null;
   if (done) return <span className="hint">已举报，等待处理</span>;
+  if (dismissed) return <span className="hint">{dismissed}</span>;
 
   if (!open) {
     // 上面已经因未登录返回 null，这里不需要再问一次登录态。
@@ -44,7 +47,12 @@ export default function ReportButton({ targetType, targetId }: { targetType: 'po
       const code = (cause as { code?: string }).code;
       // 已经报过不算失败：目的已经达到了，再让用户对着红色错误发呆没有意义。
       if (code === 'ALREADY_REPORTED') setDone(true);
-      else setError((cause as Error).message);
+      // 「已被驳回」不是失败也不是成功：这条他确实报过、管理员也看过了。
+      // 继续显示表单只会让人反复点同一个按钮，所以收起表单并原样说明原因。
+      else if (code === 'ALREADY_DISMISSED') {
+        setError(undefined);
+        setDismissed((cause as Error).message);
+      } else setError((cause as Error).message);
       setBusy(false);
     }
   }

@@ -211,7 +211,7 @@ channel 是队列的来源渠道，source 是物化内容的展示来源，二�
 - `PUT /votes`（targetType: post|station、targetId、value: up|down|null）返回最新汇总
 - `PUT /favorites`（targetType、targetId、favorited）
 - `GET /comments?targetType=&targetId=`、`POST /comments`（content 1~2000 字、parentId?）、`DELETE /comments/:id` —— 作者删除自己的评论（他人 404）。没有子行时物理删除；有任何子行（**含被管理员隐藏的回复**，因为外键约束不看 hidden）时留墓碑：正文在库里保留、接口返回空串，列表显示「该评论已删除」，其下的回复不跟着消失。墓碑不计入评论数，也不能被回复
-- `POST /reports`（targetType: post|station|comment、targetId、reason 1~200 字、detail?）—— 举报进人工队列，**不自动下架、不承诺 SLA**。不能举报自己的内容、看不到的对象（隐藏/已删除/所属文章已撤下）与演示数据；同一人对同一对象未处理时重复举报 409 ALREADY_REPORTED；按人限流 20 条/小时，超限 429 RATE_LIMITED
+- `POST /reports`（targetType: post|station|comment、targetId、reason 1~200 字、detail?）—— 举报进人工队列，**不自动下架、不承诺 SLA**。不能举报自己的内容、看不到的对象（隐藏/已删除/所属文章已撤下）与演示数据；同一人对同一对象未处理时重复举报 409 ALREADY_REPORTED；处置为 `dismissed` 后同一人再报 409 ALREADY_DISMISSED（内容不可编辑，重复举报不带来新信息；`resolved` 不封，问题可能再犯）；按人限流 20 条/小时，超限 429 RATE_LIMITED
 - `GET /rankings?tab=model|community|expert`（各返回 6~12 条）
 - `GET /banners`
 - `GET /search?q=`（models、stations、posts 三组，各最多 10 条）

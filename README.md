@@ -193,7 +193,7 @@ DEPLOY_HOST=user@your-server deploy/deploy.sh
   pnpm purge:demo --db=<库路径> --apply    # 真删
   ```
 
-  它按来源标记删除，不猜名字：`source='demo'` 的站点与文章、`demo-` 前缀的用户、仅有的三条横幅，以及它们的报价、投票、收藏、评论。真实投稿和真实账号一条不动，重跑幂等。容器部署直接在容器里跑：`docker exec zhidedeng node /app/release/purge-demo.mjs --db=/data/zhidedeng.db`（`pnpm build` 会把它和 `sync-feishu.mjs` 一起打进 `release/`）。
+  它按来源标记删除，不猜名字：`source='demo'` 的站点与文章、`demo-` 前缀的用户、仅有的三条横幅，以及它们的报价、投票、收藏、评论、举报。另外它还会顺手清掉**目标已不存在的举报**（对象被别的途径删掉了，这类举报在审核台永远处理不完）。真实投稿和真实账号一条不动，重跑幂等。容器部署直接在容器里跑：`docker exec zhidedeng node /app/release/purge-demo.mjs --db=/data/zhidedeng.db`（`pnpm build` 会把它和 `sync-feishu.mjs` 一起打进 `release/`）。
 
 当前模式会随启动日志（`{"event":"site.mode","mode":"production"}`）和 `/api/health` 的 `mode` 字段一起播报，运维不用翻环境变量就能确认。
 
