@@ -52,6 +52,22 @@ describe('站点对比', () => {
     expect(within(table).getByText('2026-11-20')).toBeInTheDocument();
   });
 
+  it('空库/生产模式下给空态，不是一张空表', async () => {
+    stubApi({ 'GET /api/stations': page([]), 'GET /api/posts': page([]) });
+    renderApp('/compare');
+    expect(await screen.findByText('还没有可对比的站点')).toBeInTheDocument();
+    expect(screen.queryByRole('table')).not.toBeInTheDocument();
+  });
+
+  it('全是演示站时同样给空态（演示数据不参与对比）', async () => {
+    stubApi({
+      'GET /api/stations': page([{ ...station, slug: 'd1', name: '虚构一', source: 'demo' as const }]),
+      'GET /api/posts': page([]),
+    });
+    renderApp('/compare');
+    expect(await screen.findByText('还没有可对比的站点')).toBeInTheDocument();
+  });
+
   it('站点超过一页时能加载更多，不会把后面的站漏掉', async () => {
     const firstPage = Array.from({ length: 50 }, (_, i) => realStation(`s${i}`));
     const secondPage = [realStation('late-station')];
