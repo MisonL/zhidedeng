@@ -1001,21 +1001,27 @@ export class Service {
     // 每分钟的实际写入没有上限（实测连发 6 轮全部 200）。
     // 这里改成数「这条评论当前是否存在」以外的东西做不到（行没了就是没了），
     // 所以把限流记录挪到独立的计数表，与评论行是否被删无关。
-    const recent = Number(this.store.db.prepare(
-      'SELECT count(*) AS count FROM comment_writes WHERE userHandle = ? AND createdAt > ?',
-    ).get(this.user, since)!.count);
-    if (recent >= COMMENTS_PER_MINUTE) throw new ApiError(429, 'RATE_LIMITED', '评论太频繁了，请稍后再试');
     if (input.parentId) {
       const parent = this.store.db.prepare('SELECT targetType,targetId,parentId FROM comments WHERE id=? AND hidden = 0 AND deletedAt IS NULL').get(input.parentId);
       if (!parent || parent.parentId !== null || parent.targetType !== input.targetType || parent.targetId !== input.targetId) throw new ApiError(400, 'INVALID_INPUT', '回复必须属于同一对象的顶层评论');
     }
     const createdAt = this.now().toISOString();
-    // 先记一笔写入流水，再插评论：流水与内容生命周期无关，删评论不会退额度。
-    // 流水只在限流窗口内有意义，清理交给下面的 prune（同一个事务里顺带做）。
-    this.store.db.prepare('INSERT INTO comment_writes (userHandle, createdAt) VALUES (?, ?)').run(this.user, createdAt);
     const row: CommentRow = { ...input, id: crypto.randomUUID(), userHandle: this.user, parentId: input.parentId ?? null, createdAt };
-    this.store.db.prepare('INSERT INTO comments (id,userHandle,targetType,targetId,content,parentId,createdAt) VALUES (?,?,?,?,?,?,?)')
-      .run(row.id, row.userHandle, row.targetType, row.targetId, row.content, row.parentId, row.createdAt);
+    // 限流检查、流水、评论三件事必须在同一个写事务里：
+    // - 检查和写入分开，两个并发请求会同时看到「还没到 5 条」；
+    // - 流水先写、评论后写但不回滚，插入失败时白占额度（实测 5 次失败后正常重试变成 429）。
+    this.store.transaction(() => {
+      const recent = Number(this.store.db.prepare(
+        'SELECT count(*) AS count FROM comment_writes WHERE userHandle = ? AND createdAt > ?',
+      ).get(this.user, since)!.count);
+      if (recent >= COMMENTS_PER_MINUTE) throw new ApiError(429, 'RATE_LIMITED', '评论太频繁了，请稍后再试');
+      // 流水只在限流窗口内有意义，顺手清掉一天以前的，避免只增不减。
+      this.store.db.prepare('DELETE FROM comment_writes WHERE createdAt < ?')
+        .run(new Date(this.now().getTime() - 86_400_000).toISOString());
+      this.store.db.prepare('INSERT INTO comment_writes (userHandle, createdAt) VALUES (?, ?)').run(this.user, createdAt);
+      this.store.db.prepare('INSERT INTO comments (id,userHandle,targetType,targetId,content,parentId,createdAt) VALUES (?,?,?,?,?,?,?)')
+        .run(row.id, row.userHandle, row.targetType, row.targetId, row.content, row.parentId, row.createdAt);
+    });
     return row.parentId === null ? { ...this.comment(row), parentId: null, replies: [] } : { ...this.comment(row), parentId: row.parentId };
   }
 

@@ -1000,3 +1000,20 @@ describe('评论限流不能被「发完就删」绕过', () => {
     expect(await sixth.json()).toMatchObject({ error: { code: 'RATE_LIMITED' } });
   });
 });
+
+describe('评论写入流水的边界', () => {
+  it('一天以前的流水会被清掉，表不会只增不减', async () => {
+    const a = await account('alice');
+    const post = await submit(a, '流水清理测试');
+    await admin(`/api/admin/posts/${post.id}/review`, { status: 'approved' });
+    expect((await a.call('POST', '/api/comments', { targetType: 'post', targetId: post.id, content: '第一条' })).status).toBe(200);
+
+    // 手工塞一条两天前的旧流水，再发一条评论触发清理。
+    const old = new Date(clock.getTime() - 2 * 86_400_000).toISOString();
+    server.store.db.prepare('INSERT INTO comment_writes (userHandle, createdAt) VALUES (?, ?)').run('alice', old);
+    expect(Number(server.store.db.prepare('SELECT count(*) AS c FROM comment_writes WHERE createdAt = ?').get(old)!.c)).toBe(1);
+
+    expect((await a.call('POST', '/api/comments', { targetType: 'post', targetId: post.id, content: '第二条' })).status).toBe(200);
+    expect(Number(server.store.db.prepare('SELECT count(*) AS c FROM comment_writes WHERE createdAt = ?').get(old)!.c)).toBe(0);
+  });
+});

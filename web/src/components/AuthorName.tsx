@@ -16,7 +16,11 @@ import { authorPath } from '../pages/Author';
  * `agent-submission` 之类；导出的历史数据里还出现过 `anonymous-submission`。
  * 逐个枚举容易漏，所以再叠一条「昵称是服务端降级占位」的判断。
  */
-const NO_PROFILE_HANDLES = new Set(['feishu-submission', 'anonymous-submission', 'agent-submission']);
+const NO_PROFILE_HANDLES = new Set([
+  'feishu-submission', 'anonymous-submission', 'agent-submission',
+  // submissions.ts 在既无 actorHandle 也无 authorHandle 时写 'unknown'。
+  'unknown',
+]);
 
 export default function AuthorName({ author }: { author: Author }) {
   const hasProfile = !NO_PROFILE_HANDLES.has(author.handle) && !author.nickname.startsWith('已注销用户·');
