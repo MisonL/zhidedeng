@@ -90,7 +90,9 @@ export default function Compare() {
           const picked = chosen
             .map(slug => candidates.find(station => station.slug === slug))
             .filter((station): station is Station => station !== undefined);
-          const missing = chosen.filter(slug => !candidates.some(station => station.slug === slug));
+          // 只有「已经把所有页都取完」时才敢说某个 slug 不可对比：还有下一页时，
+          // 那个站可能就在下一页，此时说「不可对比」是误报。
+          const missing = all.hasMore ? [] : chosen.filter(slug => !candidates.some(station => station.slug === slug));
 
           return (
             <>

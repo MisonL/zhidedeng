@@ -69,6 +69,20 @@ describe('站点对比', () => {
     expect(callsTo(fetchMock, 'GET', '/api/stations').some(call => call.url.searchParams.get('page') === '2')).toBe(true);
   });
 
+  it('还有下一页时不会把「这一页没有的 slug」误报成不可对比', async () => {
+    const firstPage = [realStation('a'), realStation('b')];
+    const secondPage = [realStation('late')];
+    stubApi({
+      'GET /api/stations': ({ url }: { url: URL }) =>
+        page(url.searchParams.get('page') === '2' ? secondPage : firstPage, 3, url.searchParams.get('page') === '2' ? 2 : 1),
+      'GET /api/posts': page([makePost('p1')]),
+    });
+    // late 在第二页，第一页还没加载时不能说它「不可对比」。
+    renderApp('/compare?s=late');
+    expect(await screen.findByRole('button', { name: '真实 a' })).toBeInTheDocument();
+    expect(screen.queryByText(/不可对比/)).not.toBeInTheDocument();
+  });
+
   it('选满 3 个后其余选项禁用；已下架的 slug 会被明确提示而不是静默忽略', async () => {
     stubApi({ 'GET /api/stations': page([...stations, realStation('c'), realStation('d')]), 'GET /api/posts': page([makePost('p1')]) });
     renderApp('/compare?s=a,b,c,gone');
