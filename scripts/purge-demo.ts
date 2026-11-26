@@ -35,6 +35,8 @@ export interface PurgePlan {
   favorites: number;
   commentCount: number;
   reports: number;
+  /** 会一并删除的一句话反馈条数。 */
+  feedback: number;
   /**
    * 目标已经不在库里的举报（对象被别的途径删掉了）。
    *
@@ -92,6 +94,20 @@ export function planPurge(store: ReturnType<typeof openStore>): PurgePlan {
   if (users.length > 0) reportParts.push(`reporterHandle IN (${inList(users)})`);
   const reportParams = [...targetParams, ...commentIds, ...users];
 
+  // 一句话反馈：挂在演示站下面的（那站本来就没人该反馈），以及演示账号发的。
+  // 和举报不同，feedback 没有 hidden 之类的软删概念，只有 deletedAt 墓碑，
+  // 所以这里连墓碑一起删——演示数据整批清掉时不该留半截。
+  const feedbackParts: string[] = [];
+  const feedbackParams: string[] = [];
+  if (stations.length > 0) {
+    feedbackParts.push(`stationSlug IN (${inList(stations)})`);
+    feedbackParams.push(...stations);
+  }
+  if (users.length > 0) {
+    feedbackParts.push(`userHandle IN (${inList(users)})`);
+    feedbackParams.push(...users);
+  }
+
   // 孤儿举报：目标实体/评论已经不在了。判定按 kind 分开写，因为 post/station
   // 存在 entities 里、comment 存在 comments 里，混在一个 NOT IN 里会误判。
   const orphanReports = store.db.prepare(
@@ -107,6 +123,7 @@ export function planPurge(store: ReturnType<typeof openStore>): PurgePlan {
     favorites: count(`${where('SELECT COUNT(*) c FROM favorites') ?? 'SELECT 0 c'}`, targetParams.concat(users)),
     commentCount: count(`${where('SELECT COUNT(*) c FROM comments') ?? 'SELECT 0 c'}`, targetParams.concat(users)),
     reports: reportParts.length === 0 ? 0 : count(`SELECT COUNT(*) c FROM reports WHERE ${reportParts.join(' OR ')}`, reportParams),
+    feedback: feedbackParts.length === 0 ? 0 : count(`SELECT COUNT(*) c FROM feedback WHERE ${feedbackParts.join(' OR ')}`, feedbackParams),
     orphanReports,
   };
 }
@@ -152,6 +169,16 @@ export function applyPurge(store: ReturnType<typeof openStore>, plan: PurgePlan)
     if (reportParts.length > 0) {
       store.db.prepare(`DELETE FROM reports WHERE ${reportParts.join(' OR ')}`).run(...reportParams);
     }
+    // 一句话反馈按 stationSlug 引用站点，所以要在站点删除**之前**处理。
+    // 条件现场用 plan 的名单重算：plan 到 apply 之间库里还可能多出反馈。
+    if (plan.stations.length > 0 || plan.users.length > 0) {
+      const parts: string[] = [];
+      const params: string[] = [];
+      if (plan.stations.length > 0) { parts.push(`stationSlug IN (${inList(plan.stations)})`); params.push(...plan.stations); }
+      if (plan.users.length > 0) { parts.push(`userHandle IN (${inList(plan.users)})`); params.push(...plan.users); }
+      store.db.prepare(`DELETE FROM feedback WHERE ${parts.join(' OR ')}`).run(...params);
+    }
+
     // 目标已经不存在的举报。放在最后一步：上面刚删完 demo 实体，原来指向它们的
     // 举报此刻正好变成孤儿，一条 SQL 收干净，不依赖 plan 快照里的名单。
     store.db.prepare(
@@ -201,7 +228,7 @@ export async function main(argv: readonly string[]): Promise<number> {
     console.log(`演示数据：站点 ${plan.stations.length}、文章 ${plan.posts.length}、用户 ${plan.users.length}、横幅 ${plan.banners.length}（共 ${total} 条实体）`);
     // 举报不用 plan 的数字：plan 之后新插入的举报会被 DELETE 一起清掉，说死一个
     // 更小的数会让运维以为「没有举报要清」。这里说清它是动态的。
-    console.log(`关联数据：报价 ${plan.offers}、投票 ${plan.votes}、收藏 ${plan.favorites}、评论 ${plan.commentCount}、举报 ${plan.reports}（执行时按同一条件重算，可能更多）`);
+    console.log(`关联数据：报价 ${plan.offers}、投票 ${plan.votes}、收藏 ${plan.favorites}、评论 ${plan.commentCount}、举报 ${plan.reports}、一句话反馈 ${plan.feedback}（执行时按同一条件重算，可能更多）`);
     if (plan.orphanReports.length > 0) {
       console.log(`目标已不存在的举报：${plan.orphanReports.length} 条（审核台会一直显示「已不在线」，一并清掉）`);
     }

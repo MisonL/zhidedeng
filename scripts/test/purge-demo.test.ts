@@ -211,3 +211,37 @@ describe('孤儿举报（目标已不在库里）', () => {
     expect(store.db.prepare('SELECT COUNT(*) c FROM reports').get()).toMatchObject({ c: 0 });
   });
 });
+
+describe('一句话反馈', () => {
+  it('演示站下的反馈与演示账号发的反馈一并清掉，真实站上的真实反馈不动', () => {
+    const store = demoStore();
+    const demoStation = store.allWithRemoved('station').find(item => item.source === 'demo')!;
+    const demoUser = store.all('user').find(user => user.handle.startsWith('demo-'))!;
+    // 真实站。
+    store.put('station', 'real-station', {
+      slug: 'real-station', name: '真实站', description: 'd', url: null, rechargeThreshold: null,
+      paymentMethods: [], uptime: null, firstTokenLatencyMs: null, foundedAt: null, status: null, source: 'user',
+    } as never);
+    const insert = store.db.prepare('INSERT INTO feedback (id,stationSlug,userHandle,verdict,content,createdAt,deletedAt) VALUES (?,?,?,?,?,?,NULL)');
+    insert.run('fd-demo-station', demoStation.slug, 'realuser', 'broken', '挂了', at.toISOString());
+    insert.run('fd-demo-user', 'real-station', demoUser.handle, 'works', '能用', at.toISOString());
+    insert.run('fd-real', 'real-station', 'realuser', 'slow', '有点慢', at.toISOString());
+
+    const plan = planPurge(store);
+    expect(plan.feedback).toBe(2);
+    applyPurge(store, plan);
+
+    const left = store.db.prepare('SELECT id FROM feedback ORDER BY id').all() as Array<{ id: string }>;
+    expect(left.map(row => row.id)).toEqual(['fd-real']);
+  });
+
+  it('演示站自己先被别处删了也不报错（反馈照常按 stationSlug 清）', () => {
+    const store = demoStore();
+    const plan = planPurge(store);
+    applyPurge(store, plan);
+    // 再跑一遍，幂等。
+    const again = planPurge(store);
+    expect(again.feedback).toBe(0);
+    expect(() => applyPurge(store, again)).not.toThrow();
+  });
+});
