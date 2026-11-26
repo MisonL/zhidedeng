@@ -1,6 +1,6 @@
 import { Link } from 'react-router';
 import type { Station } from '@zhidedeng/shared';
-import { formatLatency, formatRate, formatUptime, sourceLabel } from '../format';
+import { formatDate, formatLatency, formatRate, formatUptime, sourceLabel } from '../format';
 import FavoriteButton from './FavoriteButton';
 import Icon from './Icon';
 import { StationTile } from './visuals';
@@ -20,6 +20,8 @@ export default function StationCard({ station }: { station: Station }) {
           <span className={station.uptime === null ? 'tag' : 'tag tag-good'}>可用率 {formatUptime(station.uptime)}</span>
           <span className="tag">首 token {formatLatency(station.firstTokenLatencyMs)}</span>
           {station.status === 'unstable' && <span className="tag tag-warn">运行波动</span>}
+          {/* 没有人聊过就不显示——用建站时间冒充「社区还在关注」是编造信号。 */}
+          {station.lastConfirmedAt && <span className="tag">社区最后确认 {formatDate(station.lastConfirmedAt)}</span>}
         </div>
         <p className="post-summary">{station.description}</p>
         <div className="post-foot">

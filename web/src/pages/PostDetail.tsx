@@ -5,6 +5,7 @@ import Comments from '../components/Comments';
 import FavoriteButton from '../components/FavoriteButton';
 import Markdown from '../components/Markdown';
 import ReportButton from '../components/ReportButton';
+import AuthorName from '../components/AuthorName';
 import { Avatar } from '../components/visuals';
 import VoteButtons from '../components/VoteButtons';
 import { formatDate, formatRate, isUntrustedSource, KIND_LABEL, sourceLabel } from '../format';
@@ -41,7 +42,7 @@ export default function PostDetail() {
                   <h1 className="article-title">{post.title}</h1>
                   <p className="article-meta">
                     <Avatar nickname={post.author.nickname} avatar={post.author.avatar} size={24} />
-                    <span>{post.author.nickname}</span>
+                    <AuthorName author={post.author} />
                     <time className="num" dateTime={post.publishedAt}>{formatDate(post.publishedAt)}</time>
                     {station && <Link to={`/stations/${station.slug}`}>{station.name}{station.lowestRate !== null && ` · 低至 ${formatRate(station.lowestRate)}`}</Link>}
                     {model && <Link to={`/models/${model.slug}`}>{model.name}</Link>}

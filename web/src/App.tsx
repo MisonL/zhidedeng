@@ -13,6 +13,8 @@ import NotFound from './pages/NotFound';
 import PostDetail from './pages/PostDetail';
 import Rank from './pages/Rank';
 import Search from './pages/Search';
+import Author from './pages/Author';
+import Compare from './pages/Compare';
 import { StationDetailPage, Stations } from './pages/Stations';
 import Submit from './pages/Submit';
 
@@ -28,6 +30,8 @@ export default function App() {
         <Route path="reviews" element={<FeedPage title="评测" kind="review" />} />
         <Route path="posts/:id" element={<PostDetail />} />
         <Route path="stations" element={<Stations />} />
+        <Route path="compare" element={<Compare />} />
+        <Route path="u/:handle" element={<Author />} />
         <Route path="stations/:slug" element={<StationDetailPage />} />
         <Route path="rank" element={<Rank />} />
         <Route path="search" element={<Search />} />

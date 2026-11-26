@@ -1,9 +1,9 @@
 import { AVATAR_PRESETS } from '@zhidedeng/shared';
 import type {
   Author, CheckInResponse, Comment, CommentReply, CreateCommentRequest,
-  CreateReportRequest, CurrentUser, Favorite, FavoriteItem, GetCommentsRequest, GetModelsRequest, GetPostsRequest,
+  CreateFeedbackRequest, CreateReportRequest, CurrentUser, Favorite, FavoriteItem, GetCommentsRequest, GetModelsRequest, GetPostsRequest,
   GetRankingsRequest, GetRankingsResponse, GetStationsRequest, InteractionState, ModelDetail,
-  PaginationQuery, Post, PutFavoriteRequest, PutFavoriteResponse, PutVoteRequest, PutVoteResponse,
+  Feedback, FeedbackVerdict, GetFeedbackRequest, PaginationQuery, Post, PublicProfile, PutFavoriteRequest, PutFavoriteResponse, PutVoteRequest, PutVoteResponse,
   SearchResponse, Station, StationDetail, StationOffer, SubmissionStatus, Target, UpdateMeRequest,
   User, VendorWithModels, Vote,
 } from '@zhidedeng/shared';
@@ -64,6 +64,10 @@ const PREFETCH_MIN_ROWS = 100;
 // 列表查询另走一套（hidden = 0），因为别人回复还挂在墓碑下面，得把它取出来才能渲染。
 const COMMENT_VISIBLE = 'hidden = 0 AND deletedAt IS NULL AND (parentId IS NULL OR parentId NOT IN (SELECT id FROM comments WHERE hidden = 1 AND targetType = comments.targetType AND targetId = comments.targetId))';
 const COMMENTS_PER_MINUTE = 5;
+// 一句话反馈：每小时 5 条挡瞬间刷屏，每天 20 条挡「一小时 5 条慢慢刷」。
+const FEEDBACK_PER_HOUR = 5;
+const FEEDBACK_PER_DAY = 20;
+const FEEDBACK_MAX_LENGTH = 140;
 // 举报是零成本动作：没有配额时一个人可以连发几百条，把审核台淹掉。
 // 一小时 20 条足够正常用户表达不满，又不足以刷屏。
 const REPORTS_PER_HOUR = 20;
@@ -278,7 +282,21 @@ export class Service {
     };
   }
 
-  private station(record: StationRecord, prefetched?: Map<string, InteractionState>): Station {
+  /**
+   * 每个站点的「社区最后确认时间」：可见评论里最新的一条。
+   *
+   * 一条 GROUP BY 查完。站点只有几十个，逐站查代价相同但次数翻几十倍；
+   * 也不做成 schema 字段——那需要每次发评论时回写站点，反而多一处可能不一致的
+   * 冗余（删评论、隐藏评论都要跟着改）。
+   */
+  private lastConfirmedMap(): Map<string, string> {
+    const rows = this.store.db.prepare(
+      `SELECT targetId, max(createdAt) AS last FROM comments WHERE targetType = 'station' AND ${COMMENT_VISIBLE} GROUP BY targetId`,
+    ).all() as Array<{ targetId: string; last: string }>;
+    return new Map(rows.map(row => [row.targetId, row.last]));
+  }
+
+  private station(record: StationRecord, prefetched?: Map<string, InteractionState>, lastConfirmed?: Map<string, string>): Station {
     // 传了预取表就一律走表：没有互动的站点不在表里，此时要用「全零」而不是
     // 回退到单条查询——否则「零互动的站点」恰好是最多的那一类，等于没优化。
     const interaction = prefetched
@@ -292,7 +310,7 @@ export class Service {
     const blended = offers.filter(offer => (offer.basis ?? 'blended') === 'blended');
     const lowestRate = blended.length ? Math.min(...blended.map(offer => offer.rate)) : null;
     const score = record.uptime === null ? null : Number((record.uptime * 0.6 + (interaction.votes.total ? interaction.votes.upRatio : 0.5) * 30 + (1 / (lowestRate ?? 1)) * 3).toFixed(2));
-    return { ...record, ...interaction, lowestRate, score };
+    return { ...record, ...interaction, lowestRate, score, lastConfirmedAt: lastConfirmed?.get(record.slug) ?? null };
   }
 
   /** 刚入队的站内投稿：先拼出与 Post 一致的结构，审核通过后才从 entities 读。 */
@@ -705,7 +723,8 @@ export class Service {
     const records = this.store.all('station').filter(s => (!query.vendor || vendorStations.has(s.slug)) && matches(query.q, s.name, s.slug, s.description));
     // 同理：站点数量少时逐条点查更便宜，几十个以上才值得全量聚合。
     const interactions = records.length >= PREFETCH_MIN_ROWS ? this.interactionMap('station') : null;
-    const items = records.map(s => this.station(s, interactions ?? undefined));
+    const lastConfirmed = this.lastConfirmedMap();
+    const items = records.map(s => this.station(s, interactions ?? undefined, lastConfirmed));
     if (query.sort === 'rate') {
       const offersByStation = new Map<string, StationOffer[]>();
       for (const offer of offers) {
@@ -743,7 +762,8 @@ export class Service {
     const station = this.store.get('station', slug);
     if (!station) throw new ApiError(404, 'NOT_FOUND', '中转站不存在');
     // 和模型页同一套顺序，见 sortOffersForDisplay。
-    return { ...this.station(station), offers: sortOffersForDisplay(this.offers().filter(o => o.stationSlug === slug))
+    // lastConfirmedMap 必须传：不传的话列表页有时间、详情页是 null，同一份数据两处不一致。
+    return { ...this.station(station, undefined, this.lastConfirmedMap()), offers: sortOffersForDisplay(this.offers().filter(o => o.stationSlug === slug))
       .flatMap(o => { const model = this.store.get('model', o.modelSlug); return model ? [{ ...o, model }] : []; }) };
   }
 
@@ -787,6 +807,7 @@ export class Service {
     // 排序键（publishedAt、hot 分数）都来自记录本身，不需要组装 DTO，
     // 所以组装推迟到切片之后——否则每次请求都会把全库文章各查一遍互动数据。
     const records = this.approvedPosts().filter(p =>
+      (!query.author || p.authorHandle === query.author) &&
       (!query.kind || p.kind === query.kind) && (!query.station || p.stationSlug === query.station) &&
       (!query.model || p.modelSlug === query.model) && (!query.vendor || (p.modelSlug !== null && models.has(p.modelSlug))) &&
       matches(query.q, p.title, p.summary, p.body));
@@ -801,6 +822,110 @@ export class Service {
     // 表，库一大就是固定的大开销。先前无条件聚合，反而让「搜索只命中 1 篇」
     // 「按站点过滤剩 20 篇」这些路径从 130ms 变成 322ms。
     return paginateThen(records, query, record => this.post(record));
+  }
+
+  /**
+   * 站点页一句话反馈：三个选项 + 一句话。
+   *
+   * 为什么单独开一条而不是复用评论：评论是「讨论」，有回复、有层级、可以为了一
+   * 个观点写几百字；反馈是「签到」——充了 10 块、第二天 502，读者能给的往往
+   * 就这么多。混在一起会让评论区变成一堆彼此无关的短句。
+   *
+   * 配额有两层，都是必要的：
+   * - 每小时 5 条：挡住瞬间刷屏；
+   * - 每天 20 条：挡不住一小时 5 条、一天 120 条的慢速刷法。
+   * 另外同一人对同一站每天只能发一条：这类信息本来就是「我今天试了」。
+   */
+  createFeedback(input: CreateFeedbackRequest): Feedback {
+    const station = this.store.get('station', input.stationSlug);
+    if (!station) throw new ApiError(404, 'NOT_FOUND', '站点不存在');
+    if (station.source === 'demo') throw new ApiError(400, 'INVALID_INPUT', '演示站点不需要反馈');
+    const content = input.content.trim();
+    if (!content) throw new ApiError(400, 'INVALID_INPUT', '写一句话再提交');
+    if (content.length > FEEDBACK_MAX_LENGTH) throw new ApiError(400, 'INVALID_INPUT', `一句话最多 ${FEEDBACK_MAX_LENGTH} 字`);
+
+    const now = this.now();
+    const hourAgo = new Date(now.getTime() - 3_600_000).toISOString();
+    const dayAgo = new Date(now.getTime() - 86_400_000).toISOString();
+    // 配额一律数**含墓碑**的行：作者删掉不该把额度退回来，否则
+    // 「提交 → 删除 → 再提交」就能无限刷，一次删除等于一次配额重置。
+    const count = (since: string, extra = '', params: string[] = []) => Number(this.store.db.prepare(
+      `SELECT count(*) AS count FROM feedback WHERE userHandle = ? AND createdAt > ?${extra}`,
+    ).get(this.user, since, ...params)!.count);
+    const id = crypto.randomUUID();
+    const createdAt = now.toISOString();
+    // 检查与写入放在同一个写事务里：分开做的话，两个并发请求会同时看到
+    // 「还没到上限」然后各写一条，实际写进去两条。
+    this.store.transaction(() => {
+      if (count(hourAgo) >= FEEDBACK_PER_HOUR) throw new ApiError(429, 'RATE_LIMITED', '反馈太频繁了，请稍后再试');
+      if (count(dayAgo) >= FEEDBACK_PER_DAY) throw new ApiError(429, 'RATE_LIMITED', '今天反馈得够多了，明天再来');
+      if (count(dayAgo, ' AND stationSlug = ?', [input.stationSlug]) > 0) {
+        throw new ApiError(409, 'ALREADY_FEEDBACK', '今天已经给这个站留过一句话了');
+      }
+      this.store.db.prepare(
+        'INSERT INTO feedback (id,stationSlug,userHandle,verdict,content,createdAt,deletedAt) VALUES (?,?,?,?,?,?,NULL)',
+      ).run(id, input.stationSlug, this.user, input.verdict, content, createdAt);
+    });
+    // verified:false 是契约的一部分：这句话是用户自述，不是平台实测。
+    // 响应里显式带上，消费方（含 Agent）不会把它当成测过的结论。
+    return { id, stationSlug: input.stationSlug, author: this.author(this.user), verdict: input.verdict, content, createdAt, mine: true, verified: false };
+  }
+
+  getFeedback(query: GetFeedbackRequest) {
+    // 分页交给 SQL：原先把整站反馈读进内存再 slice，条数一多就是全表扫描 + 全量反序列化。
+    // 分页上限由路由的 zod schema 负责（pageSize 封顶 50），这里不重复夹。
+    const pageSize = query.pageSize ?? 20;
+    const page = query.page ?? 1;
+    const total = Number(this.store.db.prepare(
+      'SELECT count(*) AS count FROM feedback WHERE stationSlug = ? AND deletedAt IS NULL',
+    ).get(query.stationSlug)!.count);
+    const rows = this.store.db.prepare(
+      `SELECT id, stationSlug, userHandle, verdict, content, createdAt FROM feedback
+       WHERE stationSlug = ? AND deletedAt IS NULL
+       ORDER BY createdAt DESC, rowid DESC LIMIT ? OFFSET ?`,
+    ).all(query.stationSlug, pageSize, (page - 1) * pageSize) as Array<{
+      id: string; stationSlug: string; userHandle: string; verdict: FeedbackVerdict; content: string; createdAt: string;
+    }>;
+    const items = rows.map(row => ({
+      id: row.id, stationSlug: row.stationSlug, author: this.author(row.userHandle),
+      verdict: row.verdict, content: row.content, createdAt: row.createdAt, mine: row.userHandle === this.user,
+      verified: false as const,
+    })) satisfies Feedback[];
+    return { items, total, page, pageSize };
+  }
+
+  deleteFeedback(id: string): { id: string; deleted: true } {
+    const row = this.store.db.prepare('SELECT userHandle, deletedAt FROM feedback WHERE id = ?').get(id) as
+      { userHandle: string; deletedAt: string | null } | undefined;
+    // 找不到也回 404：不区分「不存在」和「不是你的」，否则 id 又变成存在性探针。
+    if (!row || row.userHandle !== this.user) throw new ApiError(404, 'NOT_FOUND', '反馈不存在');
+    // 幂等：删两次都返回成功，第二次不改时间。
+    if (row.deletedAt === null) {
+      this.store.db.prepare('UPDATE feedback SET deletedAt = ? WHERE id = ?').run(this.now().toISOString(), id);
+    }
+    return { id, deleted: true };
+  }
+
+  /**
+   * 公开作者主页。只给本来就公开的东西：昵称、头像、简介、篇数、获赞数、注册时间。
+   *
+   * 不存在的作者回 404 而不是「空主页」：空主页会让每个拼错的 handle 都变成一个
+   * 看起来正常的页面，也让「这个人有没有账号」变成可枚举的。
+   */
+  getUser(handle: string): PublicProfile {
+    const user = this.store.get('user', handle);
+    if (!user) throw new ApiError(404, 'NOT_FOUND', '没有这个作者');
+    const posts = this.approvedPosts().filter(post => post.authorHandle === handle);
+    const up = this.countVotes('post', 'up');
+    let upCount = 0;
+    for (const post of posts) upCount += up.get(post.id) ?? 0;
+    // 注册时间在 accounts 表（凭证）而不是 entities 的 data 里：后者只有
+    // handle/nickname/avatar/bio/tokens，没有注册时间。
+    const account = this.store.db.prepare('SELECT createdAt FROM accounts WHERE handle = ?').get(handle) as { createdAt: string } | undefined;
+    return {
+      handle: user.handle, nickname: user.nickname, avatar: user.avatar, bio: user.bio,
+      shareCount: posts.length, upCount, joinedAt: account?.createdAt ?? null,
+    };
   }
 
   getPost(id: string): Post {

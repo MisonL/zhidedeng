@@ -1,6 +1,6 @@
 import type { Banner, ContentSource, Model, Post, Station, User, Vendor } from '@zhidedeng/shared';
 
-export type StationRecord = Omit<Station, 'votes' | 'currentUserVote' | 'favorited' | 'favoriteCount' | 'commentCount' | 'lowestRate' | 'score'>;
+export type StationRecord = Omit<Station, 'votes' | 'currentUserVote' | 'favorited' | 'favoriteCount' | 'commentCount' | 'lowestRate' | 'score' | 'lastConfirmedAt'>;
 // 用户投稿不写 source，读取时即 'user'。
 // 群友提交的作者只是一个展示昵称，存在 authorNickname 里，不是 users 里的账号，也不进达人榜。
 export type PostRecord = Omit<Post, 'votes' | 'currentUserVote' | 'favorited' | 'favoriteCount' | 'commentCount' | 'author' | 'source'> & {
@@ -69,6 +69,21 @@ export const SCHEMA = `
   );
   -- 同一个人对同一个对象只能有一条未处理举报。用部分唯一索引而不是先查后插：
   -- 并发下「都查到没有」然后各插一条，靠应用层查重挡不住。
+  -- 站点页「一句话反馈」：三个选项 + 一句话。存的是**用户断言**，不是平台实测，
+  -- 所以单独一张表，绝不混进 stations.uptime / firstTokenLatencyMs 那些字段。
+  CREATE TABLE IF NOT EXISTS feedback (
+    id TEXT PRIMARY KEY,
+    stationSlug TEXT NOT NULL,
+    userHandle TEXT NOT NULL,
+    verdict TEXT NOT NULL CHECK(verdict IN ('works','slow','broken')),
+    content TEXT NOT NULL,
+    createdAt TEXT NOT NULL,
+    -- 作者自删。**不物理删**：配额按行数算，删一行就等于把额度退回去，
+    -- 提交→删除→再提交可以无限刷（实测 25 次全过）。墓碑让配额只增不减。
+    deletedAt TEXT
+  );
+  CREATE INDEX IF NOT EXISTS feedback_station ON feedback(stationSlug, createdAt DESC);
+  CREATE INDEX IF NOT EXISTS feedback_user ON feedback(userHandle, createdAt DESC);
   CREATE UNIQUE INDEX IF NOT EXISTS reports_open_once ON reports(targetType, targetId, reporterHandle) WHERE status = 'open';
   CREATE INDEX IF NOT EXISTS reports_open ON reports(status, createdAt);
 

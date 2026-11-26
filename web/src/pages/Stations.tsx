@@ -6,6 +6,7 @@ import { api } from '../api';
 import AsyncView, { Empty, LoadMore } from '../components/AsyncView';
 import Comments from '../components/Comments';
 import FavoriteButton from '../components/FavoriteButton';
+import Feedback from '../components/Feedback';
 import PostCard from '../components/PostCard';
 import ReportButton from '../components/ReportButton';
 import StationCard from '../components/StationCard';
@@ -52,6 +53,7 @@ export function Stations() {
       <header className="page-head">
         <h1 className="page-title">中转站库</h1>
         <p className="page-sub">{SITE_NOTICE}。</p>
+        <p className="hint"><Link to="/compare">并排对比几个站</Link></p>
       </header>
       <div className="filter-bar">
         <div className="segmented">
@@ -116,6 +118,7 @@ export function StationDetailPage() {
                 <div><dt>运行状态</dt><dd>{formatStatus(station.status)}</dd></div>
                 <div><dt>综合得分</dt><dd className="num">{station.score ?? NOT_AVAILABLE}</dd></div>
               </dl>
+              <Feedback stationSlug={station.slug} />
               <h2 className="section-title">模型倍率</h2>
               <div className="table-scroll">
                 <table className="data-table data-table-compact">

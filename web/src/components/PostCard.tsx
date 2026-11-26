@@ -3,6 +3,7 @@ import type { PostSummary } from '@zhidedeng/shared';
 import { formatDate, formatRate, formatUptime, KIND_LABEL, sourceLabel } from '../format';
 import { useCatalog } from '../state';
 import FavoriteButton from './FavoriteButton';
+import AuthorName from './AuthorName';
 import Icon from './Icon';
 import { PostCover } from './visuals';
 import VoteButtons from './VoteButtons';
@@ -49,7 +50,7 @@ export default function PostCard({ post }: { post: PostSummary }) {
             <time className="num" dateTime={post.publishedAt}>{formatDate(post.publishedAt).slice(5)}</time>
             {station
               ? <Link className="post-source" to={`/stations/${station.slug}`}>{station.name}</Link>
-              : <span className="post-source">{post.author.nickname}</span>}
+              : <AuthorName author={post.author} />}
             <Link className="btn btn-red btn-small" to={station ? `/stations/${station.slug}` : postPath}>
               去看看<Icon name="right" size={13} />
             </Link>

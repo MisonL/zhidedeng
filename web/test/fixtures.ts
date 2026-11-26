@@ -28,6 +28,7 @@ export const station: Station = {
   slug: 'yunzhan', name: '云栈', description: '虚构样例站点', rechargeThreshold: 10,
   paymentMethods: ['支付宝'], uptime: 99.2, firstTokenLatencyMs: 420, foundedAt: '2024-05-01',
   status: 'running', lowestRate: 0.6, score: 92, url: null, source: 'demo',
+  lastConfirmedAt: '2026-11-20T08:00:00.000Z',
   votes: { up: 30, down: 10, total: 40, upRatio: 0.75 }, currentUserVote: null,
   favorited: false, favoriteCount: 5, commentCount: 2,
 };

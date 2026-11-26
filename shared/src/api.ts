@@ -1,7 +1,7 @@
 import type {
-  AgentToken, Banner, CheckIn, Comment, CommentReply, CommunityRanking, CurrentUser,
+  AgentToken, Author, Banner, CheckIn, Comment, CommentReply, CommunityRanking, CurrentUser,
   ExpertRanking, FavoriteItem, Model, ModelDetail, ModelRanking, Post, PostKind, PostSummary, StationRanking,
-  ISODateTime, RankingTab, RateBasis, Station, StationDetail, Target, Vendor, VendorWithModels, VoteSummary, VoteValue,
+  ISODate, ISODateTime, RankingTab, RateBasis, Station, StationDetail, Target, Vendor, VendorWithModels, VoteSummary, VoteValue,
 } from './domain.js';
 
 export interface PaginationQuery {
@@ -338,9 +338,59 @@ export interface GetPostsRequest extends PaginationQuery {
   model?: string;
   sort?: PostSort;
   q?: string;
+  /** 只看某个人写的。作者主页用它，不另开一条「按作者取文章」的接口。 */
+  author?: string;
 }
 export type GetPostsResponse = PaginatedResponse<PostSummary>;
 export interface GetPostRequest { id: string }
+
+/**
+ * 站点页的一句话反馈。
+ *
+ * `verdict` 是用户的自述判断，不是平台实测：它和 `Station.uptime` 是两回事，
+ * 展示时必须标明「用户自述，未经平台核实」。
+ */
+export type FeedbackVerdict = 'works' | 'slow' | 'broken';
+export interface Feedback {
+  id: string;
+  stationSlug: string;
+  author: Author;
+  verdict: FeedbackVerdict;
+  content: string;
+  createdAt: ISODateTime;
+  /** 本人发的才能删。 */
+  mine: boolean;
+  /**
+   * 永远是 false：这是**用户自述**，不是平台实测。
+   *
+   * 字段本身冗余，但它让「未经核实」成为响应里可断言的事实，而不是只写在
+   * 页面文案上——消费方（含 Agent、第三方）拿到数据就能看到它没被核实过。
+   */
+  verified: false;
+}
+export interface CreateFeedbackRequest {
+  stationSlug: string;
+  verdict: FeedbackVerdict;
+  content: string;
+}
+export interface GetFeedbackRequest extends PaginationQuery {
+  stationSlug: string;
+}
+export interface DeleteFeedbackRequest { id: string }
+
+/** 公开作者主页。只有本来就公开的信息，不含邮箱之类。 */
+export interface PublicProfile {
+  handle: string;
+  nickname: string;
+  avatar: string;
+  bio: string;
+  shareCount: number;
+  /** 这些文章收到的赞数合计，用来给主页一个「被多少人认可」的量。 */
+  upCount: number;
+  joinedAt: ISODate | null;
+}
+export interface GetUserRequest { handle: string }
+export type GetUserResponse = PublicProfile;
 export type GetPostResponse = Post;
 export interface CreatePostRequest {
   kind: PostKind;
@@ -497,6 +547,10 @@ export interface ApiContracts {
   getStations: { request: GetStationsRequest; response: ApiResponse<GetStationsResponse> };
   getStation: { request: GetStationRequest; response: ApiResponse<GetStationResponse> };
   getPosts: { request: GetPostsRequest; response: ApiResponse<GetPostsResponse> };
+  getUser: { request: GetUserRequest; response: ApiResponse<GetUserResponse> };
+  createFeedback: { request: CreateFeedbackRequest; response: ApiResponse<Feedback> };
+  getFeedback: { request: GetFeedbackRequest; response: ApiResponse<PaginatedResponse<Feedback>> };
+  deleteFeedback: { request: DeleteFeedbackRequest; response: ApiResponse<{ id: string; deleted: true }> };
   getPost: { request: GetPostRequest; response: ApiResponse<GetPostResponse> };
   createPost: { request: CreatePostRequest; response: ApiResponse<CreatePostResponse> };
   putVote: { request: PutVoteRequest; response: ApiResponse<PutVoteResponse> };

@@ -102,6 +102,13 @@ export interface Station extends InteractionState {
   score: number | null;
   // 只含协议、主机和路径，不带 query 与 fragment。
   url: string | null;
+  /**
+   * 社区最后一次在这站下面发言的时间（只算可见评论）。
+   *
+   * 「最后确认」是个保守说法：有人在下面说话，说明他至少最近还关注着这个站。
+   * 没有评论就是 null，显示成「还没有人聊过」，不要拿建站时间冒充活跃度。
+   */
+  lastConfirmedAt: ISODate | null;
   source: ContentSource | 'user';
 }
 

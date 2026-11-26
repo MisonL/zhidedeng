@@ -832,7 +832,15 @@ function orderByMaterializeDependency(store: Store, ids: string[]): string[] {
   route('getModel', z.strictObject({ slug: identifier }), (service, input) => service.getModel(input.slug));
   route('getStations', z.strictObject({ ...pagination, vendor: identifier.optional(), q: queryText, sort: z.enum(['score', 'rate', 'uptime']).optional() }), (service, input) => service.getStations(input));
   route('getStation', z.strictObject({ slug: identifier }), (service, input) => service.getStation(input.slug));
-  route('getPosts', z.strictObject({ ...pagination, kind: kind.optional(), vendor: identifier.optional(), station: identifier.optional(), model: identifier.optional(), sort: z.enum(['latest', 'hot']).optional(), q: queryText }), (service, input) => service.getPosts(input));
+  route('getPosts', z.strictObject({ ...pagination, kind: kind.optional(), vendor: identifier.optional(), station: identifier.optional(), model: identifier.optional(), sort: z.enum(['latest', 'hot']).optional(), q: queryText, author: identifier.optional() }), (service, input) => service.getPosts(input));
+  route('getUser', z.strictObject({ handle: identifier }), (service, input) => service.getUser(input.handle));
+  route('createFeedback', z.strictObject({
+    stationSlug: identifier,
+    verdict: z.enum(['works', 'slow', 'broken']),
+    content: z.string().trim().min(1).max(140),
+  }), (service, input) => service.createFeedback(input));
+  route('getFeedback', z.strictObject({ stationSlug: identifier, ...pagination }), (service, input) => service.getFeedback(input));
+  route('deleteFeedback', z.strictObject({ id: identifier }), (service, input) => service.deleteFeedback(input.id));
   route('getPost', z.strictObject({ id: identifier }), (service, input) => service.getPost(input.id));
   route('createPost', z.strictObject({ kind, title: z.string().trim().min(1).max(200), summary: z.string().trim().min(1).max(1000), body: z.string().min(1).max(100_000).refine(body => body.trim().length > 0), stationSlug: identifier.optional(), modelSlug: identifier.optional() }), (service, input, ip) => {
     // 站内发帖也进统一队列：飞书和 Agent 都走 submission，只有站内另写 entities，

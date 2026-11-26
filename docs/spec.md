@@ -204,12 +204,14 @@ channel 是队列的来源渠道，source 是物化内容的展示来源，二�
 - `GET /vendors`（含 models 摘要）
 - `GET /models?vendor=&q=`、`GET /models/:slug`（含 offers：各站倍率，先按计价口径分组、组内按倍率升序；每条带 `basis` 与可为 null 的 `quotedAt`）
 - `GET /stations?vendor=&sort=score|rate|uptime&q=`、`GET /stations/:slug`（含 offers、指标、投票汇总、当前用户投票与收藏状态）
-- `GET /posts?kind=&vendor=&station=&model=&sort=latest|hot&q=`、`GET /posts/:id`、`POST /posts`（kind、title、summary、body、stationSlug?、modelSlug?）、`DELETE /posts/:id` —— 作者撤下自己已发布的文章：软删除，正文保留，恢复只给管理员；只能撤自己的（他人 404）、只能撤已通过的（待审/被拒 409 POST_NOT_PUBLISHED）、演示数据 409
+- `GET /posts?kind=&vendor=&station=&model=&author=&sort=latest|hot&q=`（`author` 给作者主页用）、`GET /posts/:id`、`POST /posts`（kind、title、summary、body、stationSlug?、modelSlug?）、`DELETE /posts/:id` —— 作者撤下自己已发布的文章：软删除，正文保留，恢复只给管理员；只能撤自己的（他人 404）、只能撤已通过的（待审/被拒 409 POST_NOT_PUBLISHED）、演示数据 409
 - `POST /models/suggest`（slug、vendor、name、description）—— 站内补录模型，与 Agent 通道同一套字段，进同一个待审队列
 - `POST /stations/suggest`（name、url、description?、offers?、rechargeThreshold?、paymentMethods?）—— 站内推荐新中转站。此前站内根本没有这条路，站点只能由飞书同步或 Agent 送来。与其它投稿进同一个待审队列，审核通过后由同一套物化逻辑建站；报价里的模型必须已存在，写错在提交时就报错而不是留成停在 pending 的坏记录
 - `POST /admin/invite-codes`（note?、maxUses?、expiresAt?）、`GET /admin/invite-codes`、`POST /admin/invite-codes/:id/revoke` —— 邀请码管理，`Authorization: Bearer` 鉴权。明文只在创建响应里返回一次，库里只存 SHA-256 与前缀；`maxUses` 为 null 表示不限次数，同一账号对同一个码只核销一次
 - `PUT /votes`（targetType: post|station、targetId、value: up|down|null）返回最新汇总
 - `PUT /favorites`（targetType、targetId、favorited）
+- `GET /users/:handle` —— 公开作者主页：昵称、头像、简介、已通过文章数、这些文章收到的赞、注册时间。查不到 404（不给空主页，否则拼错的 handle 会变成可枚举的正常页面）；不含邮箱等凭证信息
+- `POST /feedback`（stationSlug、verdict: works|slow|broken、content 1~140 字）、`GET /feedback?stationSlug=`（按时间倒序，SQL 层 `LIMIT/OFFSET` 分页）、`DELETE /feedback/:id` —— 站点页「一句话反馈」。是**用户自述**：响应里带 `verified: false`，页面写明「未经平台核实」，绝不混进 uptime/latency 那类实测字段。演示站不可留；配额：同人同站每天 1 条（409 ALREADY_FEEDBACK）、每账号每小时 5 条、每天 20 条，超限 429 RATE_LIMITED。配额检查与写入在同一个写事务里，且**按含墓碑的行数计**——作者自删留 `deletedAt` 不物理删，否则「提交→删除→再提交」可无限刷。只能删自己发的（他人/不存在一律 404，不区分以免暴露 id 是否存在），重复删幂等
 - `GET /comments?targetType=&targetId=`、`POST /comments`（content 1~2000 字、parentId?）、`DELETE /comments/:id` —— 作者删除自己的评论（他人 404）。没有子行时物理删除；有任何子行（**含被管理员隐藏的回复**，因为外键约束不看 hidden）时留墓碑：正文在库里保留、接口返回空串，列表显示「该评论已删除」，其下的回复不跟着消失。墓碑不计入评论数，也不能被回复
 - `POST /reports`（targetType: post|station|comment、targetId、reason 1~200 字、detail?）—— 举报进人工队列，**不自动下架、不承诺 SLA**。不能举报自己的内容、看不到的对象（隐藏/已删除/所属文章已撤下）与演示数据；同一人对同一对象未处理时重复举报 409 ALREADY_REPORTED；处置为 `dismissed` 后同一人再报 409 ALREADY_DISMISSED（内容不可编辑，重复举报不带来新信息；`resolved` 不封，问题可能再犯）；按人限流 20 条/小时，超限 429 RATE_LIMITED
 - `GET /rankings?tab=model|community|expert`（各返回 6~12 条）

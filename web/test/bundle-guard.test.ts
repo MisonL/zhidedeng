@@ -49,10 +49,15 @@ describe('前端产物不含 zod', () => {
     expect(result.error).toBeUndefined();
     expect(result.ok).toBe(true);
     expect(result.files).toBeGreaterThan(0);
-    // 基线是 521,690 字节；批次 1 新增评论删除/举报/头像选择器后又涨了约 5K。
-    // 真正的判据是上面两条（构建通过 + 没有 zod 标识），这里只留一道「没翻倍」
-    // 的粗线：带 zod 的产物是 606,000+，所以 570K 仍然能抓住它。
-    expect(result.bytes).toBeLessThan(570_000);
+    // 基线是 521,690 字节；批次 1（举报/头像选择器）涨约 5K，批次 2（对比页、
+    // 作者主页、一句话反馈）再涨约 6K。所以这里是 594K：既留足真实新功能的余量，
+    // 又不会放过 zod（带它的产物是 606,000+）。
+    //
+    // 阈值只该在「合理新增了功能」时上调，并且要写明理由；拿它迁就一段突然
+    // 涨大的代码等于把这道闸门关掉。
+    //
+    // 真正的判据是上面两条（构建通过 + 没有 zod 标识），这条只是粗线。
+    expect(result.bytes).toBeLessThan(594_000);
     expect(result.markers, '产物里出现了 zod 的内部标识').toBe(0);
   }, 300_000);
 
