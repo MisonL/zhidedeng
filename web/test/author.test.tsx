@@ -48,13 +48,16 @@ describe('作者主页', () => {
         makePost('p1', { title: '飞书同步的', stationSlug: null, author: { handle: 'feishu-submission', nickname: '群友', avatar: '' } }),
         makePost('p2', { title: '匿名投稿的', stationSlug: null, author: { handle: 'anonymous-submission', nickname: '匿名', avatar: '' } }),
         makePost('p3', { title: '已注销的', stationSlug: null, author: { handle: 'gone', nickname: '已注销用户·gone', avatar: '' } }),
+        makePost('p4', { title: 'Agent 采集的', stationSlug: null, author: { handle: 'agent-submission', nickname: 'AI 采集', avatar: '' } }),
+        makePost('p5', { title: '来源不明的', stationSlug: null, author: { handle: 'unknown', nickname: '未知', avatar: '' } }),
       ]),
     });
     renderApp('/community');
-    expect(await screen.findByText('群友')).toBeInTheDocument();
-    expect(screen.queryByRole('link', { name: '群友' })).not.toBeInTheDocument();
-    expect(screen.queryByRole('link', { name: '匿名' })).not.toBeInTheDocument();
-    expect(screen.queryByRole('link', { name: '已注销用户·gone' })).not.toBeInTheDocument();
+    // 五条都必须真的渲染出来，否则「没有链接」可能只是因为根本没渲染。
+    for (const name of ['群友', '匿名', '已注销用户·gone', 'AI 采集', '未知']) {
+      expect(await screen.findByText(name)).toBeInTheDocument();
+      expect(screen.queryByRole('link', { name })).not.toBeInTheDocument();
+    }
   });
 
   it('文章卡片的作者名指向作者主页', async () => {
