@@ -100,6 +100,12 @@ describe('清理演示数据时不留死举报', () => {
       store.db.prepare("INSERT INTO reports (id,targetType,targetId,reporterHandle,reason,status,createdAt) VALUES ('r3','comment',?,'realuser','辱骂','open',?)")
         .run(comment.id, at.toISOString());
     }
+    // 需要一篇**真实存在**的文章当举报目标：指向不存在对象的举报现在会被
+    // 当成孤儿举报清掉（另一条用例覆盖），那样这条用例就测不出「保留真实举报」了。
+    store.put('post', 'real-post', {
+      id: 'real-post', kind: 'review', title: '真实文章', summary: '', body: '', authorHandle: 'realuser',
+      stationSlug: null, modelSlug: null, cover: null, publishedAt: at.toISOString(), source: 'user', status: 'approved',
+    } as never);
     // 演示用户发出的举报（举报目标可以是真实内容，但举报人本身要被清掉）。
     store.db.prepare("INSERT INTO reports (id,targetType,targetId,reporterHandle,reason,status,createdAt) VALUES ('r4','post','real-post','" + demoUser.handle + "','x','open',?)")
       .run(at.toISOString());
@@ -162,6 +168,46 @@ describe('清理顺序：举报要在评论之前', () => {
 
     const comments = store.db.prepare('SELECT id FROM comments').all() as Array<{ id: string }>;
     expect(comments.map(c => c.id)).not.toContain('late-c');
+    expect(store.db.prepare('SELECT COUNT(*) c FROM reports').get()).toMatchObject({ c: 0 });
+  });
+});
+
+describe('孤儿举报（目标已不在库里）', () => {
+  it('目标不存在的举报会被识别并清掉，真实对象上的举报不受影响', () => {
+    const store = demoStore();
+    // 三条孤儿：指向不存在的文章、站点、评论；一条正常：指向真实存在的演示文章。
+    const live = store.allWithRemoved('post').find(item => item.source === 'demo')!;
+    const insert = store.db.prepare(
+      "INSERT INTO reports (id,targetType,targetId,reporterHandle,reason,status,createdAt) VALUES (?,?,?,?,?,'open',?)",
+    );
+    insert.run('o-post', 'post', '已经没了的文章', 'realuser', 'x', at.toISOString());
+    insert.run('o-station', 'station', '已经没了的站', 'realuser', 'x', at.toISOString());
+    insert.run('o-comment', 'comment', '已经没了的评论', 'realuser', 'x', at.toISOString());
+    insert.run('live', 'post', live.id, 'realuser', '正常举报', at.toISOString());
+
+    const plan = planPurge(store);
+    expect(plan.orphanReports.map(item => item.id).sort()).toEqual(['o-comment', 'o-post', 'o-station']);
+
+    applyPurge(store, plan);
+    const left = store.db.prepare('SELECT id FROM reports').all() as Array<{ id: string }>;
+    // 正常那条指向的演示文章被删了，所以它也成了孤儿、被一起清掉——这是预期：
+    // 对象没了举报就没有意义。剩下的只可能是「真实对象上的真实举报」。
+    expect(left).toEqual([]);
+  });
+
+  it('实体为空、只剩孤儿举报时，也能清干净（不再被「没有演示数据」提前返回挡住）', () => {
+    const store = demoStore();
+    // 先清一遍演示数据，再人为留一条孤儿举报。
+    applyPurge(store, planPurge(store));
+    store.db.prepare(
+      "INSERT INTO reports (id,targetType,targetId,reporterHandle,reason,status,createdAt) VALUES ('late-orphan','post','早就不存在了','realuser','x','open',?)",
+    ).run(at.toISOString());
+    expect(store.db.prepare('SELECT COUNT(*) c FROM reports').get()).toMatchObject({ c: 1 });
+
+    const plan = planPurge(store);
+    expect(plan.stations).toEqual([]);
+    expect(plan.orphanReports).toHaveLength(1);
+    applyPurge(store, plan);
     expect(store.db.prepare('SELECT COUNT(*) c FROM reports').get()).toMatchObject({ c: 0 });
   });
 });

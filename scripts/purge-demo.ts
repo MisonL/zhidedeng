@@ -35,6 +35,14 @@ export interface PurgePlan {
   favorites: number;
   commentCount: number;
   reports: number;
+  /**
+   * 目标已经不在库里的举报（对象被别的途径删掉了）。
+   *
+   * 这类行认不出「属于哪一批演示数据」，但它们的共同特征是**目标不存在**——
+   * 审核台会一直显示「已不在线」，永远处理不完也永远没有意义。所以按「目标
+   * 不存在」单独识别并清掉，而不是靠 demo 名单去碰。
+   */
+  orphanReports: Array<{ id: string; targetType: string; targetId: string }>;
 }
 
 const inList = (values: readonly string[]) => values.map(() => '?').join(', ');
@@ -84,6 +92,14 @@ export function planPurge(store: ReturnType<typeof openStore>): PurgePlan {
   if (users.length > 0) reportParts.push(`reporterHandle IN (${inList(users)})`);
   const reportParams = [...targetParams, ...commentIds, ...users];
 
+  // 孤儿举报：目标实体/评论已经不在了。判定按 kind 分开写，因为 post/station
+  // 存在 entities 里、comment 存在 comments 里，混在一个 NOT IN 里会误判。
+  const orphanReports = store.db.prepare(
+    `SELECT id, targetType, targetId FROM reports WHERE
+       (targetType IN ('post','station') AND NOT EXISTS (SELECT 1 FROM entities WHERE entities.kind = reports.targetType AND entities.id = reports.targetId))
+       OR (targetType = 'comment' AND NOT EXISTS (SELECT 1 FROM comments WHERE comments.id = reports.targetId))`,
+  ).all() as Array<{ id: string; targetType: string; targetId: string }>;
+
   return {
     stations, posts, users, banners, comments: commentIds,
     offers: count(stations.length > 0 ? `SELECT COUNT(*) c FROM offers WHERE stationSlug IN (${inList(stations)})` : 'SELECT 0 c', stations),
@@ -91,6 +107,7 @@ export function planPurge(store: ReturnType<typeof openStore>): PurgePlan {
     favorites: count(`${where('SELECT COUNT(*) c FROM favorites') ?? 'SELECT 0 c'}`, targetParams.concat(users)),
     commentCount: count(`${where('SELECT COUNT(*) c FROM comments') ?? 'SELECT 0 c'}`, targetParams.concat(users)),
     reports: reportParts.length === 0 ? 0 : count(`SELECT COUNT(*) c FROM reports WHERE ${reportParts.join(' OR ')}`, reportParams),
+    orphanReports,
   };
 }
 
@@ -135,6 +152,13 @@ export function applyPurge(store: ReturnType<typeof openStore>, plan: PurgePlan)
     if (reportParts.length > 0) {
       store.db.prepare(`DELETE FROM reports WHERE ${reportParts.join(' OR ')}`).run(...reportParams);
     }
+    // 目标已经不存在的举报。放在最后一步：上面刚删完 demo 实体，原来指向它们的
+    // 举报此刻正好变成孤儿，一条 SQL 收干净，不依赖 plan 快照里的名单。
+    store.db.prepare(
+      `DELETE FROM reports WHERE
+         (targetType IN ('post','station') AND NOT EXISTS (SELECT 1 FROM entities WHERE entities.kind = reports.targetType AND entities.id = reports.targetId))
+         OR (targetType = 'comment' AND NOT EXISTS (SELECT 1 FROM comments WHERE comments.id = reports.targetId))`,
+    ).run();
 
     if (plan.stations.length > 0 || plan.posts.length > 0) {
       for (const table of ['votes', 'favorites']) {
@@ -178,9 +202,13 @@ export async function main(argv: readonly string[]): Promise<number> {
     // 举报不用 plan 的数字：plan 之后新插入的举报会被 DELETE 一起清掉，说死一个
     // 更小的数会让运维以为「没有举报要清」。这里说清它是动态的。
     console.log(`关联数据：报价 ${plan.offers}、投票 ${plan.votes}、收藏 ${plan.favorites}、评论 ${plan.commentCount}、举报 ${plan.reports}（执行时按同一条件重算，可能更多）`);
+    if (plan.orphanReports.length > 0) {
+      console.log(`目标已不存在的举报：${plan.orphanReports.length} 条（审核台会一直显示「已不在线」，一并清掉）`);
+    }
     if (plan.stations.length > 0) console.log(`  站点：${plan.stations.join(', ')}`);
     if (plan.posts.length > 0) console.log(`  文章：${plan.posts.slice(0, 10).join(', ')}${plan.posts.length > 10 ? ` …共 ${plan.posts.length} 篇` : ''}`);
-    if (total === 0) {
+    // 实体为 0 也可能有事要做：孤儿举报（目标已被别的途径删掉）。
+    if (total === 0 && plan.orphanReports.length === 0) {
       console.log('没有演示数据，无需清理。');
       return 0;
     }
