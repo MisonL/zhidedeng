@@ -913,3 +913,17 @@ describe('举报列表的查询次数', () => {
     }
   });
 });
+
+describe('唯一约束冲突的判定', () => {
+  it('重复举报回 409，且不依赖错误文案（结构化 errcode 同样识别）', async () => {
+    const a = await account('alice');
+    const post = await submit(a, '会被重复举报的文章');
+    await admin(`/api/admin/posts/${post.id}/review`, { status: 'approved' });
+    const b = await account('bobby');
+    const first = await b.call('POST', '/api/reports', { targetType: 'post', targetId: post.id, reason: '内容不实' });
+    expect(first.status).toBe(200);
+    const again = await b.call('POST', '/api/reports', { targetType: 'post', targetId: post.id, reason: '内容不实' });
+    expect(again.status).toBe(409);
+    expect(await again.json()).toMatchObject({ error: { code: 'ALREADY_REPORTED' } });
+  });
+});

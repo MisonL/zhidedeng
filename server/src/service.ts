@@ -7,7 +7,7 @@ import type {
   SearchResponse, Station, StationDetail, StationOffer, SubmissionStatus, Target, UpdateMeRequest,
   User, VendorWithModels, Vote,
 } from '@zhidedeng/shared';
-import { ApiError, isDatabaseBusyError } from './errors.ts';
+import { ApiError, isDatabaseBusyError, isUniqueConstraintError } from './errors.ts';
 import { INITIAL_TOKENS } from './auth.ts';
 import { Store } from './database.ts';
 import type { PostRecord, StationRecord } from './database.ts';
@@ -937,7 +937,7 @@ export class Service {
       // 部分唯一索引挡住重复举报。回 409 而不是静默成功：用户应该知道
       // 「已经报过了」，而不是以为又报了一次、等着第二个处理结果。
       if (isDatabaseBusyError(error)) throw error;
-      if (String((error as Error).message).includes('UNIQUE')) {
+      if (isUniqueConstraintError(error)) {
         throw new ApiError(409, 'ALREADY_REPORTED', '你已经举报过这条内容，我们会在处理时一并看到');
       }
       throw error;
