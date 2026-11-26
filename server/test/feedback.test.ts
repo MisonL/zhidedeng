@@ -110,8 +110,13 @@ describe('站点一句话反馈', () => {
     expect(posted.status).toBe(200);
     const { id } = await posted.json() as { id: string };
     expect((await alice.call('DELETE', `/api/feedback/${id}`)).status).toBe(200);
-    // 删完之后列表里没有了……
-    expect((await (await alice.call('GET', `/api/feedback?stationSlug=${slug}`)).json() as { total: number }).total).toBe(0);
+    // 删完之后列表里没有了……注意要同时断言 items 与 total：
+    // 只断言 total 的话，行查询漏加 deletedAt 过滤（items 里仍有墓碑）也不会被发现。
+    const afterDelete = await (await alice.call('GET', `/api/feedback?stationSlug=${slug}`)).json() as {
+      items: Array<{ id: string }>; total: number;
+    };
+    expect(afterDelete.total).toBe(0);
+    expect(afterDelete.items).toEqual([]);
     // ……但同一天同一站不能再发：额度没有因为删除而恢复。
     const again = await alice.call('POST', '/api/feedback', { stationSlug: slug, verdict: 'works', content: '删除后再发' });
     expect(again.status).toBe(409);
