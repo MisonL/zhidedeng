@@ -23,7 +23,7 @@ const VERDICT_LABEL: Record<FeedbackVerdict, string> = { works: '能用', slow: 
  * 页面上必须写明这是**用户自述**。读者很容易把「挂了」当成平台实测结论，
  * 那正好违反数据诚信那条约束（不编造实测指标）。
  */
-export default function Feedback({ stationSlug }: { stationSlug: string }) {
+export default function Feedback({ stationSlug, demo }: { stationSlug: string; demo: boolean }) {
   const me = useMe();
   const paged = usePaged((page, signal) => api.getFeedback({ stationSlug, page, pageSize: 10 }, signal), [stationSlug]);
   const [verdict, setVerdict] = useState<FeedbackVerdict>('works');
@@ -72,7 +72,9 @@ export default function Feedback({ stationSlug }: { stationSlug: string }) {
       <h2 className="section-title">最近有人试过</h2>
       <p className="hint">用户自述，未经平台核实。下面的「能用/挂了」是一句话反馈，不是实测指标。</p>
 
-      {me.data ? (
+      {/* 演示站不显示表单：服务端对 demo 一律 400，给一个能填却永远提交不上的框
+          比不给更糟——用户会以为是自己写错了。 */}
+      {demo ? <p className="hint">这是虚构演示站点，不需要反馈。</p> : me.data ? (
         <div className="feedback-form">
           <div className="tags">
             {VERDICTS.map(option => (

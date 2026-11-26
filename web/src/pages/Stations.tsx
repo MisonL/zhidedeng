@@ -118,7 +118,7 @@ export function StationDetailPage() {
                 <div><dt>运行状态</dt><dd>{formatStatus(station.status)}</dd></div>
                 <div><dt>综合得分</dt><dd className="num">{station.score ?? NOT_AVAILABLE}</dd></div>
               </dl>
-              <Feedback stationSlug={station.slug} />
+              <Feedback stationSlug={station.slug} demo={station.source === 'demo'} />
               <h2 className="section-title">模型倍率</h2>
               <div className="table-scroll">
                 <table className="data-table data-table-compact">

@@ -3,8 +3,13 @@ import { describe, expect, it } from 'vitest';
 import { callsTo, renderApp, stubApi, apiError } from './helpers';
 import { makePost, page, station } from './fixtures';
 
-/** 站点详情页要的数据：少了 GET /api/stations/:slug 整页都不渲染。 */
-const detail = { ...station, offers: [] };
+/**
+ * 站点详情页要的数据：少了 GET /api/stations/:slug 整页都不渲染。
+ * source 必须是真实来源——fixtures 里的 station 是 demo，而演示站按设计不给表单。
+ */
+const detail = { ...station, offers: [], source: 'user' as const };
+/** 演示站版本，专门给「不给表单」那条用例。 */
+const demoDetail = { ...station, offers: [], source: 'demo' as const };
 
 const item = (id: string, patch = {}) => ({
   id, stationSlug: station.slug, verdict: 'slow' as const, content: `反馈 ${id}`,
@@ -52,6 +57,18 @@ describe('站点一句话反馈', () => {
     fireEvent.click(screen.getByRole('button', { name: '记一句' }));
     expect(await screen.findByText('今天已经给这个站留过一句话了')).toBeInTheDocument();
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+
+  it('演示站不给表单：服务端一定拒绝，别让人填一个永远提交不上的框', async () => {
+    const fetchMock = stubApi({
+      'GET /api/stations/yunzhan': demoDetail,
+      'GET /api/feedback': page([]),
+    });
+    renderApp(`/stations/${station.slug}`);
+    expect(await screen.findByText('这是虚构演示站点，不需要反馈。')).toBeInTheDocument();
+    expect(screen.queryByLabelText('一句话反馈')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '记一句' })).not.toBeInTheDocument();
+    expect(callsTo(fetchMock, 'POST', '/api/feedback')).toHaveLength(0);
   });
 
   it('自己的反馈才有删除入口，删完重新取列表', async () => {
