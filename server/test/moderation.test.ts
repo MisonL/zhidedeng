@@ -979,3 +979,24 @@ describe('举报被驳回后不能反复再报', () => {
     expect((await b.call('POST', '/api/reports', { targetType: 'post', targetId: post.id, reason: '内容不实或夸大' })).status).toBe(200);
   });
 });
+
+describe('评论限流不能被「发完就删」绕过', () => {
+  it('发 5 条全删掉，第 6 条仍然被限流（删评论不退每分钟额度）', async () => {
+    const a = await account('alice');
+    const post = await submit(a, '限流测试帖');
+    await admin(`/api/admin/posts/${post.id}/review`, { status: 'approved' });
+
+    const created: string[] = [];
+    for (let index = 0; index < 5; index++) {
+      const response = await a.call('POST', '/api/comments', { targetType: 'post', targetId: post.id, content: `第 ${index} 条` });
+      expect(response.status).toBe(200);
+      created.push((await response.json() as { id: string }).id);
+    }
+    // 全部删掉（没有子行时是物理删除）。
+    for (const id of created) expect((await a.call('DELETE', `/api/comments/${id}`)).status).toBe(200);
+
+    const sixth = await a.call('POST', '/api/comments', { targetType: 'post', targetId: post.id, content: '第 6 条' });
+    expect(sixth.status).toBe(429);
+    expect(await sixth.json()).toMatchObject({ error: { code: 'RATE_LIMITED' } });
+  });
+});

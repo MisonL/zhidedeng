@@ -210,6 +210,7 @@ channel 是队列的来源渠道，source 是物化内容的展示来源，二�
 - `POST /admin/invite-codes`（note?、maxUses?、expiresAt?）、`GET /admin/invite-codes`、`POST /admin/invite-codes/:id/revoke` —— 邀请码管理，`Authorization: Bearer` 鉴权。明文只在创建响应里返回一次，库里只存 SHA-256 与前缀；`maxUses` 为 null 表示不限次数，同一账号对同一个码只核销一次
 - `PUT /votes`（targetType: post|station、targetId、value: up|down|null）返回最新汇总
 - `PUT /favorites`（targetType、targetId、favorited）
+- 评论限流按独立流水表 `comment_writes` 计数（每分钟 5 条），不数 `comments` 表：作者自删且无子行时评论是物理删除的，数内容表会让「发 5 条→全删→再发」绕过配额
 - `GET /users/:handle` —— 公开作者主页：昵称、头像、简介、已通过文章数、这些文章收到的赞、注册时间。查不到 404（不给空主页，否则拼错的 handle 会变成可枚举的正常页面）；不含邮箱等凭证信息
 - `POST /feedback`（stationSlug、verdict: works|slow|broken、content 1~140 字）、`GET /feedback?stationSlug=`（按时间倒序，SQL 层 `LIMIT/OFFSET` 分页）、`DELETE /feedback/:id` —— 站点页「一句话反馈」。是**用户自述**：响应里带 `verified: false`，页面写明「未经平台核实」，绝不混进 uptime/latency 那类实测字段。演示站不可留；配额：同人同站每天 1 条（409 ALREADY_FEEDBACK）、每账号每小时 5 条、每天 20 条，超限 429 RATE_LIMITED。配额检查与写入在同一个写事务里，且**按含墓碑的行数计**——作者自删留 `deletedAt` 不物理删，否则「提交→删除→再提交」可无限刷。只能删自己发的（他人/不存在一律 404，不区分以免暴露 id 是否存在），重复删幂等
 - `GET /comments?targetType=&targetId=`、`POST /comments`（content 1~2000 字、parentId?）、`DELETE /comments/:id` —— 作者删除自己的评论（他人 404）。没有子行时物理删除；有任何子行（**含被管理员隐藏的回复**，因为外键约束不看 hidden）时留墓碑：正文在库里保留、接口返回空串，列表显示「该评论已删除」，其下的回复不跟着消失。墓碑不计入评论数，也不能被回复

@@ -212,6 +212,21 @@ describe('孤儿举报（目标已不在库里）', () => {
   });
 });
 
+describe('评论限流流水', () => {
+  it('演示账号的写入流水会被清掉，真实账号的不动', () => {
+    const store = demoStore();
+    const demoUser = store.all('user').find(user => user.handle.startsWith('demo-'))!;
+    const insert = store.db.prepare('INSERT INTO comment_writes (userHandle, createdAt) VALUES (?, ?)');
+    insert.run(demoUser.handle, at.toISOString());
+    insert.run('realuser', at.toISOString());
+
+    applyPurge(store, planPurge(store));
+
+    const left = store.db.prepare('SELECT userHandle FROM comment_writes').all() as Array<{ userHandle: string }>;
+    expect(left.map(row => row.userHandle)).toEqual(['realuser']);
+  });
+});
+
 describe('一句话反馈', () => {
   it('演示站下的反馈与演示账号发的反馈一并清掉，真实站上的真实反馈不动', () => {
     const store = demoStore();

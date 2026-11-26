@@ -888,7 +888,9 @@ export class Service {
     }>;
     const items = rows.map(row => ({
       id: row.id, stationSlug: row.stationSlug, author: this.author(row.userHandle),
-      verdict: row.verdict, content: row.content, createdAt: row.createdAt, mine: row.userHandle === this.user,
+      // 用 this.handle 而不是 this.user：后者在未登录时抛 401，而读反馈不需要登录。
+      // 游客读一个非空的反馈列表会直接 401——这是 Codex 复现出来的。
+      verdict: row.verdict, content: row.content, createdAt: row.createdAt, mine: row.userHandle === this.handle,
       verified: false as const,
     })) satisfies Feedback[];
     return { items, total, page, pageSize };
@@ -994,13 +996,24 @@ export class Service {
   createComment(input: CreateCommentRequest): Comment | CommentReply {
     this.requireTarget(input);
     const since = new Date(this.now().getTime() - 60_000).toISOString();
-    const recent = Number(this.store.db.prepare('SELECT count(*) AS count FROM comments WHERE userHandle=? AND createdAt > ?').get(this.user, since)!.count);
+    // 配额要数**含墓碑**的行。deleteComment 对「没有子行、没被隐藏、没被举报」的
+    // 评论是物理删除，删完这一行就没了：发 5 条 → 全删 → 再发 5 条，一轮一个来回，
+    // 每分钟的实际写入没有上限（实测连发 6 轮全部 200）。
+    // 这里改成数「这条评论当前是否存在」以外的东西做不到（行没了就是没了），
+    // 所以把限流记录挪到独立的计数表，与评论行是否被删无关。
+    const recent = Number(this.store.db.prepare(
+      'SELECT count(*) AS count FROM comment_writes WHERE userHandle = ? AND createdAt > ?',
+    ).get(this.user, since)!.count);
     if (recent >= COMMENTS_PER_MINUTE) throw new ApiError(429, 'RATE_LIMITED', '评论太频繁了，请稍后再试');
     if (input.parentId) {
       const parent = this.store.db.prepare('SELECT targetType,targetId,parentId FROM comments WHERE id=? AND hidden = 0 AND deletedAt IS NULL').get(input.parentId);
       if (!parent || parent.parentId !== null || parent.targetType !== input.targetType || parent.targetId !== input.targetId) throw new ApiError(400, 'INVALID_INPUT', '回复必须属于同一对象的顶层评论');
     }
-    const row: CommentRow = { ...input, id: crypto.randomUUID(), userHandle: this.user, parentId: input.parentId ?? null, createdAt: this.now().toISOString() };
+    const createdAt = this.now().toISOString();
+    // 先记一笔写入流水，再插评论：流水与内容生命周期无关，删评论不会退额度。
+    // 流水只在限流窗口内有意义，清理交给下面的 prune（同一个事务里顺带做）。
+    this.store.db.prepare('INSERT INTO comment_writes (userHandle, createdAt) VALUES (?, ?)').run(this.user, createdAt);
+    const row: CommentRow = { ...input, id: crypto.randomUUID(), userHandle: this.user, parentId: input.parentId ?? null, createdAt };
     this.store.db.prepare('INSERT INTO comments (id,userHandle,targetType,targetId,content,parentId,createdAt) VALUES (?,?,?,?,?,?,?)')
       .run(row.id, row.userHandle, row.targetType, row.targetId, row.content, row.parentId, row.createdAt);
     return row.parentId === null ? { ...this.comment(row), parentId: null, replies: [] } : { ...this.comment(row), parentId: row.parentId };

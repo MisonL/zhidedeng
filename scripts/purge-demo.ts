@@ -194,7 +194,9 @@ export function applyPurge(store: ReturnType<typeof openStore>, plan: PurgePlan)
       }
     }
     if (plan.users.length > 0) {
-      for (const table of ['votes', 'favorites', 'checkins']) {
+      // comment_writes 是限流流水，演示账号被删后这些行永远是孤儿：留着只会
+      // 让「demo- 前缀被新人复用」时白占额度（前缀可复用，见 planPurge 的注释）。
+      for (const table of ['votes', 'favorites', 'checkins', 'comment_writes']) {
         store.db.prepare(`DELETE FROM ${table} WHERE userHandle IN (${inList(plan.users)})`).run(...plan.users);
       }
     }

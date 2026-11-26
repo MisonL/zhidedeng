@@ -42,6 +42,21 @@ describe('作者主页', () => {
     expect(await screen.findByText('没有这个作者')).toBeInTheDocument();
   });
 
+  it('导入/匿名来源的作者不出链接，避免点进去 404', async () => {
+    stubApi({
+      'GET /api/posts': page([
+        makePost('p1', { title: '飞书同步的', stationSlug: null, author: { handle: 'feishu-submission', nickname: '群友', avatar: '' } }),
+        makePost('p2', { title: '匿名投稿的', stationSlug: null, author: { handle: 'anonymous-submission', nickname: '匿名', avatar: '' } }),
+        makePost('p3', { title: '已注销的', stationSlug: null, author: { handle: 'gone', nickname: '已注销用户·gone', avatar: '' } }),
+      ]),
+    });
+    renderApp('/community');
+    expect(await screen.findByText('群友')).toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: '群友' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: '匿名' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: '已注销用户·gone' })).not.toBeInTheDocument();
+  });
+
   it('文章卡片的作者名指向作者主页', async () => {
     // stationSlug 为 null 时卡片才显示作者名（有站点时显示的是站点）。
     stubApi({

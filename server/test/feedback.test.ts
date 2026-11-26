@@ -161,3 +161,27 @@ describe('站点一句话反馈', () => {
     expect(await demo.json()).toMatchObject({ error: { message: '演示站点不需要反馈' } });
   });
 });
+
+describe('游客能读，不能写', () => {
+  it('未登录也能看到别人留下的一句话反馈（列表不是私有数据）', async () => {
+    const slug = await withStation();
+    const alice = await account('alice');
+    expect((await alice.call('POST', '/api/feedback', { stationSlug: slug, verdict: 'works', content: '能用' })).status).toBe(200);
+
+    // 完全不带 cookie。
+    const anonymous = await server.app.request(`/api/feedback?stationSlug=${slug}`);
+    expect(anonymous.status).toBe(200);
+    const listed = await anonymous.json() as { items: Array<{ content: string; mine: boolean }>; total: number };
+    expect(listed.total).toBe(1);
+    expect(listed.items[0]).toMatchObject({ content: '能用', mine: false });
+  });
+
+  it('未登录不能发、不能删', async () => {
+    const slug = await withStation();
+    expect((await server.app.request('/api/feedback', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ stationSlug: slug, verdict: 'works', content: 'x' }),
+    })).status).toBe(401);
+    expect((await server.app.request('/api/feedback/whatever', { method: 'DELETE' })).status).toBe(401);
+  });
+});

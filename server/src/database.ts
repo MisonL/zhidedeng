@@ -69,6 +69,15 @@ export const SCHEMA = `
   );
   -- 同一个人对同一个对象只能有一条未处理举报。用部分唯一索引而不是先查后插：
   -- 并发下「都查到没有」然后各插一条，靠应用层查重挡不住。
+  -- 评论写入流水：只用于限流计数。
+  -- 为什么不直接数 comments 表：作者自删且无子行时评论是物理删除的，
+  -- 「发 5 条 → 全删 → 再发」就能无限绕过每分钟配额。行没了计数也就没了，
+  -- 所以要有一份与内容生命周期无关的流水。
+  CREATE TABLE IF NOT EXISTS comment_writes (
+    userHandle TEXT NOT NULL,
+    createdAt TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS comment_writes_user ON comment_writes(userHandle, createdAt);
   -- 站点页「一句话反馈」：三个选项 + 一句话。存的是**用户断言**，不是平台实测，
   -- 所以单独一张表，绝不混进 stations.uptime / firstTokenLatencyMs 那些字段。
   CREATE TABLE IF NOT EXISTS feedback (
