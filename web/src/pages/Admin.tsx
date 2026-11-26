@@ -325,6 +325,39 @@ export default function Admin() {
     }
   }
 
+  /**
+   * 处置一条举报。
+   *
+   * 不复用 `act()`：它结尾会 `load(tab)` 从头重取，管理员翻到第 3 页处置一条
+   * 就被弹回第 1 页（实测过）。举报处置只会让这一条从 open 队列里消失，
+   * 就地移除并同步总数即可，位置不动。
+   */
+  async function resolveReport(id: string, status: 'resolved' | 'dismissed') {
+    setBusy(true);
+    setError(undefined);
+    setMessage(undefined);
+    const generation = sessionRef.current;
+    try {
+      await admin.resolveReport(id, status, reportNotes[id]?.trim() || undefined);
+      if (sessionRef.current !== generation) return;
+      setMessage(status === 'resolved' ? '已标记处理' : '已驳回举报');
+      setReports((current) => current?.filter(report => report.id !== id));
+      setReportTotal((total) => Math.max(0, total - 1));
+      setOpenReportId(undefined);
+      setReportNotes((current) => { const { [id]: _drop, ...rest } = current; return rest; });
+    } catch (caught) {
+      if (sessionRef.current !== generation) return;
+      if (caught instanceof AdminError && (caught.code === 'NO_TOKEN' || caught.unauthorized)) {
+        reset();
+        setError(caught.code === 'NO_TOKEN' ? '请填写管理密钥' : '管理密钥无效，请重新输入');
+        return;
+      }
+      setError((caught as Error).message);
+    } finally {
+      if (sessionRef.current === generation) setBusy(false);
+    }
+  }
+
   async function act(run: () => Promise<unknown>, done: string): Promise<boolean> {
     setBusy(true);
     setError(undefined);
@@ -765,10 +798,7 @@ export default function Admin() {
                         <button
                           className="btn btn-small btn-red" disabled={busy}
                           onClick={() => {
-                            void act(
-                              () => admin.resolveReport(report.id, 'resolved', reportNotes[report.id]?.trim() || undefined),
-                              '已标记处理',
-                            ).then((ok) => { if (ok) { setOpenReportId(undefined); } });
+                            void resolveReport(report.id, 'resolved');
                           }}
                         >
                           已处理
@@ -776,10 +806,7 @@ export default function Admin() {
                         <button
                           className="btn btn-small btn-ghost" disabled={busy}
                           onClick={() => {
-                            void act(
-                              () => admin.resolveReport(report.id, 'dismissed', reportNotes[report.id]?.trim() || undefined),
-                              '已驳回举报',
-                            ).then((ok) => { if (ok) { setOpenReportId(undefined); } });
+                            void resolveReport(report.id, 'dismissed');
                           }}
                         >
                           不成立

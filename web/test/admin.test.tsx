@@ -1,4 +1,4 @@
-import { fireEvent, screen, within } from '@testing-library/react';
+import { fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { admin, adminToken } from '../src/admin';
 import { apiError, callsTo, renderApp, stubApi } from './helpers';
@@ -629,5 +629,42 @@ describe('翻页途中密钥失效', () => {
     expect(screen.getByText('管理密钥无效，请重新输入')).toBeInTheDocument();
     // 旧列表不能还留在屏幕上。
     expect(screen.queryByText('理由 a')).not.toBeInTheDocument();
+  });
+});
+
+describe('举报处置不跳页', () => {
+  it('翻到第 2 页处置一条后，前一条还在，也不会重取第一页', async () => {
+    const report = (id: string) => ({
+      id, targetType: 'comment' as const, targetId: `c-${id}`, reporterHandle: 'demo-pedal',
+      reason: `理由 ${id}`, detail: null, status: 'open' as const,
+      createdAt: '2026-11-20T00:00:00.000Z', handledAt: null, targetAlive: true, targetLabel: `评论 ${id}`,
+    });
+    const fetchMock = stubApi({
+      'GET /api/admin/reports': ({ url }: { url: URL }) => (
+        url.searchParams.get('cursor') === null
+          ? { items: [report('a')], total: 2, pageSize: 20, nextCursor: 'cur-1' }
+          : { items: [report('b')], total: 2, pageSize: 20, nextCursor: null }
+      ),
+      'POST /api/admin/reports/b/resolve': { id: 'b', status: 'resolved' },
+    });
+    await unlock();
+    fireEvent.click(await screen.findByRole('tab', { name: /举报/ }));
+    await screen.findByText('理由 a');
+    fireEvent.click(screen.getByRole('button', { name: /加载更多/ }));
+    await screen.findByText('理由 b');
+
+    const listCalls = () => callsTo(fetchMock, 'GET', '/api/admin/reports').length;
+    const before = listCalls();
+    // 处置第 2 页那条：先展开它自己的「处理…」，再点它下面的「不成立」。
+    fireEvent.click(screen.getAllByRole('button', { name: '处理…' })[1]);
+    const notes = await screen.findAllByLabelText('处理备注（可选）');
+    expect(notes).toHaveLength(1);
+    fireEvent.click(screen.getByRole('button', { name: '不成立' }));
+
+    await waitFor(() => expect(callsTo(fetchMock, 'POST', '/api/admin/reports/b/resolve')).toHaveLength(1));
+    await waitFor(() => expect(screen.queryByText('理由 b')).not.toBeInTheDocument());
+    // 第 1 页那条还在，而且没有重新拉列表（重新拉会把位置弹回第一页）。
+    expect(screen.getByText('理由 a')).toBeInTheDocument();
+    expect(listCalls()).toBe(before);
   });
 });
