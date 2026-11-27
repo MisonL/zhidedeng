@@ -319,7 +319,7 @@ export type GetMySubmissionsResponse = PaginatedResponse<MySubmission>;
  */
 export interface NotificationItem {
   /**
-   * 稳定 id，由来源表的主键派生（`submission:<id>` / `report:<id>` / `post:<id>:<at>`）。
+   * 稳定 id，由来源表的主键派生（`submission:<id>` / `report:<id>` / `post:<流水主键>`）。
    * 前端只拿它当 React key，不做业务判断。
    */
   id: string;

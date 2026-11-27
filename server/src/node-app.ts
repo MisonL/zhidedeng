@@ -116,7 +116,7 @@ function resolveSiteMode(explicit?: SiteMode): SiteMode {
   return process.env.NODE_ENV === 'production' ? 'production' : 'demo';
 }
 
-export function createApp(options: { dbPath?: string; now?: () => Date; syncToken?: string; inviteCodes?: readonly string[]; webRoot?: string; trustedProxies?: string; secureCookie?: boolean; siteMode?: SiteMode } = {}) {
+export function createApp(options: { dbPath?: string; now?: () => Date; syncToken?: string; inviteCodes?: readonly string[]; webRoot?: string; publicOrigin?: string; trustedProxies?: string; secureCookie?: boolean; siteMode?: SiteMode } = {}) {
   const production = process.env.NODE_ENV === 'production';
   if (production && !options.dbPath && !process.env.DB_PATH) throw new Error('生产环境必须设置 DB_PATH');
   const db = openDatabase(options.dbPath ?? process.env.DB_PATH ?? defaultDbPath);
@@ -136,6 +136,6 @@ export function createApp(options: { dbPath?: string; now?: () => Date; syncToke
   // 显式传入的选项优先（测试用），否则按生产 + TLS_ENABLED 决定。
   const cookieSecure = options.secureCookie ?? (production && process.env.TLS_ENABLED === '1');
   const app = buildApp(store, now, { secureCookie: cookieSecure, syncToken: usable, inviteCodes, trustedProxies, webRoot: options.webRoot, siteMode });
-  if (options.webRoot) mountWeb(app, options.webRoot);
+  if (options.webRoot) mountWeb(app, options.webRoot, store, options.publicOrigin);
   return { app, db, store, siteMode };
 }

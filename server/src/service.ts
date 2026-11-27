@@ -15,6 +15,7 @@ import type { PostRecord, StationRecord } from './database.ts';
 // 只借一个纯函数算 hostname，避免和 submissions.ts 之间形成运行时循环依赖：
 // submissions.ts 不 import service.ts，这个方向是单向的。
 import { findStation, hostnameOf, materializedPostId } from './submissions.ts';
+import { recordPostEvent } from './moderation.ts';
 
 const dayMs = 86400000;
 const shanghaiDate = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit' });
@@ -663,7 +664,9 @@ export class Service {
    *
    * 全部来自已有表，不新增写入路径——除了 post_events（恢复会清掉
    * entities.removedAt，历史没地方存，只能单独记流水）。
-   * 演示账号（demo- 前缀）不产生通知：它们是虚构数据，没人会登录去看。
+   * 演示账号（demo- 前缀）拿不到通知，但靠的是**用户名不允许连字符**
+   * （见 auth.ts 的 USERNAME）：没人能注册成 demo-xxx。另外 'unknown'
+   * 这类哨兵作者在查询里显式排除，见下面 post_events 那段。
    */
   getMyNotifications(query: PaginationQuery) {
     const items: NotificationItem[] = [];
@@ -721,9 +724,13 @@ export class Service {
     }
 
     // 3) 我的文章下架 / 恢复。
+    // 排除哨兵：飞书/导入文章在既无 actorHandle 也无 authorHandle 时落 'unknown-feishu'，
+    // 老数据里还留着 'unknown'。后者**符合注册规则**，谁注册到这个用户名就能读到
+    // 别人文章被下架的标题——所以这两类一律不派发通知。
     const events = this.store.db.prepare(
       `SELECT id, postId, action, reason, title, at FROM post_events
-       WHERE authorHandle = ? ORDER BY at DESC`,
+       WHERE authorHandle = ? AND authorHandle NOT IN ('unknown','unknown-feishu')
+       ORDER BY at DESC, id DESC`,
     ).all(this.user) as Array<{
       id: number; postId: string; action: 'removed' | 'restored'; reason: string | null; title: string | null; at: string;
     }>;
@@ -748,7 +755,9 @@ export class Service {
     }
 
     // 新的在前；同一时刻按 id 兜底，保证全序稳定（翻页不重复不丢）。
-    items.sort((a, b) => (a.at === b.at ? a.id.localeCompare(b.id) : a.at < b.at ? 1 : -1));
+    // 降序是有意的：同一毫秒内「下架 → 恢复」，后发生的那条流水主键更大，
+    // 必须排在前面，否则同毫秒事件会被渲染成「先恢复、后下架」。
+    items.sort((a, b) => (a.at === b.at ? b.id.localeCompare(a.id) : a.at < b.at ? 1 : -1));
     return paginate(items, query);
   }
 
@@ -758,16 +767,20 @@ export class Service {
     return `/posts/${slug}`;
   }
 
-  private reportHref(targetType: 'post' | 'station' | 'comment', targetId: string): string | null {
+  private reportHref(targetType: 'post' | 'station' | 'comment', targetId: string, depth = 0): string | null {
     // 只给「现在还能打开」的链接。被举报的内容很可能已经因为这条举报被下架了，
     // 此时回链接就是回一个 404。
     // 文章要是 approved 才可读：被驳回/待审的文章，详情页对外是 404。
     const post = this.store.get('post', targetId);
     if (targetType === 'post') return post && post.status === 'approved' ? `/posts/${targetId}` : null;
     if (targetType === 'station') return this.store.get('station', targetId) ? `/stations/${targetId}` : null;
-    // 评论没有独立页面，跳回它所属的文章/站点才是可用的链接；这里拿不到父目标，
-    // 宁可不给链接，也不给一个点进去 404 的链接。
-    return null;
+    // 评论没有独立页面，跳回它所属的文章/站点。父目标可能自己也不在了，
+    // 所以递归走同一套在线判定；深度限制是防脏数据里的环。
+    if (depth > 2) return null;
+    const row = this.store.db.prepare('SELECT targetType, targetId FROM comments WHERE id = ?').get(targetId) as
+      { targetType: 'post' | 'station'; targetId: string } | undefined;
+    if (!row) return null;
+    return this.reportHref(row.targetType, row.targetId, depth + 1);
   }
 
   /** 投稿通过后的落地链接，同样要求目标此刻在线。 */
@@ -1286,9 +1299,8 @@ export class Service {
       if (!this.store.markRemoved('post', id, at)) {
         throw new ApiError(409, 'ALREADY_REMOVED', '这篇文章已经撤下了');
       }
-      // 作者自己撤下也记流水：通知里要能区分「你撤下的」和「管理员下架的」。
-      this.store.db.prepare('INSERT INTO post_events (postId, authorHandle, action, reason, title, at) VALUES (?,?,?,?,?,?)')
-        .run(id, post.authorHandle, 'removed', null, post.title, at);
+      // 作者自己撤下也记流水，否则「我的文章被下架」的通知在自撤时缺失。
+      recordPostEvent(this.store, id, post.authorHandle, 'removed', at, null, post.title);
     });
     return { id, removed: true as const };
   }

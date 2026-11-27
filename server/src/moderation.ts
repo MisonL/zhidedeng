@@ -113,7 +113,7 @@ export function restorePost(store: Store, id: string, now = () => new Date()): {
  * 演示数据也会产生流水，但它们的作者是 demo- 前缀的虚构账号，读通知的人
  * 不会是它们；真实账号不会去关注演示文章。
  */
-function recordPostEvent(
+export function recordPostEvent(
   store: Store, postId: string, authorHandle: string, action: 'removed' | 'restored',
   at: string, reason: string | null, title: string | null,
 ) {

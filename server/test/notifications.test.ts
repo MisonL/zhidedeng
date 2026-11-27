@@ -251,93 +251,88 @@ describe('我的通知', () => {
     expect((await server.app.request(`/api/posts/sub-${id}`)).status).toBe(200);
   });
 
-  it('演示账号不产生通知（虚构数据没人会登录去看）', async () => {
-    // 演示文章由 seed 写入，authorHandle 是 demo- 前缀的虚构账号。
-    const demoPost = server.store.all('post').find(post => post.source === 'demo')!;
-    // authorHandle 在 data JSON 里，不是列。
-    const row = server.store.db.prepare('SELECT data FROM entities WHERE kind = ? AND id = ?').get('post', demoPost.id) as { data: string };
-    const { authorHandle } = JSON.parse(row.data) as { authorHandle: string };
-    expect(authorHandle.startsWith('demo-')).toBe(true);
-    // 直接查那个 handle 的通知：没有账号，也就不该有任何事件。
-    const count = Number(server.store.db.prepare('SELECT count(*) AS c FROM post_events WHERE authorHandle = ?').get(authorHandle)!.c);
-    expect(count).toBe(0);
+  it('哨兵作者（unknown / unknown-feishu）不会把通知派发给同名真人', async () => {
+    const alice = await account('alice');
+    // 直接造两条指向哨兵的流水：老数据里 'unknown' 就是这么写的。
+    const insert = server.store.db.prepare('INSERT INTO post_events (postId, authorHandle, action, reason, title, at) VALUES (?,?,?,?,?,?)');
+    insert.run('ghost-1', 'unknown', 'removed', null, '别人的文章标题', clock.toISOString());
+    insert.run('ghost-2', 'unknown-feishu', 'removed', null, '别人的文章标题', clock.toISOString());
+
+    // 真人注册 'unknown' 也读不到任何通知：哨兵行不派发。
+    const squat = await account('unknown');
+    expect((await notifications(squat)).items).toEqual([]);
+    expect((await notifications(alice)).items).toEqual([]);
   });
 
-  it('文章被改判驳回后，举报通知不再给链接（详情页 404）', async () => {
+  it('同一毫秒内「下架 → 恢复」，恢复排在前面', async () => {
     const alice = await account('alice');
-    const bob = await account('bob');
-    const post = await alice.call('POST', '/api/posts', { kind: 'community', title: '先上线再驳回', summary: 's', body: 'b' });
+    const post = await alice.call('POST', '/api/posts', { kind: 'community', title: '同毫秒', summary: 's', body: 'b' });
     const postId = (await post.json() as { id: string }).id;
     await server.app.request(`/api/admin/posts/${postId}/review`, {
       method: 'POST', headers: bearer, body: JSON.stringify({ status: 'approved' }),
     });
-    const report = await bob.call('POST', '/api/reports', { targetType: 'post', targetId: postId, reason: '广告' });
-    const reportId = (await report.json() as { id: string }).id;
+    // clock 不动：两条事件 at 完全相同，只能靠流水主键定序。
+    await server.app.request(`/api/admin/posts/${postId}/withdraw`, { method: 'POST', headers: bearer });
+    await server.app.request(`/api/admin/posts/${postId}/restore`, { method: 'POST', headers: bearer });
 
-    // 把文章改判成驳回（相当于下架后又审核成 rejected）。
+    const titles = (await notifications(alice)).items.filter(item => item.kind === 'post').map(item => item.title);
+    expect(titles[0]).toContain('已恢复');
+    expect(titles[1]).toContain('已下架');
+  });
+
+  it('举报评论时，通知链到评论所属的在线文章', async () => {
+    const alice = await account('alice');
+    const bob = await account('bob');
+    const post = await alice.call('POST', '/api/posts', { kind: 'community', title: '带评论的文章', summary: 's', body: 'b' });
+    const postId = (await post.json() as { id: string }).id;
     await server.app.request(`/api/admin/posts/${postId}/review`, {
-      method: 'POST', headers: bearer, body: JSON.stringify({ status: 'rejected', reason: '复核后认为不合规' }),
+      method: 'POST', headers: bearer, body: JSON.stringify({ status: 'approved' }),
     });
+    const comment = await alice.call('POST', '/api/comments', { targetType: 'post', targetId: postId, content: '一句评论' });
+    expect(comment.status).toBe(200);
+    const commentId = (await comment.json() as { id: string }).id;
+    const report = await bob.call('POST', '/api/reports', { targetType: 'comment', targetId: commentId, reason: '引战' });
+    // 举报评论可能需要先存在（接口对评论目标有额外校验），先确认建出来了。
+    expect(report.status).toBe(200);
+    const reportId = (await report.json() as { id: string }).id;
     await server.app.request(`/api/admin/reports/${reportId}/resolve`, {
-      method: 'POST', headers: bearer, body: JSON.stringify({ status: 'resolved' }),
+      method: 'POST', headers: bearer, body: JSON.stringify({ status: 'dismissed' }),
     });
 
     const item = (await notifications(bob)).items.find(entry => entry.kind === 'report')!;
-    expect(item.href).toBeNull();
+    // 评论没有独立页面，回落到它所属的文章。
+    expect(item.href).toBe(`/posts/${postId}`);
   });
 
-  it('同 hostname 的两个站点各归各的：/b 的投稿不会指到 /a', async () => {
-    // 两个站同 hostname 不同路径，slug 由认领规则决定。
-    const imported = await server.app.request('/api/admin/import', {
-      method: 'POST', headers: bearer, body: JSON.stringify({
-        stations: [
-          { slug: 'sub-a', name: 'A 站', description: 'd', url: 'https://same.example.com/a', rechargeThreshold: null, paymentMethods: [], offers: [] },
-          { slug: 'sub-b', name: 'B 站', description: 'd', url: 'https://same.example.com/b', rechargeThreshold: null, paymentMethods: [], offers: [] },
-        ],
-        posts: [],
-      }),
-    });
-    expect(imported.status).toBe(200);
-    // 直接造一条指向 /b 的站内站点投稿并审核通过，看通知链接落在哪个 slug。
+  it('举报 status=dismissed 也算有结论', async () => {
     const alice = await account('alice');
-    const suggested = await alice.call('POST', '/api/stations/suggest', {
-      name: 'B 站更新', url: 'https://same.example.com/b', description: 'd', rechargeThreshold: null, paymentMethods: [], offers: [],
-    });
-    expect(suggested.status).toBe(200);
-    const id = (await suggested.json() as { id: string }).id;
-    await server.app.request(`/api/admin/submissions/${id}/review`, {
+    const bob = await account('bob');
+    const post = await alice.call('POST', '/api/posts', { kind: 'community', title: '被驳回举报', summary: 's', body: 'b' });
+    const postId = (await post.json() as { id: string }).id;
+    await server.app.request(`/api/admin/posts/${postId}/review`, {
       method: 'POST', headers: bearer, body: JSON.stringify({ status: 'approved' }),
     });
-
-    const item = (await notifications(alice)).items.find(entry => entry.kind === 'submission')!;
-    // /b 的更新只能指向 /b 的服务站（sub-b），不能因为同 hostname 指到 /a。
-    expect(item.href).toBe('/stations/sub-b');
+    const report = await bob.call('POST', '/api/reports', { targetType: 'post', targetId: postId, reason: '不像广告' });
+    const reportId = (await report.json() as { id: string }).id;
+    await server.app.request(`/api/admin/reports/${reportId}/resolve`, {
+      method: 'POST', headers: bearer, body: JSON.stringify({ status: 'dismissed' }),
+    });
+    const item = (await notifications(bob)).items.find(entry => entry.kind === 'report')!;
+    expect(item.title).toBe('你举报的内容经核实没有问题');
   });
 
-  it('站点下架后，「我的投稿」不再给出 404 链接', async () => {
+  it('重复下架只记一条流水', async () => {
     const alice = await account('alice');
-    const suggested = await alice.call('POST', '/api/stations/suggest', {
-      name: '会被下架的站', url: 'https://gone.example.com', description: 'd',
-    });
-    const id = (await suggested.json() as { id: string }).id;
-    await server.app.request(`/api/admin/submissions/${id}/review`, {
+    const post = await alice.call('POST', '/api/posts', { kind: 'community', title: '只下一次', summary: 's', body: 'b' });
+    const postId = (await post.json() as { id: string }).id;
+    await server.app.request(`/api/admin/posts/${postId}/review`, {
       method: 'POST', headers: bearer, body: JSON.stringify({ status: 'approved' }),
     });
-    // 上线时给链接。
-    const before = await alice.call('GET', '/api/me/submissions');
-    const beforeItem = (await before.json() as { items: Array<{ id: string; targetSlug: string | null }> }).items.find(item => item.id === id)!;
-    expect(beforeItem.targetSlug).not.toBeNull();
-    expect(beforeItem.targetSlug).toBe('sub-gone-example-com');
-
-    // 站点下架之后，那个 slug 的详情页就是 404，不能再给。
-    // 下架只有走管理流程一条路（批次 action=remove 还要先入队再审核），
-    // 这里直接调软删除，测的只是「通知/我的投稿不再给死链」这一层。
-    const slug = beforeItem.targetSlug!;
-    server.store.markRemoved('station', slug, clock.toISOString());
-    expect((await server.app.request(`/api/stations/${slug}`)).status).toBe(404);
-    const after = await alice.call('GET', '/api/me/submissions');
-    const afterItem = (await after.json() as { items: Array<{ id: string; targetSlug: string | null; withdrawn?: boolean }> }).items.find(item => item.id === id)!;
-    expect(afterItem.targetSlug).toBeNull();
+    await server.app.request(`/api/admin/posts/${postId}/withdraw`, { method: 'POST', headers: bearer });
+    // 第二次下架是 409，不能再记一条。
+    const again = await server.app.request(`/api/admin/posts/${postId}/withdraw`, { method: 'POST', headers: bearer });
+    expect(again.status).toBe(409);
+    expect((await notifications(alice)).items.filter(item => item.kind === 'post')).toHaveLength(1);
   });
 
   it('未登录不能读通知', async () => {

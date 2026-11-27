@@ -20,6 +20,7 @@ const NO_PROFILE_HANDLES = new Set([
   'feishu-submission', 'anonymous-submission', 'agent-submission',
   // submissions.ts 在既无 actorHandle 也无 authorHandle 时写 'unknown'。
   'unknown',
+  'unknown-feishu',
 ]);
 
 export default function AuthorName({ author }: { author: Author }) {

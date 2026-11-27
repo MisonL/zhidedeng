@@ -818,7 +818,10 @@ function materialize(store: Store, submission: SubmissionRecord, reviewedAt: str
     }
     store.put('post', submission.id, {
       id: submission.id, kind: payload.kind, title: payload.title, summary: payload.summary, body: payload.body,
-      authorHandle: submission.actorHandle ?? 'unknown', stationSlug: payload.stationSlug ?? null, modelSlug: payload.modelSlug ?? null,
+      // 没有 actorHandle 的（飞书/导入）落一个**不可注册**的哨兵：USERNAME 只允许
+      // 字母数字下划线，带连字符的名字永远不会被真人占用。曾用 'unknown'，
+      // 而它正好符合注册规则——谁注册到这个名字，就能收到别人文章的上下架通知。
+      authorHandle: submission.actorHandle ?? 'unknown-feishu', stationSlug: payload.stationSlug ?? null, modelSlug: payload.modelSlug ?? null,
       cover: null, publishedAt: reviewedAt, status: 'approved', source: 'user',
     });
   } else {

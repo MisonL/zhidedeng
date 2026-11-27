@@ -13,7 +13,7 @@ beforeAll(() => {
   webRoot = join(root, 'web');
   mkdirSync(join(webRoot, 'assets'), { recursive: true });
   mkdirSync(join(webRoot, 'banners'));
-  writeFileSync(join(webRoot, 'index.html'), '<!doctype html><title>SPA</title>');
+  writeFileSync(join(webRoot, 'index.html'), '<!doctype html><html><head><title>SPA</title><meta name="description" content="旧描述" /></head><body><div id="root"></div></body></html>');
   writeFileSync(join(webRoot, 'assets', 'app-abc.js'), 'console.log(1)');
   writeFileSync(join(webRoot, 'banners', 'a.webp'), 'webp');
   writeFileSync(join(root, 'secret.txt'), 'top secret');
@@ -28,7 +28,10 @@ describe('托管前端', () => {
   it.each(['/', '/stations/whale-demo', '/login?next=%2Fme', '/posts/post-1'])('%s 回退到 index.html，不缓存', async path => {
     const response = await server.app.request(path);
     expect(response.status).toBe(200);
-    expect(await response.text()).toContain('<title>SPA</title>');
+    const html = await response.text();
+    // 壳子还在（SPA 要挂载），但 head 已被按路径改写。
+    expect(html).toContain('<div id="root"></div>');
+    expect(html).not.toContain('<title>SPA</title>');
     expect(response.headers.get('content-type')).toContain('text/html');
     expect(response.headers.get('cache-control')).toBe('no-cache');
   });

@@ -221,3 +221,4 @@ channel 是队列的来源渠道，source 是物化内容的展示来源，二�
 - `GET /search?q=`（models、stations、posts 三组，各最多 10 条）
 - `GET /hot-searches`
 - `POST /agent/stations`、`POST /agent/posts`、`POST /agent/models`、`GET /agent/status?limit=1..50` —— Agent 提交通道，`Authorization: Bearer zd_...` 鉴权。请求体是扁平 JSON 对象，不接受多余字段；实测指标字段（uptime、firstTokenLatencyMs、foundedAt、status、score、lowestRate）和凭证类字段一律 400 FORBIDDEN_FIELD，`authorHandle` 同样拒绝。提交强制进入待审队列，即使管理员开启自动通过也不例外；同一账号相同 pending 内容重提返回 deduplicated。速率配额：单凭证 10 条/小时、单账号 20 条/小时、单 IP 20 条/小时，超限 429 RATE_LIMITED 并带等待秒数；待审配额：单账号 5 条、单 hostname 2 条、全站 200 条，超限 409 TOO_MANY_PENDING 且不带 retryAfter。凭证无效、被吊销或账号被禁用返回 401 UNAUTHENTICATED
+- 服务端 SEO（`server/src/seo.ts` + `server/src/static.ts`）：详情页回退到 SPA 时改写 index.html 的 head（title / description / canonical / OG），并新增 `/sitemap.xml`、`/rss.xml`、`/robots.txt`。**只有真实内容进索引**：演示站与演示文章带 `noindex`（页面给人看，但不该在搜索结果里被当成真实评测），站内用户写的已发布文章可索引，投稿与 Agent 采集的内容带 `noindex`。域名未定，绝对 URL 的 origin 优先取 `PUBLIC_ORIGIN`，未配置时退回请求自身的 origin
