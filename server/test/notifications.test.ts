@@ -160,6 +160,94 @@ describe('我的通知', () => {
     expect(new Set([...first, ...second]).size).toBe(4);
   });
 
+  it('被替代（superseded）的投稿不算「未通过」', async () => {
+    const alice = await account('alice');
+    const submitted = await alice.call('POST', '/api/posts', { kind: 'community', title: '同一篇', summary: 's', body: 'b' });
+    const id = (await submitted.json() as { id: string }).id;
+
+    // 直接把它标成 superseded：走真实替代流程需要「同 originKey 两个版本」，
+    // 而完全相同的提交会被幂等去重成同一条，构造不出来。这里测的是通知的过滤条件。
+    server.store.db.prepare("UPDATE submissions SET status = 'superseded', reviewedAt = ?, reason = '被新版本替代' WHERE id = ?")
+      .run(clock.toISOString(), id);
+
+    expect((await notifications(alice)).items).toEqual([]);
+  });
+
+  it('通知里的链接只在目标此刻能打开时才给', async () => {
+    const alice = await account('alice');
+    const post = await alice.call('POST', '/api/posts', { kind: 'community', title: '会下架的', summary: 's', body: 'b' });
+    const postId = (await post.json() as { id: string }).id;
+    await server.app.request(`/api/admin/posts/${postId}/review`, {
+      method: 'POST', headers: bearer, body: JSON.stringify({ status: 'approved' }),
+    });
+    // 通过时有链接。
+    let items = (await notifications(alice)).items;
+    expect(items.find(item => item.kind === 'submission')!.href).toBe(`/posts/${postId}`);
+
+    // 下架之后，「已通过」那条投稿通知不该再指着一个 404。
+    await server.app.request(`/api/admin/posts/${postId}/withdraw`, { method: 'POST', headers: bearer });
+    items = (await notifications(alice)).items;
+    expect(items.find(item => item.kind === 'submission')!.href).toBeNull();
+  });
+
+  it('文章改标题后，历史通知仍显示当时的标题（标题快照）', async () => {
+    const alice = await account('alice');
+    const post = await alice.call('POST', '/api/posts', { kind: 'community', title: '改名前', summary: 's', body: 'b' });
+    const postId = (await post.json() as { id: string }).id;
+    await server.app.request(`/api/admin/posts/${postId}/review`, {
+      method: 'POST', headers: bearer, body: JSON.stringify({ status: 'approved' }),
+    });
+    await server.app.request(`/api/admin/posts/${postId}/withdraw`, { method: 'POST', headers: bearer });
+
+    // 模拟文章随后被改名（导入/审核改稿）。
+    const data = server.store.getWithRemoved('post', postId)!;
+    server.store.put('post', postId, { ...data, title: '改名后' });
+
+    const item = (await notifications(alice)).items.find(entry => entry.kind === 'post' && entry.title.includes('已下架'))!;
+    expect(item.title).toContain('改名前');
+    expect(item.title).not.toContain('改名后');
+  });
+
+  it('同一毫秒的两条文章事件不会共用同一个通知 id', async () => {
+    const alice = await account('alice');
+    const post = await alice.call('POST', '/api/posts', { kind: 'community', title: '同一秒', summary: 's', body: 'b' });
+    const postId = (await post.json() as { id: string }).id;
+    await server.app.request(`/api/admin/posts/${postId}/review`, {
+      method: 'POST', headers: bearer, body: JSON.stringify({ status: 'approved' }),
+    });
+    // clock 不动：下架与恢复落在同一毫秒。
+    await server.app.request(`/api/admin/posts/${postId}/withdraw`, { method: 'POST', headers: bearer });
+    await server.app.request(`/api/admin/posts/${postId}/restore`, { method: 'POST', headers: bearer });
+
+    const ids = (await notifications(alice)).items.filter(item => item.kind === 'post').map(item => item.id);
+    expect(ids).toHaveLength(2);
+    expect(new Set(ids).size).toBe(2);
+  });
+
+  it('本人用 Agent 凭证提交的稿子也进通知', async () => {
+    const alice = await account('alice');
+    // 申请 Agent 凭证要求账号注册满 7 天，把钟往前拨。
+    clock = new Date(clock.getTime() + 8 * 86_400_000);
+    const token = await alice.call('POST', '/api/account/agent-tokens', { label: 'cli' });
+    const { token: secret } = await token.json() as { token: string };
+    const submitted = await server.app.request('/api/agent/posts', {
+      method: 'POST',
+      headers: { ...json, authorization: `Bearer ${secret}` },
+      body: JSON.stringify({ title: 'Agent 写的', summary: 's', body: 'b', authorName: 'Agent 作者' }),
+    });
+    expect([200, 201]).toContain(submitted.status);
+    // 响应把记录包在 submission 里（见 agent-api 的返回形状）。
+    const body = await submitted.json() as { submission: { id: string } };
+    const id = body.submission.id;
+
+    await server.app.request(`/api/admin/submissions/${id}/review`, {
+      method: 'POST', headers: bearer, body: JSON.stringify({ status: 'approved' }),
+    });
+    const items = (await notifications(alice)).items;
+    // Agent 投稿的标题取自 payload.title；这里打印出来便于定位字段名。
+    expect(items.filter(item => item.kind === 'submission').map(item => item.title).join('|')).toContain('Agent 写的');
+  });
+
   it('演示账号不产生通知（虚构数据没人会登录去看）', async () => {
     // 演示文章由 seed 写入，authorHandle 是 demo- 前缀的虚构账号。
     const demoPost = server.store.all('post').find(post => post.source === 'demo')!;

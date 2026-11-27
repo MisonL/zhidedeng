@@ -87,6 +87,8 @@ export const SCHEMA = `
     authorHandle TEXT NOT NULL,
     action TEXT NOT NULL CHECK(action IN ('removed','restored')),
     reason TEXT,
+    -- 标题快照：文章随后被改标题/改写作者，历史通知仍应显示当时那篇。
+    title TEXT,
     at TEXT NOT NULL
   );
   CREATE INDEX IF NOT EXISTS post_events_author ON post_events(authorHandle, at DESC);
@@ -107,6 +109,8 @@ export const SCHEMA = `
   CREATE INDEX IF NOT EXISTS feedback_user ON feedback(userHandle, createdAt DESC);
   CREATE UNIQUE INDEX IF NOT EXISTS reports_open_once ON reports(targetType, targetId, reporterHandle) WHERE status = 'open';
   CREATE INDEX IF NOT EXISTS reports_open ON reports(status, createdAt);
+  -- 「我的通知」按 reporterHandle 查已处置的举报：没有这个索引就是全表扫描。
+  CREATE INDEX IF NOT EXISTS reports_reporter ON reports(reporterHandle, handledAt);
 
   CREATE TABLE IF NOT EXISTS checkins (
     userHandle TEXT NOT NULL, date TEXT NOT NULL, tokensAwarded INTEGER NOT NULL, streak INTEGER NOT NULL,
@@ -353,6 +357,18 @@ export function ensureCommentColumns(store: Store) {
   if (!table) return;
   store.transaction(() => {
     ensureColumn(store.db, 'deletedAt', 'TEXT', 'comments');
+  });
+}
+
+/**
+ * post_events 的 title 列。老库建表时没有它，`CREATE TABLE IF NOT EXISTS` 不会补。
+ * 没有这一列，读取时 `SELECT title` 会直接报 no such column。
+ */
+export function ensurePostEventColumns(store: Store) {
+  const table = store.db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'post_events'").get();
+  if (!table) return;
+  store.transaction(() => {
+    ensureColumn(store.db, 'title', 'TEXT', 'post_events');
   });
 }
 

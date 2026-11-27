@@ -85,8 +85,12 @@ export function withdrawPost(store: Store, id: string, removedAt: string): { id:
   // 演示数据和站点侧是同一套规矩（removeStation 拒绝 source='demo'）：
   // 那些是虚构样例，撤掉只会让站点看起来像坏了，而它们本来也不承载任何真实信息。
   if (post.source === 'demo') throw new ApiError(409, 'POST_SOURCE_CONFLICT', '演示数据不能下架');
-  if (!store.markRemoved('post', id, removedAt)) throw new ApiError(409, 'ALREADY_REMOVED', '该文章已下架，不需要重复操作');
-  recordPostEvent(store, id, post.authorHandle, 'removed', removedAt, null);
+  // 状态与流水必须同一个事务：只改状态不记流水，通知就永久缺一条，
+  // 而重试会撞 ALREADY_REMOVED（状态已经是下架），补不回来。
+  store.transaction(() => {
+    if (!store.markRemoved('post', id, removedAt)) throw new ApiError(409, 'ALREADY_REMOVED', '该文章已下架，不需要重复操作');
+    recordPostEvent(store, id, post.authorHandle, 'removed', removedAt, null, post.title);
+  });
   return { id, removed: true };
 }
 
@@ -94,8 +98,10 @@ export function withdrawPost(store: Store, id: string, removedAt: string): { id:
 export function restorePost(store: Store, id: string, now = () => new Date()): { id: string; restored: true } {
   const post = store.getWithRemoved('post', id);
   if (!post) throw new ApiError(404, 'NOT_FOUND', '文章不存在');
-  if (!store.restore('post', id)) throw new ApiError(409, 'ALREADY_ONLINE', '该文章当前在线，不需要恢复');
-  recordPostEvent(store, id, post.authorHandle, 'restored', now().toISOString(), null);
+  store.transaction(() => {
+    if (!store.restore('post', id)) throw new ApiError(409, 'ALREADY_ONLINE', '该文章当前在线，不需要恢复');
+    recordPostEvent(store, id, post.authorHandle, 'restored', now().toISOString(), null, post.title);
+  });
   return { id, restored: true };
 }
 
@@ -107,9 +113,12 @@ export function restorePost(store: Store, id: string, now = () => new Date()): {
  * 演示数据也会产生流水，但它们的作者是 demo- 前缀的虚构账号，读通知的人
  * 不会是它们；真实账号不会去关注演示文章。
  */
-function recordPostEvent(store: Store, postId: string, authorHandle: string, action: 'removed' | 'restored', at: string, reason: string | null) {
-  store.db.prepare('INSERT INTO post_events (postId, authorHandle, action, reason, at) VALUES (?,?,?,?,?)')
-    .run(postId, authorHandle, action, reason, at);
+function recordPostEvent(
+  store: Store, postId: string, authorHandle: string, action: 'removed' | 'restored',
+  at: string, reason: string | null, title: string | null,
+) {
+  store.db.prepare('INSERT INTO post_events (postId, authorHandle, action, reason, title, at) VALUES (?,?,?,?,?,?)')
+    .run(postId, authorHandle, action, reason, title, at);
 }
 
 /** 禁用后所有会话立即失效，公开内容保留；恢复后要重新登录。 */

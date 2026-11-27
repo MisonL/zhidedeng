@@ -4,7 +4,7 @@ import { dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildApp } from './app.ts';
 import { MIN_SYNC_TOKEN_LENGTH } from './catalog.ts';
-import { ensureAgentTokenColumns, ensureCommentColumns, ensureOfferColumns, ensureSubmissionColumns, SCHEMA, Store } from './database.ts';
+import { ensureAgentTokenColumns, ensureCommentColumns, ensureOfferColumns, ensurePostEventColumns, ensureSubmissionColumns, SCHEMA, Store } from './database.ts';
 import type { SqlDatabase } from './database.ts';
 import { seed } from './seed.ts';
 import { mountWeb } from './static.ts';
@@ -25,6 +25,8 @@ export function openDatabase(path: string, options: { readOnly?: boolean } = {})
     `);
     const hasSubmissions = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'submissions'").get() !== undefined;
     if (hasSubmissions) ensureSubmissionColumns(openStore(db));
+    const hasPostEvents = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'post_events'").get() !== undefined;
+    if (hasPostEvents) ensurePostEventColumns(openStore(db));
     // 旧库的 entities 表没有 removedAt，必须**先补列再建索引**：
     // SCHEMA 里有 `CREATE INDEX ... ON entities(kind, removedAt)`，顺序反了会在
     // 「no such column: removedAt」上直接启动失败，而且 db.exec(SCHEMA) 不是事务，

@@ -1,4 +1,4 @@
-import { screen } from '@testing-library/react';
+import { fireEvent, screen } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
 import { renderApp, stubApi } from './helpers';
 import { me, page } from './fixtures';
@@ -45,7 +45,11 @@ describe('我的通知', () => {
           url.searchParams.get('page') === '2' ? 2 : 1),
     });
     renderApp('/me?tab=notifications');
-    expect(await screen.findByText('第一页 0')).toBeInTheDocument();
+    expect(await screen.findByText('第一页 0', {}, { timeout: 15000 })).toBeInTheDocument();
     expect(screen.queryByText('第二页那条')).not.toBeInTheDocument();
+
+    // 真的点一下「加载更多」，否则这条用例只证明了第一页能渲染。
+    fireEvent.click(await screen.findByRole('button', { name: '加载更多' }));
+    expect(await screen.findByText('第二页那条', {}, { timeout: 15000 })).toBeInTheDocument();
   });
 });

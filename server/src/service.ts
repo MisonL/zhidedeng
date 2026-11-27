@@ -669,9 +669,12 @@ export class Service {
 
     // 1) 投稿审核结果。只取已审核过的（reviewedAt 有值），否则待审投稿会变成
     //    「审核中」的通知堆在列表里，而「我的投稿」页已经在展示它了。
+    // 只取有结论的两种终态：`superseded` 是「被新版本替代」，不是「未通过」，
+    // 混进来会让作者以为自己的稿子被拒了。也不限定 channel：本人用 Agent 凭证
+    // 提交的稿子同样记在 actorHandle 上，只看 web 会把那条通道的结果藏起来。
     const submissions = this.store.db.prepare(
       `SELECT id, kind, status, reason, payload, reviewedAt FROM submissions
-       WHERE channel = 'web' AND actorHandle = ? AND reviewedAt IS NOT NULL
+       WHERE actorHandle = ? AND status IN ('approved','rejected') AND reviewedAt IS NOT NULL
        ORDER BY reviewedAt DESC`,
     ).all(this.user) as Array<{
       id: string; kind: 'station' | 'model' | 'post'; status: SubmissionStatus;
@@ -688,7 +691,9 @@ export class Service {
         title: approved ? `你投稿的${kindLabel}「${target}」已通过` : `你投稿的${kindLabel}「${target}」未通过`,
         // 通过时没有「理由」可言；驳回时理由必须带出来，否则作者不知道改哪儿。
         detail: approved ? null : row.reason ?? null,
-        href: approved ? this.materializedSlug(row, payload) && this.submissionHref(row.kind, this.materializedSlug(row, payload)!) : null,
+        // 通过不代表现在还在线：文章可能随后被下架/撤下，模型可能被删。
+        // 生成链接前确认目标真的可访问，否则通知里是个 404。
+        href: approved ? this.liveSubmissionHref(row.kind, row.id, payload) : null,
         at: row.reviewedAt,
       });
     }
@@ -716,20 +721,27 @@ export class Service {
 
     // 3) 我的文章下架 / 恢复。
     const events = this.store.db.prepare(
-      `SELECT id, postId, action, reason, at FROM post_events
+      `SELECT id, postId, action, reason, title, at FROM post_events
        WHERE authorHandle = ? ORDER BY at DESC`,
-    ).all(this.user) as Array<{ id: number; postId: string; action: 'removed' | 'restored'; reason: string | null; at: string }>;
+    ).all(this.user) as Array<{
+      id: number; postId: string; action: 'removed' | 'restored'; reason: string | null; title: string | null; at: string;
+    }>;
     for (const row of events) {
-      const post = this.store.getWithRemoved('post', row.postId);
+      // 链接要求文章此刻在线（恢复后可能又被下架）。
+      const online = this.store.get('post', row.postId) !== undefined;
+      // 标题用当时的快照：文章后来改了标题，历史通知不该跟着变。
+      const title = row.title ?? row.postId;
       items.push({
-        id: `post:${row.postId}:${row.at}`,
+        // 用流水主键：同一毫秒的两条事件用 (postId, at) 拼 id 会撞成同一个 key。
+        id: `post:${row.id}`,
         kind: 'post',
         title: row.action === 'removed'
-          ? `你的文章「${post?.title ?? row.postId}」已下架`
-          : `你的文章「${post?.title ?? row.postId}」已恢复`,
+          ? `你的文章「${title}」已下架`
+          : `你的文章「${title}」已恢复`,
         detail: row.reason,
-        // 下架后详情页 404，给链接等于给一个死链；恢复后才给。
-        href: row.action === 'restored' ? `/posts/${row.postId}` : null,
+        // 下架后详情页 404，给链接等于给一个死链；恢复后也要确认它现在真的在线
+        // （可能恢复之后又被下架了一次）。
+        href: row.action === 'restored' && online ? `/posts/${row.postId}` : null,
         at: row.at,
       });
     }
@@ -746,11 +758,29 @@ export class Service {
   }
 
   private reportHref(targetType: 'post' | 'station' | 'comment', targetId: string): string | null {
-    if (targetType === 'post') return `/posts/${targetId}`;
-    if (targetType === 'station') return `/stations/${targetId}`;
+    // 只给「现在还能打开」的链接。被举报的内容很可能已经因为这条举报被下架了，
+    // 此时回链接就是回一个 404。
+    if (targetType === 'post') return this.store.get('post', targetId) ? `/posts/${targetId}` : null;
+    if (targetType === 'station') return this.store.get('station', targetId) ? `/stations/${targetId}` : null;
     // 评论没有独立页面，跳回它所属的文章/站点才是可用的链接；这里拿不到父目标，
     // 宁可不给链接，也不给一个点进去 404 的链接。
     return null;
+  }
+
+  /** 投稿通过后的落地链接，同样要求目标此刻在线。 */
+  private liveSubmissionHref(
+    kind: 'station' | 'model' | 'post',
+    submissionId: string,
+    payload: { slug?: string; url?: string },
+  ): string | null {
+    const slug = this.materializedSlug({ id: submissionId, kind, status: 'approved' }, payload);
+    if (!slug) return null;
+    // 模型/站点/文章的存在性各查各的表：materializedSlug 只保证「物化过」，
+    // 不保证「现在还挂着」。
+    const online = kind === 'model' ? this.store.get('model', slug)
+      : kind === 'station' ? this.store.get('station', slug)
+        : this.store.get('post', slug);
+    return online ? this.submissionHref(kind, slug) : null;
   }
 
   /** 只对已通过的投稿算：待审/被拒的还没物化，给了链接也是 404。 */
@@ -1234,12 +1264,15 @@ export class Service {
       throw new ApiError(409, 'POST_NOT_PUBLISHED', '只有已通过审核的文章才能撤下');
     }
     const at = this.now().toISOString();
-    if (!this.store.markRemoved('post', id, at)) {
-      throw new ApiError(409, 'ALREADY_REMOVED', '这篇文章已经撤下了');
-    }
-    // 作者自己撤下也记流水：通知里要能区分「你撤下的」和「管理员下架的」。
-    this.store.db.prepare('INSERT INTO post_events (postId, authorHandle, action, reason, at) VALUES (?,?,?,?,?)')
-      .run(id, post.authorHandle, 'removed', null, at);
+    // 状态与流水同一个事务，理由同 moderation.ts 的 withdrawPost。
+    this.store.transaction(() => {
+      if (!this.store.markRemoved('post', id, at)) {
+        throw new ApiError(409, 'ALREADY_REMOVED', '这篇文章已经撤下了');
+      }
+      // 作者自己撤下也记流水：通知里要能区分「你撤下的」和「管理员下架的」。
+      this.store.db.prepare('INSERT INTO post_events (postId, authorHandle, action, reason, title, at) VALUES (?,?,?,?,?,?)')
+        .run(id, post.authorHandle, 'removed', null, post.title, at);
+    });
     return { id, removed: true as const };
   }
 
