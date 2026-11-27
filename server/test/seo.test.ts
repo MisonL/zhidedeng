@@ -161,14 +161,17 @@ describe('服务端 SEO', () => {
     expect(meta(await (await server.app.request('/ME')).text(), 'robots')).toBe('noindex, follow');
     expect(meta(await (await server.app.request('/Admin')).text(), 'robots')).toBe('noindex, follow');
 
-    // id 段不能跟着小写：造一个含大写的文章 id，两个大小写写法都要能查到。
-    const data = server.store.get('post', 'post-1');
-    if (data) {
-      server.store.put('post', 'Feishu-ABC', { ...data, id: 'Feishu-ABC', title: '大写 id 的文章' });
-      const html = await (await server.app.request('/posts/Feishu-ABC')).text();
-      expect(html).toContain('大写 id 的文章');
-      server.store.markRemoved('post', 'Feishu-ABC', new Date().toISOString());
-    }
+    // id 段不能跟着小写：飞书导入的文章 id 是 `feishu-<originKey>`，
+    // originKey 可能含大写。小写化会查不到那行，canonical 掉回首页、noindex 也丢。
+    const data = server.store.get('post', 'post-1')!;
+    const id = 'feishu-recABC';
+    server.store.put('post', id, { ...data, id, title: '大写 id 的文章', source: 'submission' });
+    const html = await (await server.app.request(`/posts/${id}`)).text();
+    expect(html).toContain('大写 id 的文章');
+    expect(canonical(html)).toBe(`https://example.test/posts/${id}`);
+    // 投稿来源必须仍是 noindex——掉回首页 meta 时这条会一起丢。
+    expect(meta(html, 'robots')).toBe('noindex, follow');
+    server.store.markRemoved('post', id, new Date().toISOString());
   });
 
   it('畸形百分号编码不返回 500', async () => {
