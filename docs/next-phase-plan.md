@@ -200,7 +200,11 @@ rs-ops 指出：仓库 `docker-compose.yml:14` 绑 `127.0.0.1:8788`，而生产�
 - **链接只在目标此刻能打开时才给**。下架的文章、被驳回的文章、已删除的模型、已下架的举报目标，一律不给链接——给一个点进去 404 的链接比不给更糟。文章 id 复用 `materialize` 的同一份规则（站内投稿是投稿 id，Agent/飞书是 `sub-<投稿id>`），站点 slug 复用 `findStation` 的认领规则（同 hostname 不同路径是两个站）。
 - **标题存快照**。文章后来改了标题，历史通知仍显示当时那篇；通知 id 用流水自增主键，同一毫秒的两条事件不会撞 key。
 
-其余四项（账号注销、文章编辑、SEO 主体、Token 消耗）仍未开始：它们各自需要一个产品决策（用户名与内容归属、编辑与举报版本的联动、域名、兑换什么），不是纯代码问题。
+已完成第 4 项「SEO 主体」：详情页 meta 注入（title/description/canonical/OG）、`/sitemap.xml`、`/rss.xml`、`/robots.txt`。域名未定，所以绝对 URL 的 origin 走 `PUBLIC_ORIGIN` 环境变量，未配置时退回请求自身的 origin（容器里必须配，否则 sitemap 里是内网地址）。
+
+同一条规则贯穿全部四处：**只有真实内容进索引**。演示站与演示文章带 `noindex`（页面给人看，但不该在搜索结果里被当成真实评测）；站内用户写的已发布文章可索引并进 sitemap/RSS；投稿与 Agent 采集的内容带 `noindex` 且不进 sitemap/RSS。登录后页面（`/me`、`/admin`、`/search`）一律 `noindex`。判据收敛成 `indexablePost` / `indexableStation` 两个函数，页面与 sitemap/RSS 共用，避免出现「页面说可索引但不在 sitemap 里」。
+
+其余三项（账号注销、文章编辑、Token 消耗）仍未开始：它们各自需要一个产品决策（用户名与内容归属、编辑与举报版本的联动、Token 兑换什么），不是纯代码问题。
 
 ## 6. 明确不做
 
