@@ -310,6 +310,30 @@ export interface MySubmission {
   targetSlug: string | null;
 }
 export type GetMySubmissionsResponse = PaginatedResponse<MySubmission>;
+
+/**
+ * 站内通知。只做本人相关的事件，**拉模型**：没有推送、没有未读红点计数。
+ *
+ * 不做未读数是因为它需要客户端轮询或长连接，而本站的节奏是「来看的时候顺便看看」；
+ * 搞一个永远 0 或永远滞后的小红点，比没有更糟。
+ */
+export interface NotificationItem {
+  /**
+   * 稳定 id，由来源表的主键派生（`submission:<id>` / `report:<id>` / `post:<id>:<at>`）。
+   * 前端只拿它当 React key，不做业务判断。
+   */
+  id: string;
+  kind: 'submission' | 'report' | 'post';
+  /** 一句话标题，服务端拼好。文案归服务端管，前端不再二次解释。 */
+  title: string;
+  /** 补充说明：驳回理由、举报处置备注、下架原因。没有就是 null。 */
+  detail: string | null;
+  /** 点进去看哪儿。没有可跳转的目标时是 null。 */
+  href: string | null;
+  at: ISODateTime;
+}
+export type GetMyNotificationsRequest = PaginationQuery;
+export type GetMyNotificationsResponse = PaginatedResponse<NotificationItem>;
 export type GetVendorsRequest = PaginationQuery;
 export type GetVendorsResponse = PaginatedResponse<VendorWithModels>;
 
@@ -541,6 +565,7 @@ export interface ApiContracts {
   getMyFavorites: { request: GetMyFavoritesRequest; response: ApiResponse<GetMyFavoritesResponse> };
   getMyPosts: { request: GetMyPostsRequest; response: ApiResponse<GetMyPostsResponse> };
   getMySubmissions: { request: PaginationQuery; response: ApiResponse<GetMySubmissionsResponse> };
+  getMyNotifications: { request: GetMyNotificationsRequest; response: ApiResponse<GetMyNotificationsResponse> };
   getVendors: { request: GetVendorsRequest; response: ApiResponse<GetVendorsResponse> };
   getModels: { request: GetModelsRequest; response: ApiResponse<GetModelsResponse> };
   getModel: { request: GetModelRequest; response: ApiResponse<GetModelResponse> };

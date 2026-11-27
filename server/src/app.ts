@@ -534,7 +534,7 @@ function orderByMaterializeDependency(store: Store, ids: string[]): string[] {
   });
   // 下架 / 恢复已发布的文章。下架是软删除，正文一直留着，误操作能直接撤回。
   app.post('/api/admin/posts/:id/withdraw', c => c.json(withdrawPost(store, c.req.param('id'), now().toISOString())));
-  app.post('/api/admin/posts/:id/restore', c => c.json(restorePost(store, c.req.param('id'))));
+  app.post('/api/admin/posts/:id/restore', c => c.json(restorePost(store, c.req.param('id'), now)));
   app.get('/api/admin/posts/removed', c => {
     const rows = store.db.prepare("SELECT id, removedAt FROM entities WHERE kind = 'post' AND removedAt IS NOT NULL ORDER BY removedAt DESC").all();
     return c.json({ items: rows.map(row => ({ id: row.id as string, removedAt: row.removedAt as string })) });
@@ -917,6 +917,7 @@ function orderByMaterializeDependency(store: Store, ids: string[]): string[] {
     return { id: result.submission.id, status: result.submission.status, deduplicated: result.deduplicated };
   });
   route('getMySubmissions', z.strictObject(pagination), (service, input) => service.getMySubmissions(input));
+  route('getMyNotifications', z.strictObject(pagination), (service, input) => service.getMyNotifications(input));
  //投票与收藏共用同一道滑窗（429语义与签到一致）：两者都是登录后的
  //高频可重复写，不设闸时同一会话每秒能打几百次全表扫描式写事务。
  const voteGuard = (service: { handle: string | null }): void => {

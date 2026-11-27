@@ -201,6 +201,7 @@ channel 是队列的来源渠道，source 是物化内容的展示来源，二�
 - `POST /me/checkin`（当天重复调用返回 409 ALREADY_CHECKED_IN）；`GET /me` 含 tokens、checkedInToday、streak、favoriteCount、shareCount
 - `GET /me/favorites`、`GET /me/posts`
 - `GET /me/submissions` —— 「我的投稿」：文章、模型、站点三类统一返回，带状态与驳回理由；已通过的给出可点的详情链接。此前补录模型和推荐站点这两条通道的审核结果，提交人完全看不到
+- `GET /me/notifications` —— 「我的通知」，**拉模型**：只汇总本人相关的三类事件（投稿审核结果、举报处置结果、我的文章被下架/恢复），不推送、不报未读数（没有推送通道时，红点要么永远不消失要么永远滞后）。全部从既有表派生，只有「文章恢复」额外记一份 `post_events` 流水——`entities.removedAt` 只存当前状态，恢复会把它清空，历史没别处可存。下架通知不带链接（详情页已 404），恢复后才给
 - `GET /vendors`（含 models 摘要）
 - `GET /models?vendor=&q=`、`GET /models/:slug`（含 offers：各站倍率，先按计价口径分组、组内按倍率升序；每条带 `basis` 与可为 null 的 `quotedAt`）
 - `GET /stations?vendor=&sort=score|rate|uptime&q=`、`GET /stations/:slug`（含 offers、指标、投票汇总、当前用户投票与收藏状态）

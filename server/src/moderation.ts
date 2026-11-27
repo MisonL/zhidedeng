@@ -86,14 +86,30 @@ export function withdrawPost(store: Store, id: string, removedAt: string): { id:
   // 那些是虚构样例，撤掉只会让站点看起来像坏了，而它们本来也不承载任何真实信息。
   if (post.source === 'demo') throw new ApiError(409, 'POST_SOURCE_CONFLICT', '演示数据不能下架');
   if (!store.markRemoved('post', id, removedAt)) throw new ApiError(409, 'ALREADY_REMOVED', '该文章已下架，不需要重复操作');
+  recordPostEvent(store, id, post.authorHandle, 'removed', removedAt, null);
   return { id, removed: true };
 }
 
 /** 恢复被下架的文章，只清软删除标记，正文一直是原样保留的。 */
-export function restorePost(store: Store, id: string): { id: string; restored: true } {
-  if (!store.getWithRemoved('post', id)) throw new ApiError(404, 'NOT_FOUND', '文章不存在');
+export function restorePost(store: Store, id: string, now = () => new Date()): { id: string; restored: true } {
+  const post = store.getWithRemoved('post', id);
+  if (!post) throw new ApiError(404, 'NOT_FOUND', '文章不存在');
   if (!store.restore('post', id)) throw new ApiError(409, 'ALREADY_ONLINE', '该文章当前在线，不需要恢复');
+  recordPostEvent(store, id, post.authorHandle, 'restored', now().toISOString(), null);
   return { id, restored: true };
+}
+
+/**
+ * 记一条文章下架/恢复流水，供「我的通知」读取。
+ *
+ * 为什么必须单独记：`entities.removedAt` 只存当前状态，恢复时会被清空，
+ * 「你的文章被恢复了」这条通知就等于没有来源。流水只增不改。
+ * 演示数据也会产生流水，但它们的作者是 demo- 前缀的虚构账号，读通知的人
+ * 不会是它们；真实账号不会去关注演示文章。
+ */
+function recordPostEvent(store: Store, postId: string, authorHandle: string, action: 'removed' | 'restored', at: string, reason: string | null) {
+  store.db.prepare('INSERT INTO post_events (postId, authorHandle, action, reason, at) VALUES (?,?,?,?,?)')
+    .run(postId, authorHandle, action, reason, at);
 }
 
 /** 禁用后所有会话立即失效，公开内容保留；恢复后要重新登录。 */

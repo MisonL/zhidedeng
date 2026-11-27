@@ -1,5 +1,6 @@
 import { AVATAR_PRESETS } from '@zhidedeng/shared';
 import type {
+  NotificationItem,
   Author, CheckInResponse, Comment, CommentReply, CreateCommentRequest,
   CreateFeedbackRequest, CreateReportRequest, CurrentUser, Favorite, FavoriteItem, GetCommentsRequest, GetModelsRequest, GetPostsRequest,
   GetRankingsRequest, GetRankingsResponse, GetStationsRequest, InteractionState, ModelDetail,
@@ -652,6 +653,106 @@ export class Service {
     return paginate(items, query);
   }
 
+  /**
+   * 「我的通知」：只汇总**本人相关**的三类事件。
+   *
+   * 1. 投稿审核结果（通过 / 驳回 + 理由）
+   * 2. 举报处置结果（成立 / 不成立 + 备注）
+   * 3. 我的文章被下架 / 恢复
+   *
+   * 全部来自已有表，不新增写入路径——除了 post_events（恢复会清掉
+   * entities.removedAt，历史没地方存，只能单独记流水）。
+   * 演示账号（demo- 前缀）不产生通知：它们是虚构数据，没人会登录去看。
+   */
+  getMyNotifications(query: PaginationQuery) {
+    const items: NotificationItem[] = [];
+
+    // 1) 投稿审核结果。只取已审核过的（reviewedAt 有值），否则待审投稿会变成
+    //    「审核中」的通知堆在列表里，而「我的投稿」页已经在展示它了。
+    const submissions = this.store.db.prepare(
+      `SELECT id, kind, status, reason, payload, reviewedAt FROM submissions
+       WHERE channel = 'web' AND actorHandle = ? AND reviewedAt IS NOT NULL
+       ORDER BY reviewedAt DESC`,
+    ).all(this.user) as Array<{
+      id: string; kind: 'station' | 'model' | 'post'; status: SubmissionStatus;
+      reason: string | null; payload: string; reviewedAt: string;
+    }>;
+    for (const row of submissions) {
+      const payload = JSON.parse(row.payload) as { title?: string; name?: string; slug?: string; url?: string };
+      const target = payload.title ?? payload.name ?? payload.slug ?? row.id;
+      const approved = row.status === 'approved';
+      const kindLabel = row.kind === 'post' ? '文章' : row.kind === 'station' ? '站点' : '模型';
+      items.push({
+        id: `submission:${row.id}`,
+        kind: 'submission',
+        title: approved ? `你投稿的${kindLabel}「${target}」已通过` : `你投稿的${kindLabel}「${target}」未通过`,
+        // 通过时没有「理由」可言；驳回时理由必须带出来，否则作者不知道改哪儿。
+        detail: approved ? null : row.reason ?? null,
+        href: approved ? this.materializedSlug(row, payload) && this.submissionHref(row.kind, this.materializedSlug(row, payload)!) : null,
+        at: row.reviewedAt,
+      });
+    }
+
+    // 2) 举报处置结果。open 的不算事件——它还没结论。
+    const reports = this.store.db.prepare(
+      `SELECT id, targetType, targetId, status, note, handledAt FROM reports
+       WHERE reporterHandle = ? AND status IN ('resolved','dismissed') AND handledAt IS NOT NULL
+       ORDER BY handledAt DESC`,
+    ).all(this.user) as Array<{
+      id: string; targetType: 'post' | 'station' | 'comment'; targetId: string;
+      status: 'resolved' | 'dismissed'; note: string | null; handledAt: string;
+    }>;
+    for (const row of reports) {
+      items.push({
+        id: `report:${row.id}`,
+        kind: 'report',
+        // 措辞刻意不说「已删除」：处理举报只改举报状态，内容下架是另一个动作。
+        title: row.status === 'resolved' ? '你举报的内容已处理' : '你举报的内容经核实没有问题',
+        detail: row.note?.trim() ? row.note : null,
+        href: this.reportHref(row.targetType, row.targetId),
+        at: row.handledAt,
+      });
+    }
+
+    // 3) 我的文章下架 / 恢复。
+    const events = this.store.db.prepare(
+      `SELECT id, postId, action, reason, at FROM post_events
+       WHERE authorHandle = ? ORDER BY at DESC`,
+    ).all(this.user) as Array<{ id: number; postId: string; action: 'removed' | 'restored'; reason: string | null; at: string }>;
+    for (const row of events) {
+      const post = this.store.getWithRemoved('post', row.postId);
+      items.push({
+        id: `post:${row.postId}:${row.at}`,
+        kind: 'post',
+        title: row.action === 'removed'
+          ? `你的文章「${post?.title ?? row.postId}」已下架`
+          : `你的文章「${post?.title ?? row.postId}」已恢复`,
+        detail: row.reason,
+        // 下架后详情页 404，给链接等于给一个死链；恢复后才给。
+        href: row.action === 'restored' ? `/posts/${row.postId}` : null,
+        at: row.at,
+      });
+    }
+
+    // 新的在前；同一时刻按 id 兜底，保证全序稳定（翻页不重复不丢）。
+    items.sort((a, b) => (a.at === b.at ? a.id.localeCompare(b.id) : a.at < b.at ? 1 : -1));
+    return paginate(items, query);
+  }
+
+  private submissionHref(kind: 'station' | 'model' | 'post', slug: string): string {
+    if (kind === 'station') return `/stations/${slug}`;
+    if (kind === 'model') return `/models/${slug}`;
+    return `/posts/${slug}`;
+  }
+
+  private reportHref(targetType: 'post' | 'station' | 'comment', targetId: string): string | null {
+    if (targetType === 'post') return `/posts/${targetId}`;
+    if (targetType === 'station') return `/stations/${targetId}`;
+    // 评论没有独立页面，跳回它所属的文章/站点才是可用的链接；这里拿不到父目标，
+    // 宁可不给链接，也不给一个点进去 404 的链接。
+    return null;
+  }
+
   /** 只对已通过的投稿算：待审/被拒的还没物化，给了链接也是 404。 */
   private materializedSlug(
     row: { id: string; kind: string; status: string },
@@ -1132,9 +1233,13 @@ export class Service {
       // 待审/被拒的还没上线，没有「撤下」可言；它们该被重投覆盖或不管。
       throw new ApiError(409, 'POST_NOT_PUBLISHED', '只有已通过审核的文章才能撤下');
     }
-    if (!this.store.markRemoved('post', id, this.now().toISOString())) {
+    const at = this.now().toISOString();
+    if (!this.store.markRemoved('post', id, at)) {
       throw new ApiError(409, 'ALREADY_REMOVED', '这篇文章已经撤下了');
     }
+    // 作者自己撤下也记流水：通知里要能区分「你撤下的」和「管理员下架的」。
+    this.store.db.prepare('INSERT INTO post_events (postId, authorHandle, action, reason, at) VALUES (?,?,?,?,?)')
+      .run(id, post.authorHandle, 'removed', null, at);
     return { id, removed: true as const };
   }
 

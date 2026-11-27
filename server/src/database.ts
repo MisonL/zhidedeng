@@ -78,6 +78,18 @@ export const SCHEMA = `
     createdAt TEXT NOT NULL
   );
   CREATE INDEX IF NOT EXISTS comment_writes_user ON comment_writes(userHandle, createdAt);
+  -- 文章下架/恢复的流水。通知要能说「你的文章被下架了」以及「又被恢复了」，
+  -- 但 entities 只存当前状态：恢复会把 removedAt 清空，历史就没了。
+  -- 所以单独记一份只增不改的流水，通知从它读。
+  CREATE TABLE IF NOT EXISTS post_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    postId TEXT NOT NULL,
+    authorHandle TEXT NOT NULL,
+    action TEXT NOT NULL CHECK(action IN ('removed','restored')),
+    reason TEXT,
+    at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS post_events_author ON post_events(authorHandle, at DESC);
   -- 站点页「一句话反馈」：三个选项 + 一句话。存的是**用户断言**，不是平台实测，
   -- 所以单独一张表，绝不混进 stations.uptime / firstTokenLatencyMs 那些字段。
   CREATE TABLE IF NOT EXISTS feedback (

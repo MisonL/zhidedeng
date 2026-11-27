@@ -20,6 +20,7 @@ export const API_ROUTES = {
   getMyFavorites: { method: 'GET', path: '/api/me/favorites' },
   getMyPosts: { method: 'GET', path: '/api/me/posts' },
   getMySubmissions: { method: 'GET', path: '/api/me/submissions' },
+  getMyNotifications: { method: 'GET', path: '/api/me/notifications' },
   getVendors: { method: 'GET', path: '/api/vendors' },
   getModels: { method: 'GET', path: '/api/models' },
   getModel: { method: 'GET', path: '/api/models/:slug' },

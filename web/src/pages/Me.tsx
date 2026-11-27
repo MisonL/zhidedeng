@@ -10,7 +10,7 @@ import PostCard from '../components/PostCard';
 import StationCard from '../components/StationCard';
 import { Avatar, AvatarPresetGlyph } from '../components/visuals';
 import { AVATAR_PRESET_NAMES, AVATAR_PRESETS } from '@zhidedeng/shared';
-import { loginPath } from '../format';
+import { formatDate, loginPath } from '../format';
 import { usePaged } from '../hooks';
 import { useHere, useMe } from '../state';
 import AgentTokens from './AgentTokens';
@@ -21,6 +21,7 @@ const TABS = [
   // 文章之外还有模型补录和站点推荐，那两条也有审核和驳回理由。
   // 只在「我的分享」里看，作者补了模型/站点就查不到任何结果。
   { value: 'submissions', label: '我的投稿' },
+  { value: 'notifications', label: '通知' },
   { value: 'settings', label: '账户设置' },
 ] as const;
 
@@ -34,6 +35,49 @@ function submissionPath(item: Pick<SubmissionItem, 'kind' | 'targetSlug'>) {
   if (item.kind === 'station') return `/stations/${item.targetSlug}`;
   if (item.kind === 'model') return `/models/${item.targetSlug}`;
   return `/posts/${item.targetSlug}`;
+}
+
+/**
+ * 「我的通知」：只显示本人相关的事件，拉模型。
+ *
+ * 不显示未读数：没有推送通道，红点要么永远不消失、要么永远滞后，
+ * 比没有更让人困惑。用户想看的时候点进这个页签即可。
+ */
+function MyNotifications() {
+  const paged = usePaged((page, signal) => api.getMyNotifications({ page, pageSize: 20 }, signal), []);
+  return (
+    <>
+      <AsyncView
+        state={paged}
+        isEmpty={(items) => items.length === 0}
+        empty={<Empty title="还没有通知" action={{ to: '/submit', label: '去投稿' }} />}
+      >
+        {(items) => (
+          <div className="card-list">
+            {items.map((item) => {
+              const body = (
+                <>
+                  <div className="tags">
+                    <span className="tag">
+                      {item.kind === 'submission' ? '投稿' : item.kind === 'report' ? '举报' : '文章'}
+                    </span>
+                    <time className="hint num" dateTime={item.at}>{formatDate(item.at)}</time>
+                  </div>
+                  <h3 className="card-title">{item.title}</h3>
+                  {item.detail && <p className="hint">{item.detail}</p>}
+                </>
+              );
+              // 没链接的用 div：给一个点不动的 article 包着 Link 会多出空点击区。
+              return item.href
+                ? <Link key={item.id} className="card" to={item.href}>{body}</Link>
+                : <article key={item.id} className="card">{body}</article>;
+            })}
+          </div>
+        )}
+      </AsyncView>
+      <LoadMore paged={paged} />
+    </>
+  );
 }
 
 function MySubmissions() {
@@ -307,6 +351,7 @@ export default function Me() {
             {tab === 'favorites' && <Favorites />}
             {tab === 'posts' && <MyPosts />}
             {tab === 'submissions' && <MySubmissions />}
+            {tab === 'notifications' && <MyNotifications />}
             {tab === 'settings' && <><Settings user={user} /><ChangePassword /><AgentTokens key={user.handle} /></>}
             {tab !== 'settings' && <p className="hint me-tip">想分享新的体验？<Link to="/submit">去投稿</Link></p>}
           </>
