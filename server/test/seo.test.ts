@@ -156,6 +156,21 @@ describe('服务端 SEO', () => {
     }
   });
 
+  it('路由段大小写不敏感，但 id 段按原样查（含大写的 id 不能丢 meta）', async () => {
+    // /ME 与 /me 是同一个页面，都要 noindex。
+    expect(meta(await (await server.app.request('/ME')).text(), 'robots')).toBe('noindex, follow');
+    expect(meta(await (await server.app.request('/Admin')).text(), 'robots')).toBe('noindex, follow');
+
+    // id 段不能跟着小写：造一个含大写的文章 id，两个大小写写法都要能查到。
+    const data = server.store.get('post', 'post-1');
+    if (data) {
+      server.store.put('post', 'Feishu-ABC', { ...data, id: 'Feishu-ABC', title: '大写 id 的文章' });
+      const html = await (await server.app.request('/posts/Feishu-ABC')).text();
+      expect(html).toContain('大写 id 的文章');
+      server.store.markRemoved('post', 'Feishu-ABC', new Date().toISOString());
+    }
+  });
+
   it('畸形百分号编码不返回 500', async () => {
     // decodeURIComponent('%E0%A4%A') 抛 URIError。那是 400 级的输入错误，
     // 不该变成 500——不能因为有人在地址栏乱敲就整站报错。
