@@ -314,6 +314,32 @@ describe('我的通知', () => {
     expect(item.href).toBe('/stations/sub-b');
   });
 
+  it('站点下架后，「我的投稿」不再给出 404 链接', async () => {
+    const alice = await account('alice');
+    const suggested = await alice.call('POST', '/api/stations/suggest', {
+      name: '会被下架的站', url: 'https://gone.example.com', description: 'd',
+    });
+    const id = (await suggested.json() as { id: string }).id;
+    await server.app.request(`/api/admin/submissions/${id}/review`, {
+      method: 'POST', headers: bearer, body: JSON.stringify({ status: 'approved' }),
+    });
+    // 上线时给链接。
+    const before = await alice.call('GET', '/api/me/submissions');
+    const beforeItem = (await before.json() as { items: Array<{ id: string; targetSlug: string | null }> }).items.find(item => item.id === id)!;
+    expect(beforeItem.targetSlug).not.toBeNull();
+    expect(beforeItem.targetSlug).toBe('sub-gone-example-com');
+
+    // 站点下架之后，那个 slug 的详情页就是 404，不能再给。
+    // 下架只有走管理流程一条路（批次 action=remove 还要先入队再审核），
+    // 这里直接调软删除，测的只是「通知/我的投稿不再给死链」这一层。
+    const slug = beforeItem.targetSlug!;
+    server.store.markRemoved('station', slug, clock.toISOString());
+    expect((await server.app.request(`/api/stations/${slug}`)).status).toBe(404);
+    const after = await alice.call('GET', '/api/me/submissions');
+    const afterItem = (await after.json() as { items: Array<{ id: string; targetSlug: string | null; withdrawn?: boolean }> }).items.find(item => item.id === id)!;
+    expect(afterItem.targetSlug).toBeNull();
+  });
+
   it('未登录不能读通知', async () => {
     expect((await server.app.request('/api/me/notifications')).status).toBe(401);
   });

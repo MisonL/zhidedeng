@@ -813,7 +813,10 @@ export class Service {
     // 站点：认领规则与 materialize 完全一致，直接调它。
     if (!row.channel || !row.originKey) return null;
     const claimed = findStation(this.store, { channel: row.channel as never, originKey: row.originKey }, payload.url ?? '');
-    return claimed?.slug ?? null;
+    // findStation 故意把**已下架**的站也认领回来（同步不该造重复站），但链接不行：
+    // 下架站点的详情页是 404，给出去就是死链。所以这里再确认它此刻在线。
+    if (!claimed || !this.store.get('station', claimed.slug)) return null;
+    return claimed.slug;
   }
 
   getMyPosts(query: PaginationQuery) {
