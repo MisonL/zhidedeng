@@ -109,10 +109,25 @@ describe('服务端 SEO', () => {
   });
 
   it('标题里的 $ 序列不会被当成替换引用展开', async () => {
-    // String.replace 的替换串里 `$&` / `$'` 是引用语法，而标题来自用户投稿。
-    const html = await (await server.app.request('/stations/whale-demo')).text();
-    expect(html).not.toContain('$&');
-    expect(html).toContain('<title>');
+    // String.replace 的替换串里 `$&` / `$'` / `$1` 是引用语法，而标题来自用户投稿。
+    // 必须真的造一个带 $ 的标题：拿现成标题测，「不含 $&」永远成立，等于没测。
+    const register = await server.app.request('/api/auth/register', {
+      method: 'POST', headers: json, body: JSON.stringify({ username: 'dollar', password: PASSWORD, nickname: '$' }),
+    });
+    const cookie = (register.headers.get('set-cookie') ?? '').split(';')[0];
+    const created = await server.app.request('/api/posts', {
+      method: 'POST', headers: { ...json, cookie },
+      body: JSON.stringify({ kind: 'community', title: "省 $& 实测：$' 与 $1 都不该被展开", summary: '摘要', body: '正文' }),
+    });
+    const id = (await created.json() as { id: string }).id;
+    await server.app.request(`/api/admin/posts/${id}/review`, {
+      method: 'POST', headers: bearer, body: JSON.stringify({ status: 'approved' }),
+    });
+
+    const html = await (await server.app.request(`/posts/${id}`)).text();
+    // 标题原样出现在 <title> 与 og:title 里；$& 展开会把整段 head 复制进来。
+    expect(html).toContain("省 $&amp; 实测：$&#39; 与 $1 都不该被展开");
+    expect(html.match(/<head>/g)).toHaveLength(1);
   });
 
   it('列表页 canonical 自指，登录后页面 noindex', async () => {
@@ -164,19 +179,55 @@ describe('服务端 SEO', () => {
       method: 'POST', headers: bearer, body: JSON.stringify({ status: 'approved' }),
     });
 
+    // 再加一条含 U+FFFE（非字符）与孤立代理项的：只清 C0 时这类仍会整份 feed 解析失败。
+    const nasty = await server.app.request('/api/posts', {
+      method: 'POST', headers: { ...json, cookie },
+      body: JSON.stringify({ kind: 'community', title: '非字符\uFFFE测试', summary: '摘要', body: '正文' }),
+    });
+    const nastyId = (await nasty.json() as { id: string }).id;
+    await server.app.request(`/api/admin/posts/${nastyId}/review`, {
+      method: 'POST', headers: bearer, body: JSON.stringify({ status: 'approved' }),
+    });
+
     const body = await (await server.app.request('/rss.xml')).text();
-    // XML 1.0 明文禁止的控制字符一个都不能出现。
-    expect(body).not.toMatch(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/);
+    // XML 1.0 明文禁止的字符一个都不能出现（C0 控制符 + 非字符）。
+    expect(body).not.toMatch(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\uFFFE\uFFFF]/);
     expect(body).toContain('控制符测试');
+    expect(body).toContain('非字符测试');
     expect(body).toContain(id);
   });
 
-  it('sitemap 与 RSS 的收录判据一致：都只收站内用户的已发布文章', async () => {
-    // 造一篇「采集来源」的文章（source=agent），它不该进任一处。
+  it('sitemap 与 RSS 的收录判据一致，且采集来的文章两边都不收', async () => {
+    // 先造一篇「站内用户写的」（两边都该收），再造一篇 agent 来源的（两边都不该收）。
+    const register = await server.app.request('/api/auth/register', {
+      method: 'POST', headers: json, body: JSON.stringify({ username: 'collect', password: PASSWORD, nickname: '采集' }),
+    });
+    const cookie = (register.headers.get('set-cookie') ?? '').split(';')[0];
+    const mine = await server.app.request('/api/posts', {
+      method: 'POST', headers: { ...json, cookie },
+      body: JSON.stringify({ kind: 'community', title: '本人写的', summary: 's', body: 'b' }),
+    });
+    const mineId = (await mine.json() as { id: string }).id;
+    await server.app.request(`/api/admin/posts/${mineId}/review`, {
+      method: 'POST', headers: bearer, body: JSON.stringify({ status: 'approved' }),
+    });
+
+    // 采集来源：直接把实体改成 source=agent，模拟 Agent 通道物化出来的文章。
+    const data = server.store.get('post', mineId)!;
+    server.store.put('post', mineId, { ...data, source: 'agent' });
+    const sitemapAfter = await (await server.app.request('/sitemap.xml')).text();
+    const rssAfter = await (await server.app.request('/rss.xml')).text();
+    expect(sitemapAfter).not.toContain(mineId);
+    expect(rssAfter).not.toContain(mineId);
+    // 页面本身仍可打开，但带 noindex。
+    const html = await (await server.app.request(`/posts/${mineId}`)).text();
+    expect(meta(html, 'robots')).toBe('noindex, follow');
+
+    // 改回 user 后两边都收，且双向一致。
+    server.store.put('post', mineId, { ...data, source: 'user' });
     const sitemap = await (await server.app.request('/sitemap.xml')).text();
     const rss = await (await server.app.request('/rss.xml')).text();
-    const ids = [...sitemap.matchAll(/\/posts\/([^<]+)</g)].map(match => match[1]);
-    for (const id of ids) expect(rss).toContain(id);
-    expect(ids.length).toBeGreaterThan(0);
+    expect(sitemap).toContain(mineId);
+    expect(rss).toContain(mineId);
   });
 });
