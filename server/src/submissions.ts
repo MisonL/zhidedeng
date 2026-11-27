@@ -446,7 +446,7 @@ function stationUrlKey(url: string | null): string | null {
  * 时一个批次要十几秒。当前站点规模（几十个）下无感，若将来批量审核变慢，先从这里下手：
  * 为 entities 增加 hostname 列并建索引，或让批次审核复用一个可增量的索引。
  */
-function findStation(store: Store, submission: Pick<SubmissionRecord, 'channel' | 'originKey'>, url: string): StationRecord | undefined {
+export function findStation(store: Store, submission: Pick<SubmissionRecord, 'channel' | 'originKey'>, url: string): StationRecord | undefined {
   const hostname = hostnameOf(url);
   if (hostname === null) return undefined;
   // 只看 channel，不看 batchId：www/裸域 分组是**飞书渠道的语义**，跟这批记录
@@ -749,7 +749,7 @@ export function submissionState(store: Store): AdminSubmissionStateResponse {
  * 实体都得再抄一遍——抄错一次（例如拿投稿 id 直接查 removedAt）就会静默失效，
  * 因为查不到行时 removedAt 返回 null，看起来像「没撤下」。
  */
-function materializedPostId(store: Store, submission: SubmissionRecord): string {
+export function materializedPostId(store: Store, submission: SubmissionRecord): string {
   if (submission.channel === 'web') return submission.id;
   const legacyId = `feishu-${submission.originKey}`;
   if (submission.channel === 'feishu' && store.getWithRemoved('post', legacyId)?.source === 'submission') return legacyId;

@@ -244,8 +244,11 @@ describe('我的通知', () => {
       method: 'POST', headers: bearer, body: JSON.stringify({ status: 'approved' }),
     });
     const items = (await notifications(alice)).items;
-    // Agent 投稿的标题取自 payload.title；这里打印出来便于定位字段名。
-    expect(items.filter(item => item.kind === 'submission').map(item => item.title).join('|')).toContain('Agent 写的');
+    const agentItem = items.find(item => item.kind === 'submission' && item.title.includes('Agent 写的'))!;
+    expect(agentItem).toBeTruthy();
+    // Agent 文章物化成 `sub-<投稿id>`，链接必须指向它，不能是投稿 id 本身。
+    expect(agentItem.href).toBe(`/posts/sub-${id}`);
+    expect((await server.app.request(`/api/posts/sub-${id}`)).status).toBe(200);
   });
 
   it('演示账号不产生通知（虚构数据没人会登录去看）', async () => {
@@ -258,6 +261,57 @@ describe('我的通知', () => {
     // 直接查那个 handle 的通知：没有账号，也就不该有任何事件。
     const count = Number(server.store.db.prepare('SELECT count(*) AS c FROM post_events WHERE authorHandle = ?').get(authorHandle)!.c);
     expect(count).toBe(0);
+  });
+
+  it('文章被改判驳回后，举报通知不再给链接（详情页 404）', async () => {
+    const alice = await account('alice');
+    const bob = await account('bob');
+    const post = await alice.call('POST', '/api/posts', { kind: 'community', title: '先上线再驳回', summary: 's', body: 'b' });
+    const postId = (await post.json() as { id: string }).id;
+    await server.app.request(`/api/admin/posts/${postId}/review`, {
+      method: 'POST', headers: bearer, body: JSON.stringify({ status: 'approved' }),
+    });
+    const report = await bob.call('POST', '/api/reports', { targetType: 'post', targetId: postId, reason: '广告' });
+    const reportId = (await report.json() as { id: string }).id;
+
+    // 把文章改判成驳回（相当于下架后又审核成 rejected）。
+    await server.app.request(`/api/admin/posts/${postId}/review`, {
+      method: 'POST', headers: bearer, body: JSON.stringify({ status: 'rejected', reason: '复核后认为不合规' }),
+    });
+    await server.app.request(`/api/admin/reports/${reportId}/resolve`, {
+      method: 'POST', headers: bearer, body: JSON.stringify({ status: 'resolved' }),
+    });
+
+    const item = (await notifications(bob)).items.find(entry => entry.kind === 'report')!;
+    expect(item.href).toBeNull();
+  });
+
+  it('同 hostname 的两个站点各归各的：/b 的投稿不会指到 /a', async () => {
+    // 两个站同 hostname 不同路径，slug 由认领规则决定。
+    const imported = await server.app.request('/api/admin/import', {
+      method: 'POST', headers: bearer, body: JSON.stringify({
+        stations: [
+          { slug: 'sub-a', name: 'A 站', description: 'd', url: 'https://same.example.com/a', rechargeThreshold: null, paymentMethods: [], offers: [] },
+          { slug: 'sub-b', name: 'B 站', description: 'd', url: 'https://same.example.com/b', rechargeThreshold: null, paymentMethods: [], offers: [] },
+        ],
+        posts: [],
+      }),
+    });
+    expect(imported.status).toBe(200);
+    // 直接造一条指向 /b 的站内站点投稿并审核通过，看通知链接落在哪个 slug。
+    const alice = await account('alice');
+    const suggested = await alice.call('POST', '/api/stations/suggest', {
+      name: 'B 站更新', url: 'https://same.example.com/b', description: 'd', rechargeThreshold: null, paymentMethods: [], offers: [],
+    });
+    expect(suggested.status).toBe(200);
+    const id = (await suggested.json() as { id: string }).id;
+    await server.app.request(`/api/admin/submissions/${id}/review`, {
+      method: 'POST', headers: bearer, body: JSON.stringify({ status: 'approved' }),
+    });
+
+    const item = (await notifications(alice)).items.find(entry => entry.kind === 'submission')!;
+    // /b 的更新只能指向 /b 的服务站（sub-b），不能因为同 hostname 指到 /a。
+    expect(item.href).toBe('/stations/sub-b');
   });
 
   it('未登录不能读通知', async () => {

@@ -14,7 +14,7 @@ import { Store } from './database.ts';
 import type { PostRecord, StationRecord } from './database.ts';
 // 只借一个纯函数算 hostname，避免和 submissions.ts 之间形成运行时循环依赖：
 // submissions.ts 不 import service.ts，这个方向是单向的。
-import { hostnameOf } from './submissions.ts';
+import { findStation, hostnameOf, materializedPostId } from './submissions.ts';
 
 const dayMs = 86400000;
 const shanghaiDate = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit' });
@@ -673,12 +673,12 @@ export class Service {
     // 混进来会让作者以为自己的稿子被拒了。也不限定 channel：本人用 Agent 凭证
     // 提交的稿子同样记在 actorHandle 上，只看 web 会把那条通道的结果藏起来。
     const submissions = this.store.db.prepare(
-      `SELECT id, kind, status, reason, payload, reviewedAt FROM submissions
+      `SELECT id, kind, channel, originKey, status, reason, payload, reviewedAt FROM submissions
        WHERE actorHandle = ? AND status IN ('approved','rejected') AND reviewedAt IS NOT NULL
        ORDER BY reviewedAt DESC`,
     ).all(this.user) as Array<{
-      id: string; kind: 'station' | 'model' | 'post'; status: SubmissionStatus;
-      reason: string | null; payload: string; reviewedAt: string;
+      id: string; kind: 'station' | 'model' | 'post'; channel: string; originKey: string;
+      status: SubmissionStatus; reason: string | null; payload: string; reviewedAt: string;
     }>;
     for (const row of submissions) {
       const payload = JSON.parse(row.payload) as { title?: string; name?: string; slug?: string; url?: string };
@@ -693,7 +693,7 @@ export class Service {
         detail: approved ? null : row.reason ?? null,
         // 通过不代表现在还在线：文章可能随后被下架/撤下，模型可能被删。
         // 生成链接前确认目标真的可访问，否则通知里是个 404。
-        href: approved ? this.liveSubmissionHref(row.kind, row.id, payload) : null,
+        href: approved ? this.liveSubmissionHref(row, payload) : null,
         at: row.reviewedAt,
       });
     }
@@ -760,7 +760,9 @@ export class Service {
   private reportHref(targetType: 'post' | 'station' | 'comment', targetId: string): string | null {
     // 只给「现在还能打开」的链接。被举报的内容很可能已经因为这条举报被下架了，
     // 此时回链接就是回一个 404。
-    if (targetType === 'post') return this.store.get('post', targetId) ? `/posts/${targetId}` : null;
+    // 文章要是 approved 才可读：被驳回/待审的文章，详情页对外是 404。
+    const post = this.store.get('post', targetId);
+    if (targetType === 'post') return post && post.status === 'approved' ? `/posts/${targetId}` : null;
     if (targetType === 'station') return this.store.get('station', targetId) ? `/stations/${targetId}` : null;
     // 评论没有独立页面，跳回它所属的文章/站点才是可用的链接；这里拿不到父目标，
     // 宁可不给链接，也不给一个点进去 404 的链接。
@@ -769,11 +771,11 @@ export class Service {
 
   /** 投稿通过后的落地链接，同样要求目标此刻在线。 */
   private liveSubmissionHref(
-    kind: 'station' | 'model' | 'post',
-    submissionId: string,
+    row: { id: string; kind: 'station' | 'model' | 'post'; channel: string; originKey: string },
     payload: { slug?: string; url?: string },
   ): string | null {
-    const slug = this.materializedSlug({ id: submissionId, kind, status: 'approved' }, payload);
+    const kind = row.kind;
+    const slug = this.materializedSlug({ ...row, status: 'approved' }, payload);
     if (!slug) return null;
     // 模型/站点/文章的存在性各查各的表：materializedSlug 只保证「物化过」，
     // 不保证「现在还挂着」。
@@ -784,22 +786,33 @@ export class Service {
   }
 
   /** 只对已通过的投稿算：待审/被拒的还没物化，给了链接也是 404。 */
+  /**
+   * 投稿物化后的实体 slug/id。
+   *
+   * 三条通道的 id 规则不一样，必须复用 submissions.ts 的同一份实现：
+   * - 文章：站内投稿是投稿 id 本身，agent/飞书是 `sub-<投稿id>` 或 `feishu-<originKey>`
+   * - 站点：slug 由认领规则决定（同 hostname 不同路径可能是两个站，按 hostname
+   *   随便挑一个会指错）
+   * 自己再写一遍等于留一份会静默分叉的副本——抄错时查不到行，链接就成了 404。
+   */
   private materializedSlug(
-    row: { id: string; kind: string; status: string },
+    row: { id: string; kind: string; status: string; channel?: string; originKey?: string },
     payload: { slug?: string; url?: string },
   ): string | null {
     if (row.status !== 'approved') return null;
     if (row.kind === 'model') return payload.slug ?? null;
-    // 文章：站内投稿（channel=web）直接用自己的 id 当文章 id；
-    // 飞书/Agent 走 `sub-<投稿id>` 或 `feishu-<originKey>`（见 submissions.ts 的 materialize）。
-    // 这里只服务 web 渠道，所以就是投稿 id 本身——但仍要确认实体真的存在，
-    // 否则给出去的是一个 404 链接。
-    if (row.kind === 'post') return this.store.get('post', row.id) ? row.id : null;
-    // 站点：slug 由 hostname 决定，用同一个 hostnameOf 重新算一遍再查。
-    const hostname = hostnameOf(payload.url ?? null);
-    if (hostname === null) return null;
-    const found = this.store.all('station').find(station => hostnameOf(station.url ?? null) === hostname);
-    return found?.slug ?? null;
+    if (row.kind === 'post') {
+      // 需要 channel/originKey 才能算对 id；调用方都有（来自 submissions 行）。
+      if (!row.channel || !row.originKey) return null;
+      const id = materializedPostId(this.store, {
+        id: row.id, kind: 'post', channel: row.channel as never, originKey: row.originKey,
+      } as never);
+      return this.store.get('post', id) ? id : null;
+    }
+    // 站点：认领规则与 materialize 完全一致，直接调它。
+    if (!row.channel || !row.originKey) return null;
+    const claimed = findStation(this.store, { channel: row.channel as never, originKey: row.originKey }, payload.url ?? '');
+    return claimed?.slug ?? null;
   }
 
   getMyPosts(query: PaginationQuery) {
