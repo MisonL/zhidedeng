@@ -187,6 +187,10 @@ export function applyPurge(store: ReturnType<typeof openStore>, plan: PurgePlan)
          OR (targetType = 'comment' AND NOT EXISTS (SELECT 1 FROM comments WHERE comments.id = reports.targetId))`,
     ).run();
 
+    if (plan.posts.length > 0) {
+      // 演示文章的下架/恢复流水一并清掉：文章都删了，流水指向的是不存在的 id。
+      store.db.prepare(`DELETE FROM post_events WHERE postId IN (${inList(plan.posts)})`).run(...plan.posts);
+    }
     if (plan.stations.length > 0 || plan.posts.length > 0) {
       for (const table of ['votes', 'favorites']) {
         store.db.prepare(`DELETE FROM ${table} WHERE (targetType = 'station' AND targetId IN (${inList(plan.stations)})) OR (targetType = 'post' AND targetId IN (${inList(plan.posts)}))`)
@@ -199,6 +203,8 @@ export function applyPurge(store: ReturnType<typeof openStore>, plan: PurgePlan)
       for (const table of ['votes', 'favorites', 'checkins', 'comment_writes']) {
         store.db.prepare(`DELETE FROM ${table} WHERE userHandle IN (${inList(plan.users)})`).run(...plan.users);
       }
+      // post_events 用 authorHandle 而不是 userHandle（它记的是「谁的文章」）。
+      store.db.prepare(`DELETE FROM post_events WHERE authorHandle IN (${inList(plan.users)})`).run(...plan.users);
     }
     if (commentWhere !== null) {
       store.db.prepare(`DELETE FROM comments WHERE ${commentWhere}`).run(...commentParams);

@@ -260,3 +260,23 @@ describe('一句话反馈', () => {
     expect(() => applyPurge(store, again)).not.toThrow();
   });
 });
+
+describe('通知流水', () => {
+  it('演示文章的下架/恢复流水与演示账号的流水都会被清掉', () => {
+    const store = demoStore();
+    const demoPost = store.all('post').find(post => post.source === 'demo')!;
+    const demoUser = store.all('user').find(user => user.handle.startsWith('demo-'))!;
+    const insert = store.db.prepare('INSERT INTO post_events (postId, authorHandle, action, reason, at) VALUES (?,?,?,NULL,?)');
+    // 演示文章 + 真实作者：只能靠 postId 那条路清掉。
+    insert.run(demoPost.id, 'realuser', 'removed', at.toISOString());
+    // 演示账号 + 真实文章：只能靠 authorHandle 那条路清掉。
+    insert.run('real-post', demoUser.handle, 'restored', at.toISOString());
+    // 两者都不沾的，必须留下。
+    insert.run('real-post', 'realuser', 'removed', at.toISOString());
+
+    applyPurge(store, planPurge(store));
+
+    const left = store.db.prepare('SELECT postId, authorHandle FROM post_events').all() as Array<{ postId: string; authorHandle: string }>;
+    expect(left).toEqual([{ postId: 'real-post', authorHandle: 'realuser' }]);
+  });
+});
