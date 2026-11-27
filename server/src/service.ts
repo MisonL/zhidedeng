@@ -627,11 +627,12 @@ export class Service {
    */
   getMySubmissions(query: PaginationQuery) {
     const rows = this.store.db.prepare(
-      `SELECT id, kind, status, reason, payload, createdAt, reviewedAt
+      `SELECT id, kind, channel, originKey, status, reason, payload, createdAt, reviewedAt
        FROM submissions WHERE channel = 'web' AND actorHandle = ?
        ORDER BY createdAt DESC, rowid DESC`,
     ).all(this.user) as unknown as {
-      id: string; kind: 'station' | 'model' | 'post'; status: SubmissionStatus; reason: string | null;
+      id: string; kind: 'station' | 'model' | 'post'; channel: string; originKey: string;
+      status: SubmissionStatus; reason: string | null;
       payload: string; createdAt: string; reviewedAt: string | null;
     }[];
     // 物化后的 slug 要按各自的规则查，不能从 payload 里猜：
