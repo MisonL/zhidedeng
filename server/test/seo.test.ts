@@ -141,6 +141,15 @@ describe('服务端 SEO', () => {
     }
   });
 
+  it('畸形百分号编码不返回 500', async () => {
+    // decodeURIComponent('%E0%A4%A') 抛 URIError。那是 400 级的输入错误，
+    // 不该变成 500——不能因为有人在地址栏乱敲就整站报错。
+    for (const path of ['/posts/%E0%A4%A', '/stations/%FF%FE', '/models/%ZZ']) {
+      const response = await server.app.request(path);
+      expect([200, 400]).toContain(response.status);
+    }
+  });
+
   it('RSS 里带控制字符的正文不会破坏 XML', async () => {
     const register = await server.app.request('/api/auth/register', {
       method: 'POST', headers: json, body: JSON.stringify({ username: 'ctrl', password: PASSWORD, nickname: '控制符' }),
