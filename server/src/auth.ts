@@ -10,6 +10,16 @@ const COOKIE = /(?:^|;\s*)session=([A-Za-z0-9_-]{43})(?:;|$)/;
 
 // 账号和种子用户共用 entities 的 user 行。用户名不允许连字符，所以永远撞不上种子的 demo-* 和导入文章的作者。
 export const USERNAME = /^[A-Za-z0-9_]{3,20}$/;
+
+/**
+ * 保留名：程序内部用来表示「没有作者」的哨兵，不允许真人注册。
+ *
+ * `submissions.ts` 在飞书/导入文章既没有 actorHandle 也没有 authorHandle 时
+ * 会写 `unknown`（新数据写 `unknown-feishu`）。这些名字本身符合 USERNAME 规则，
+ * 谁先注册到，谁就会收到**别人文章**被下架/恢复的通知（标题全露）。
+ * 与其在读取时猜「这行是真作者还是哨兵」，不如从注册这一端禁掉。
+ */
+export const RESERVED_HANDLES = new Set(['unknown', 'unknown_feishu', 'feishu', 'anonymous', 'admin', 'root', 'system', 'demo', 'test']);
 export const INITIAL_TOKENS = 120;
 
 const WEAK_PASSWORDS = new Set([

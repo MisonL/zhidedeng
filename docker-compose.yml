@@ -43,6 +43,10 @@ services:
       # 想在测试机上演示，显式设 demo 并配一个新的数据卷。
       SITE_MODE: ${SITE_MODE:-production}
       INVITE_CODES: ${INVITE_CODES:-}
+      # 本站对外域名，用于 SEO 的 canonical / og:url / sitemap。
+      # 容器里请求自身的 origin 是 0.0.0.0 或服务名，写进 sitemap 就是死链，
+      # 所以公网部署必须显式配成 https://你的域名。
+      PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:-}
     volumes:
       - zhidedeng-data:/data
     #日志默认 json-file且无上限：跑久了会把磁盘写满，而且没人会注意到。

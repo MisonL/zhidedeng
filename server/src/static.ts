@@ -54,17 +54,21 @@ export function mountWeb<E extends Env>(app: Hono<E>, webRoot: string, store: St
     const { path } = c.req;
     if (path === '/api' || path.startsWith('/api/')) return next();
 
-    const found = await file(c, notFound);
-    // 首页由 serveStatic 直接命中磁盘上的 index.html，走不到下面的回退分支；
-    // 但它同样需要注入站点级 meta（canonical / OG），否则首页没有任何 og 标签。
+    // 首页与 /index.html 直接走注入分支，**绝不能先交给 serveStatic**：
+    // 它会按磁盘上那份 index.html 设好 content-length，我们随后把正文换成
+    // 注入了 meta 的更长版本，浏览器就会按旧长度截断（实测声明 1188、实发 1652，
+    // 页面被切在半截）。所以先判 shell，再查静态文件。
     const isShell = path === '/' || path === '/index.html';
-    if (found && !isShell) {
-      const cache = path.startsWith('/assets/') ? IMMUTABLE : SHORT;
-      found.headers.set('cache-control', cache);
-      for (const [name, value] of SECURITY_HEADERS) found.headers.set(name, value);
-      return found;
+    if (!isShell) {
+      const found = await file(c, notFound);
+      if (found) {
+        const cache = path.startsWith('/assets/') ? IMMUTABLE : SHORT;
+        found.headers.set('cache-control', cache);
+        for (const [name, value] of SECURITY_HEADERS) found.headers.set(name, value);
+        return found;
+      }
+      if (path.startsWith('/assets/')) return next();
     }
-    if (!found && path.startsWith('/assets/')) return next();
 
     // 回退到 SPA（或首页壳子），带上这条路径对应的 meta。
     const meta = pageMeta(store, path);
@@ -72,6 +76,7 @@ export function mountWeb<E extends Env>(app: Hono<E>, webRoot: string, store: St
     const headers: Record<string, string> = { 'content-type': 'text/html; charset=utf-8', 'cache-control': NO_CACHE };
     for (const [name, value] of SECURITY_HEADERS) headers[name] = value;
     // HEAD 不需要正文，但 Hono 的 body 类型不收 null：给空串。
+    // content-length 由 c.body 按实际字符串重新算（不要手动设）。
     return c.body(c.req.method === 'HEAD' ? '' : html, 200, headers);
   });
 }

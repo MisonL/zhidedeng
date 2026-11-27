@@ -258,9 +258,19 @@ describe('我的通知', () => {
     insert.run('ghost-1', 'unknown', 'removed', null, '别人的文章标题', clock.toISOString());
     insert.run('ghost-2', 'unknown-feishu', 'removed', null, '别人的文章标题', clock.toISOString());
 
-    // 真人注册 'unknown' 也读不到任何通知：哨兵行不派发。
-    const squat = await account('unknown');
-    expect((await notifications(squat)).items).toEqual([]);
+    // 抢注 'unknown' 已经不是一条路：注册端直接拒。
+    const squat = await server.app.request('/api/auth/register', {
+      method: 'POST', headers: json,
+      body: JSON.stringify({ username: 'unknown', password: PASSWORD, nickname: '抢注' }),
+    });
+    expect(squat.status).toBe(400);
+    // 带连字符的名字本来也不符合 USERNAME。
+    const dashed = await server.app.request('/api/auth/register', {
+      method: 'POST', headers: json,
+      body: JSON.stringify({ username: 'unknown-feishu', password: PASSWORD, nickname: '抢注' }),
+    });
+    expect(dashed.status).toBe(400);
+    // 普通账号看不到任何哨兵流水。
     expect((await notifications(alice)).items).toEqual([]);
   });
 

@@ -20,6 +20,12 @@ import { recordPostEvent } from './moderation.ts';
 const dayMs = 86400000;
 const shanghaiDate = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit' });
 
+/** 取 `post:<n>` 形态 id 里的数字；不是这种形态时返回 null。 */
+function numericId(id: string): number | null {
+  const match = /:(\d+)$/.exec(id);
+  return match ? Number(match[1]) : null;
+}
+
 export function paginate<T>(items: T[], query: PaginationQuery) {
   const page = query.page ?? 1;
   const pageSize = query.pageSize ?? 20;
@@ -727,6 +733,8 @@ export class Service {
     // 排除哨兵：飞书/导入文章在既无 actorHandle 也无 authorHandle 时落 'unknown-feishu'，
     // 老数据里还留着 'unknown'。后者**符合注册规则**，谁注册到这个用户名就能读到
     // 别人文章被下架的标题——所以这两类一律不派发通知。
+    // 哨兵的 authorHandle 永远不派发。注册端已禁止真人占用这些名字
+    // （见 auth.ts 的 RESERVED_HANDLES），所以这里直接排除即可。
     const events = this.store.db.prepare(
       `SELECT id, postId, action, reason, title, at FROM post_events
        WHERE authorHandle = ? AND authorHandle NOT IN ('unknown','unknown-feishu')
@@ -757,7 +765,16 @@ export class Service {
     // 新的在前；同一时刻按 id 兜底，保证全序稳定（翻页不重复不丢）。
     // 降序是有意的：同一毫秒内「下架 → 恢复」，后发生的那条流水主键更大，
     // 必须排在前面，否则同毫秒事件会被渲染成「先恢复、后下架」。
-    items.sort((a, b) => (a.at === b.at ? b.id.localeCompare(a.id) : a.at < b.at ? 1 : -1));
+    //
+    // 文章事件的主键是自增数字，必须**按数值**比而不是字典序：
+    // 字典序下 `post:10` < `post:9`，第 10 条会排到第 9 条后面——同一毫秒
+    // 事件一多就乱序。其余两类没有数字后缀，仍按字符串比。
+    items.sort((a, b) => {
+      if (a.at !== b.at) return a.at < b.at ? 1 : -1;
+      const left = numericId(a.id);
+      const right = numericId(b.id);
+      return left === null || right === null ? b.id.localeCompare(a.id) : right - left;
+    });
     return paginate(items, query);
   }
 

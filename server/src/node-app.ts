@@ -136,6 +136,9 @@ export function createApp(options: { dbPath?: string; now?: () => Date; syncToke
   // 显式传入的选项优先（测试用），否则按生产 + TLS_ENABLED 决定。
   const cookieSecure = options.secureCookie ?? (production && process.env.TLS_ENABLED === '1');
   const app = buildApp(store, now, { secureCookie: cookieSecure, syncToken: usable, inviteCodes, trustedProxies, webRoot: options.webRoot, siteMode });
-  if (options.webRoot) mountWeb(app, options.webRoot, store, options.publicOrigin);
+  // PUBLIC_ORIGIN 用于 SEO 的绝对 URL。容器/反代后面请求自身的 origin 是内网地址，
+  // 没有它 sitemap 里全是 127.0.0.1 或容器名，搜索引擎拿到就是一堆死链。
+  const publicOrigin = options.publicOrigin ?? (process.env.PUBLIC_ORIGIN || undefined);
+  if (options.webRoot) mountWeb(app, options.webRoot, store, publicOrigin);
   return { app, db, store, siteMode };
 }

@@ -9,7 +9,7 @@ import { z, ZodError } from 'zod';
 import { API_ROUTES, MAX_RATE, MIN_RATE, PROFILE_LIMITS } from '@zhidedeng/shared';
 import type { ApiContracts, ApiRouteName, ChangePasswordRequest, LoginRequest, RegisterRequest } from '@zhidedeng/shared';
 import { modelSchema, rateBasis } from '@zhidedeng/shared/submission';
-import { AttemptLimiter, burnPasswordCheck, clearedSessionCookie, createSession, deleteOtherSessions, deleteSession, hashPassword, INITIAL_TOKENS, isWeakPassword, sessionCookie, sessionHandle, USERNAME, verifyPassword } from './auth.ts';
+import { AttemptLimiter, burnPasswordCheck, clearedSessionCookie, createSession, deleteOtherSessions, deleteSession, hashPassword, INITIAL_TOKENS, isWeakPassword, RESERVED_HANDLES, sessionCookie, sessionHandle, USERNAME, verifyPassword } from './auth.ts';
 import { agentTokenSchema, createAgentToken, listAgentTokens, revokeAgentToken } from './agent-tokens.ts';
 import { agentHandle, agentTokenHash } from './agent-auth.ts';
 import { AgentApi } from './agent-api.ts';
@@ -61,7 +61,8 @@ const identifier = z.string().trim().min(1).max(200);
 const target = { targetType: z.enum(['post', 'station']), targetId: identifier };
 const kind = z.enum(['deal', 'review', 'community', 'guide']);
 const nickname = z.string().trim().min(1).max(PROFILE_LIMITS.nickname);
-const registerSchema: z.ZodType<RegisterRequest> = z.strictObject({ username: z.string().regex(USERNAME), password: z.string().min(8).max(128), nickname: nickname.optional() });
+// 保留名在 schema 这一层就挡掉：程序内部用它表示「没有作者」，真人占用会串通知。
+const registerSchema: z.ZodType<RegisterRequest> = z.strictObject({ username: z.string().regex(USERNAME).refine(name => !RESERVED_HANDLES.has(name.toLowerCase()), '这个用户名无法使用'), password: z.string().min(8).max(128), nickname: nickname.optional() });
 const loginSchema: z.ZodType<LoginRequest> = z.strictObject({ username: z.string().min(1).max(100), password: z.string().min(1).max(128) });
 
 const changePasswordSchema: z.ZodType<ChangePasswordRequest> = z.strictObject({ currentPassword: z.string().min(1).max(128), newPassword: z.string().min(8).max(128) });

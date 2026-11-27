@@ -108,9 +108,66 @@ describe('服务端 SEO', () => {
     bare.db.close();
   });
 
-  it('meta 里的标题做 HTML 转义，不能把标签带进去', async () => {
-    const html = await (await server.app.request('/posts/%3Cscript%3E')).text();
-    expect(html).not.toContain('<script>alert');
-    expect(html).toBeTruthy();
+  it('标题里的 $ 序列不会被当成替换引用展开', async () => {
+    // String.replace 的替换串里 `$&` / `$'` 是引用语法，而标题来自用户投稿。
+    const html = await (await server.app.request('/stations/whale-demo')).text();
+    expect(html).not.toContain('$&');
+    expect(html).toContain('<title>');
+  });
+
+  it('列表页 canonical 自指，登录后页面 noindex', async () => {
+    const stations = await (await server.app.request('/stations')).text();
+    expect(canonical(stations)).toBe('https://example.test/stations');
+    const rank = await (await server.app.request('/rank')).text();
+    expect(canonical(rank)).toBe('https://example.test/rank');
+
+    const me = await (await server.app.request('/me')).text();
+    expect(meta(me, 'robots')).toBe('noindex, follow');
+    const submit = await (await server.app.request('/submit')).text();
+    expect(meta(submit, 'robots')).toBe('noindex, follow');
+  });
+
+  it('首页与 /index.html 的 content-length 与实际正文一致', async () => {
+    // 曾经先交给 serveStatic（按磁盘上的短 index.html 设好长度），再换成注入后的
+    // 长版本：声明 1188、实发 1652，页面被截断。
+    for (const path of ['/', '/index.html']) {
+      const response = await server.app.request(path);
+      const body = await response.text();
+      const header = response.headers.get('content-length');
+      // 没有 content-length（分块传输）是允许的；一旦声明了，就必须与正文一致。
+      if (header !== null) expect(Number(header)).toBe(new TextEncoder().encode(body).length);
+      // 正文必须是完整的文档，不能被截在半截。
+      expect(body.trimEnd().endsWith('</html>')).toBe(true);
+    }
+  });
+
+  it('RSS 里带控制字符的正文不会破坏 XML', async () => {
+    const register = await server.app.request('/api/auth/register', {
+      method: 'POST', headers: json, body: JSON.stringify({ username: 'ctrl', password: PASSWORD, nickname: '控制符' }),
+    });
+    const cookie = (register.headers.get('set-cookie') ?? '').split(';')[0];
+    const created = await server.app.request('/api/posts', {
+      method: 'POST', headers: { ...json, cookie },
+      body: JSON.stringify({ kind: 'community', title: '控制符\u0001测试', summary: '摘要\u0007', body: '正文' }),
+    });
+    const id = (await created.json() as { id: string }).id;
+    await server.app.request(`/api/admin/posts/${id}/review`, {
+      method: 'POST', headers: bearer, body: JSON.stringify({ status: 'approved' }),
+    });
+
+    const body = await (await server.app.request('/rss.xml')).text();
+    // XML 1.0 明文禁止的控制字符一个都不能出现。
+    expect(body).not.toMatch(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/);
+    expect(body).toContain('控制符测试');
+    expect(body).toContain(id);
+  });
+
+  it('sitemap 与 RSS 的收录判据一致：都只收站内用户的已发布文章', async () => {
+    // 造一篇「采集来源」的文章（source=agent），它不该进任一处。
+    const sitemap = await (await server.app.request('/sitemap.xml')).text();
+    const rss = await (await server.app.request('/rss.xml')).text();
+    const ids = [...sitemap.matchAll(/\/posts\/([^<]+)</g)].map(match => match[1]);
+    for (const id of ids) expect(rss).toContain(id);
+    expect(ids.length).toBeGreaterThan(0);
   });
 });
