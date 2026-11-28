@@ -3,24 +3,42 @@ import { api } from '../api';
 import AsyncView from '../components/AsyncView';
 import Comments from '../components/Comments';
 import FavoriteButton from '../components/FavoriteButton';
+import FlowerButton from '../components/FlowerButton';
 import Markdown from '../components/Markdown';
+import ReportButton from '../components/ReportButton';
+import AuthorName from '../components/AuthorName';
 import { Avatar } from '../components/visuals';
 import VoteButtons from '../components/VoteButtons';
-import { formatDate, formatRate, KIND_LABEL, SUBMISSION_LABEL } from '../format';
+import { formatDate, formatRate, isUntrustedSource, KIND_LABEL, sourceLabel } from '../format';
 import { useAsync } from '../hooks';
-import { useCatalog } from '../state';
+import { useCatalog, useMe } from '../state';
 
 export default function PostDetail() {
   const { id = '' } = useParams();
   const state = useAsync((signal) => api.getPost(id, signal), [id]);
   const { stationBySlug, modelBySlug } = useCatalog();
+  const me = useMe();
+  const label = sourceLabel(state.data?.source);
 
   return (
     <>
       <title>{`${state.data?.title ?? '文章'} · 什么值得蹬`}</title>
-      {state.data?.source === 'submission' && <p className="demo-notice" role="note">{SUBMISSION_LABEL}，不构成消费建议</p>}
+      {label && <p className="demo-notice" role="note">{label}，不构成消费建议</p>}
       {state.data?.status === 'pending' && <p className="demo-notice" role="note">审核中，目前只有你自己看得到</p>}
-      {state.data?.status === 'rejected' && <p className="demo-notice" role="note">未通过审核，目前只有你自己看得到</p>}
+      {/* 还在审核的那一版不进正文：读者看到的一直是当前线上版本，
+          作者需要知道「我提交的修改在排队」，否则会以为没提交成功。 */}
+      {state.data?.pendingRevision && (
+        <p className="demo-notice" role="note">
+          你提交的修改正在审核，这一页显示的仍是当前线上版本。
+          <Link to={`/posts/${id}/edit`}>查看或撤回修改</Link>
+        </p>
+      )}
+      {state.data?.status === 'rejected' && (
+        <p className="demo-notice" role="note">
+          未通过审核，目前只有你自己看得到
+          {state.data.reviewReason ? `：${state.data.reviewReason}` : ''}
+        </p>
+      )}
       <article className="module page article">
         <AsyncView state={state}>
           {(post) => {
@@ -32,20 +50,41 @@ export default function PostDetail() {
                   <span className={`tag tag-${post.kind}`}>{KIND_LABEL[post.kind]}</span>
                   <h1 className="article-title">{post.title}</h1>
                   <p className="article-meta">
-                    <Avatar nickname={post.author.nickname} size={24} />
-                    <span>{post.author.nickname}</span>
+                    <Avatar nickname={post.author.nickname} avatar={post.author.avatar} size={24} />
+                    <AuthorName author={post.author} />
                     <time className="num" dateTime={post.publishedAt}>{formatDate(post.publishedAt)}</time>
                     {station && <Link to={`/stations/${station.slug}`}>{station.name}{station.lowestRate !== null && ` · 低至 ${formatRate(station.lowestRate)}`}</Link>}
                     {model && <Link to={`/models/${model.slug}`}>{model.name}</Link>}
                   </p>
                 </header>
                 <p className="article-summary">{post.summary}</p>
-                {post.source === 'submission'
+                {isUntrustedSource(post.source)
                   ? <p className="article-plain">{post.body}</p>
                   : <Markdown>{post.body}</Markdown>}
                 <footer className="article-foot">
                   <VoteButtons targetType="post" targetId={post.id} votes={post.votes} currentUserVote={post.currentUserVote} />
                   <FavoriteButton targetType="post" targetId={post.id} favorited={post.favorited} favoriteCount={post.favoriteCount} />
+                  {/* 只在已通过的公开文章上给举报入口：待审的还没公开，别人看不到。
+                      自己的文章不显示——那不是举报，是撤下，入口在「我的分享」。 */}
+                  {post.status === 'approved' && me.data?.handle !== post.author.handle && (
+                    <ReportButton targetType="post" targetId={post.id} />
+                  )}
+                  {/* 送花：只给别人的、已上线的文章。自己给自己送花没有意义，
+                      未上线的文章也不该出现在别人的阅读列表里。
+                      作者已注销时也不给：服务端会回 409 AUTHOR_GONE（花没人收得到），
+                      而全站的规则是「不给点了必然报错的按钮」。注销后的署名统一是
+                      「已注销用户·xxxx」，前端按这个前缀判断即可。 */}
+                  {post.status === 'approved' && me.data && me.data.handle !== post.author.handle
+                    && !post.author.nickname.startsWith('已注销用户') && (
+                    <FlowerButton postId={post.id} />
+                  )}
+                  {/* 作者本人才能编辑，且只有已上线的文章有「修改」可言。 */}
+                  {post.status === 'approved' && me.data?.handle === post.author.handle && (
+                    <Link className="text-btn" to={`/posts/${post.id}/edit`}>编辑</Link>
+                  )}
+                  {post.revisedAt && (
+                    <span className="article-revised num">更新于 {formatDate(post.revisedAt)}</span>
+                  )}
                 </footer>
               </>
             );

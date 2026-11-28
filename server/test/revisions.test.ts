@@ -1,0 +1,579 @@
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { createApp } from '../src/node-app.ts';
+
+const PASSWORD = 'correct-horse-battery';
+const json = { 'content-type': 'application/json' };
+const TOKEN = 'admin-token-for-tests-0123456789abcdef';
+const bearer = { ...json, authorization: `Bearer ${TOKEN}` };
+
+let clock: Date;
+let server: ReturnType<typeof createApp>;
+beforeEach(() => {
+  clock = new Date('2026-11-07T02:00:00Z');
+  server = createApp({ dbPath: ':memory:', now: () => clock, syncToken: TOKEN });
+});
+afterEach(() => server.db.close());
+
+async function account(username: string) {
+  const response = await server.app.request('/api/auth/register', {
+    method: 'POST', headers: json, body: JSON.stringify({ username, password: PASSWORD, nickname: username }),
+  });
+  expect(response.status).toBe(200);
+  const cookie = (response.headers.get('set-cookie') ?? '').split(';')[0];
+  return {
+    call: (method: string, path: string, body?: unknown) => server.app.request(path, {
+      method, headers: { ...json, cookie }, ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    }),
+  };
+}
+type Caller = Awaited<ReturnType<typeof account>>;
+
+/** 造一篇已上线的文章，返回它的 id 与当前版本。 */
+async function published(who: Caller, title = '初版标题') {
+  const created = await who.call('POST', '/api/posts', { kind: 'community', title, summary: '初版摘要', body: '初版正文' });
+  expect(created.status).toBe(200);
+  const id = (await created.json() as { id: string }).id;
+  const reviewed = await server.app.request(`/api/admin/posts/${id}/review`, {
+    method: 'POST', headers: bearer, body: JSON.stringify({ status: 'approved' }),
+  });
+  expect(reviewed.status).toBe(200);
+  return id;
+}
+const postOf = async (id: string) => (await (await server.app.request(`/api/posts/${id}`)).json()) as
+  { kind: string; title: string; body: string; contentVersion?: number; publishedAt: string; revisedAt?: string | null; status: string };
+const revisionOf = async (who: Caller, id: string) => await (await who.call('GET', `/api/posts/${id}/revision`)).json() as {
+  revision: { submissionId: string; status: string; payload: { title: string }; reviewReason: string | null } | null;
+};
+
+describe('编辑已发布文章', () => {
+  it('提交修改后线上仍是旧版，作者能看到待审状态', async () => {
+    const alice = await account('alice');
+    const id = await published(alice);
+    const before = await postOf(id);
+
+    const submitted = await alice.call('PUT', `/api/posts/${id}/revision`, {
+      kind: 'community', title: '改过的标题', summary: '改过的摘要', body: '改过的正文', baseVersion: 1,
+    });
+    expect(submitted.status).toBe(200);
+
+    // 关键断言：**内容**没变，而不是只看 status。只看 status 的话，
+    // 物化没生效也照样绿——那正是这个功能最核心的保证。
+    const after = await postOf(id);
+    expect(after.title).toBe(before.title);
+    expect(after.body).toBe(before.body);
+    expect(after.contentVersion ?? 1).toBe(1);
+
+    // 作者视角：读得到自己那一版，且状态是 pending。
+    const mine = await revisionOf(alice, id);
+    expect(mine.revision?.status).toBe('pending');
+    expect(mine.revision?.payload.title).toBe('改过的标题');
+  });
+
+  it('审核通过后内容切换、版本 +1，publishedAt 不变', async () => {
+    const alice = await account('alice');
+    const id = await published(alice);
+    const before = await postOf(id);
+    const submitted = await alice.call('PUT', `/api/posts/${id}/revision`, {
+      kind: 'community', title: '改过的标题', summary: '改过的摘要', body: '改过的正文', baseVersion: 1,
+    });
+    const submissionId = (await submitted.json() as { submissionId: string }).submissionId;
+    clock = new Date(clock.getTime() + 60_000);
+    await server.app.request(`/api/admin/posts/${submissionId}/review`, {
+      method: 'POST', headers: bearer, body: JSON.stringify({ status: 'approved' }),
+    });
+
+    const after = await postOf(id);
+    expect(after.title).toBe('改过的标题');
+    expect(after.body).toBe('改过的正文');
+    expect(after.contentVersion).toBe(2);
+    // publishedAt 必须严格等于编辑前那个字符串：改一篇老文不该让它重新上榜、
+    // 跳进 RSS 最新、把 sitemap 的 lastmod 往后推。
+    expect(after.publishedAt).toBe(before.publishedAt);
+    expect(after.revisedAt).toBeTruthy();
+  });
+
+  it('驳回后线上内容逐字段不变，作者能看到理由', async () => {
+    const alice = await account('alice');
+    const id = await published(alice);
+    const before = await postOf(id);
+    const submitted = await alice.call('PUT', `/api/posts/${id}/revision`, {
+      kind: 'community', title: '会被拒的标题', summary: '摘要', body: '正文', baseVersion: 1,
+    });
+    const submissionId = (await submitted.json() as { submissionId: string }).submissionId;
+    clock = new Date(clock.getTime() + 60_000);
+    await server.app.request(`/api/admin/posts/${submissionId}/review`, {
+      method: 'POST', headers: bearer, body: JSON.stringify({ status: 'rejected', reason: '正文里写了绝对价格' }),
+    });
+
+    const after = await postOf(id);
+    expect(after.title).toBe(before.title);
+    expect(after.body).toBe(before.body);
+    expect(after.contentVersion ?? 1).toBe(1);
+
+    const mine = await revisionOf(alice, id);
+    expect(mine.revision?.status).toBe('rejected');
+    expect(mine.revision?.reviewReason).toBe('正文里写了绝对价格');
+    // 驳回后预填的是被拒那一版，不是线上版。
+    expect(mine.revision?.payload.title).toBe('会被拒的标题');
+  });
+
+  it('同一篇同时只能有一版待审；版本落后会被拒', async () => {
+    const alice = await account('alice');
+    const id = await published(alice);
+    const body = { kind: 'community', title: '第一次改', summary: 's', body: 'b', baseVersion: 1 };
+    expect((await alice.call('PUT', `/api/posts/${id}/revision`, body)).status).toBe(200);
+    const again = await alice.call('PUT', `/api/posts/${id}/revision`, { ...body, title: '第二次改' });
+    expect(again.status).toBe(409);
+    expect(await again.json()).toMatchObject({ error: { code: 'REVISION_PENDING' } });
+
+    // 撤回之后再提交就通了。
+    expect((await alice.call('DELETE', `/api/posts/${id}/revision`)).status).toBe(200);
+    expect((await alice.call('PUT', `/api/posts/${id}/revision`, { ...body, title: '撤回后再改' })).status).toBe(200);
+
+    // 反过来：先让一版通过把 contentVersion 推到 2，再用 baseVersion=1 提交。
+    const pending = await revisionOf(alice, id);
+    clock = new Date(clock.getTime() + 60_000);
+    await server.app.request(`/api/admin/posts/${pending.revision!.submissionId}/review`, {
+      method: 'POST', headers: bearer, body: JSON.stringify({ status: 'approved' }),
+    });
+    const stale = await alice.call('PUT', `/api/posts/${id}/revision`, { ...body, baseVersion: 1 });
+    expect(stale.status).toBe(409);
+    expect(await stale.json()).toMatchObject({ error: { code: 'STALE_REVISION' } });
+  });
+
+  it('别人不能编辑、撤回我的文章，也读不到我的修改', async () => {
+    const alice = await account('alice');
+    const bob = await account('bob');
+    const id = await published(alice);
+    const body = { kind: 'community', title: '改', summary: 's', body: 'b', baseVersion: 1 };
+    expect((await bob.call('PUT', `/api/posts/${id}/revision`, body)).status).toBe(404);
+    expect((await bob.call('GET', `/api/posts/${id}/revision`)).status).toBe(404);
+    expect((await bob.call('DELETE', `/api/posts/${id}/revision`)).status).toBe(404);
+    expect((await alice.call('PUT', `/api/posts/${id}/revision`, body)).status).toBe(200);
+    expect((await bob.call('DELETE', `/api/posts/${id}/revision`)).status).toBe(404);
+  });
+
+  it('编辑稿不出现在「我的投稿」里，也不会变成一篇新文章', async () => {
+    const alice = await account('alice');
+    const id = await published(alice);
+    const submitted = await alice.call('PUT', `/api/posts/${id}/revision`, {
+      kind: 'community', title: '改过的标题', summary: 's', body: 'b', baseVersion: 1,
+    });
+    const submissionId = (await submitted.json() as { submissionId: string }).submissionId;
+
+    const submissions = await (await alice.call('GET', '/api/me/submissions?pageSize=50')).json() as { items: Array<{ id: string }> };
+    expect(submissions.items.map(item => item.id)).not.toContain(submissionId);
+    // 用队列 id 也读不到「一篇文章」——**以作者身份**试，否则匿名请求必然 401/404，
+    // 这条断言就永远成立、删掉过滤也照样绿。
+    expect((await alice.call('GET', `/api/posts/${submissionId}`)).status).toBe(404);
+
+    // 「我的分享」仍只有原来那一篇，并且带着待审修改的标记。
+    const mine = await (await alice.call('GET', '/api/me/posts?pageSize=50')).json() as {
+      items: Array<{ id: string; pendingRevision?: { id: string } | null }>;
+    };
+    expect(mine.items.filter(item => item.id === id)).toHaveLength(1);
+    expect(mine.items.find(item => item.id === id)!.pendingRevision?.id).toBe(submissionId);
+  });
+
+  it('文章下架后待审修改自动作废，并说明原因', async () => {
+    const alice = await account('alice');
+    const id = await published(alice);
+    await alice.call('PUT', `/api/posts/${id}/revision`, {
+      kind: 'community', title: '改到一半', summary: 's', body: 'b', baseVersion: 1,
+    });
+    await server.app.request(`/api/admin/posts/${id}/withdraw`, { method: 'POST', headers: bearer });
+
+    const mine = await revisionOf(alice, id);
+    expect(mine.revision?.status).toBe('rejected');
+    expect(mine.revision?.reviewReason).toContain('作废');
+  });
+
+  it('编辑结果进通知，链接指回原来那篇文章', async () => {
+    const alice = await account('alice');
+    const id = await published(alice);
+    const submitted = await alice.call('PUT', `/api/posts/${id}/revision`, {
+      kind: 'community', title: '改过的标题', summary: 's', body: 'b', baseVersion: 1,
+    });
+    const submissionId = (await submitted.json() as { submissionId: string }).submissionId;
+    clock = new Date(clock.getTime() + 60_000);
+    await server.app.request(`/api/admin/posts/${submissionId}/review`, {
+      method: 'POST', headers: bearer, body: JSON.stringify({ status: 'approved' }),
+    });
+
+    const notices = await (await alice.call('GET', '/api/me/notifications?pageSize=50')).json() as {
+      items: Array<{ kind: string; title: string; href: string | null }>;
+    };
+    const notice = notices.items.find(item => item.title.includes('文章修改'))!;
+    expect(notice.title).toContain('已上线');
+    expect(notice.href).toBe(`/posts/${id}`);
+  });
+
+  it('举报被判不成立后：内容没改仍然拦住，改过一版就允许再报', async () => {
+    const alice = await account('alice');
+    const bob = await account('bob');
+    const id = await published(alice);
+    const report = await bob.call('POST', '/api/reports', { targetType: 'post', targetId: id, reason: '像广告' });
+    const reportId = (await report.json() as { id: string }).id;
+    await server.app.request(`/api/admin/reports/${reportId}/resolve`, {
+      method: 'POST', headers: bearer, body: JSON.stringify({ status: 'dismissed', note: '看过，没问题' }),
+    });
+
+    // 没改动：仍然拦住。这一半和另一半都要有，只测「改过能再报」的话，
+    // 把整个判断删掉也照样绿。
+    const blocked = await bob.call('POST', '/api/reports', { targetType: 'post', targetId: id, reason: '还是像广告' });
+    expect(blocked.status).toBe(409);
+    expect(await blocked.json()).toMatchObject({ error: { code: 'ALREADY_DISMISSED' } });
+
+    // 作者改一版并通过 → 版本涨了 → 同一人可以再报。
+    const submitted = await alice.call('PUT', `/api/posts/${id}/revision`, {
+      kind: 'community', title: '新版标题', summary: 's', body: '广告味更浓的正文', baseVersion: 1,
+    });
+    const submissionId = (await submitted.json() as { submissionId: string }).submissionId;
+    clock = new Date(clock.getTime() + 60_000);
+    await server.app.request(`/api/admin/posts/${submissionId}/review`, {
+      method: 'POST', headers: bearer, body: JSON.stringify({ status: 'approved' }),
+    });
+    const again = await bob.call('POST', '/api/reports', { targetType: 'post', targetId: id, reason: '改完还是广告' });
+    expect(again.status).toBe(200);
+  });
+
+  it('详情页只对作者挂 pendingRevision，读者拿不到', async () => {
+    const alice = await account('alice');
+    const bob = await account('bob');
+    const id = await published(alice);
+    await alice.call('PUT', `/api/posts/${id}/revision`, {
+      kind: 'community', title: '改', summary: 's', body: 'b', baseVersion: 1,
+    });
+    const mine = await (await alice.call('GET', `/api/posts/${id}`)).json() as { pendingRevision?: { id: string } | null };
+    expect(mine.pendingRevision?.id).toBeTruthy();
+    // 读者拿到这个字段会以为线上内容要变了，而他们看到的就是最终版本。
+    const other = await (await bob.call('GET', `/api/posts/${id}`)).json() as { pendingRevision?: unknown };
+    expect(other.pendingRevision ?? null).toBeNull();
+    const anon = await (await server.app.request(`/api/posts/${id}`)).json() as { pendingRevision?: unknown };
+    expect(anon.pendingRevision ?? null).toBeNull();
+  });
+
+  it('「分享 N」不把待审编辑算成一篇', async () => {
+    const alice = await account('alice');
+    const id = await published(alice);
+    const before = (await (await alice.call('GET', '/api/me')).json() as { shareCount: number }).shareCount;
+    await alice.call('PUT', `/api/posts/${id}/revision`, {
+      kind: 'community', title: '改', summary: 's', body: 'b', baseVersion: 1,
+    });
+    expect((await (await alice.call('GET', '/api/me')).json() as { shareCount: number }).shareCount).toBe(before);
+  });
+
+  it('审核通过之后再读修改，拿到的是 null 而不是一条 approved 行', async () => {
+    const alice = await account('alice');
+    const id = await published(alice);
+    const submitted = await alice.call('PUT', `/api/posts/${id}/revision`, {
+      kind: 'community', title: '改', summary: 's', body: 'b', baseVersion: 1,
+    });
+    const submissionId = (await submitted.json() as { submissionId: string }).submissionId;
+    await server.app.request(`/api/admin/posts/${submissionId}/review`, {
+      method: 'POST', headers: bearer, body: JSON.stringify({ status: 'approved' }),
+    });
+    const mine = await revisionOf(alice, id);
+    expect(mine.revision).toBeNull();
+  });
+
+  it('文章被管理员改判未通过时，待审修改一并作废', async () => {
+    const alice = await account('alice');
+    const id = await published(alice);
+    await alice.call('PUT', `/api/posts/${id}/revision`, {
+      kind: 'community', title: '改', summary: 's', body: 'b', baseVersion: 1,
+    });
+    await server.app.request(`/api/admin/posts/${id}/review`, {
+      method: 'POST', headers: bearer, body: JSON.stringify({ status: 'rejected', reason: '内容不合格' }),
+    });
+    const mine = await revisionOf(alice, id);
+    expect(mine.revision?.status).toBe('rejected');
+    expect(mine.revision?.reviewReason).toContain('作废');
+  });
+
+  it('审核台的「待审投稿」里不出现编辑稿（它在「待审文章」里带新版本标记）', async () => {
+    const alice = await account('alice');
+    const id = await published(alice);
+    const submitted = await alice.call('PUT', `/api/posts/${id}/revision`, {
+      kind: 'community', title: '改', summary: '初版摘要', body: '初版正文', baseVersion: 1,
+    });
+    const submissionId = (await submitted.json() as { submissionId: string }).submissionId;
+
+    const queue = await (await server.app.request('/api/admin/submissions?status=pending', { headers: bearer })).json() as
+      { items: Array<{ id: string }> };
+    expect(queue.items.map(item => item.id)).not.toContain(submissionId);
+
+    const posts = await (await server.app.request('/api/admin/posts?status=pending', { headers: bearer })).json() as
+      { items: Array<{ id: string; editOf?: string | null; changedFields?: string[] }> };
+    const edit = posts.items.find(item => item.id === submissionId)!;
+    expect(edit.editOf).toBe(id);
+    expect(edit.changedFields).toEqual(['title']);
+  });
+
+  it('只改类型也算修改：要升版，否则永远不能重新举报', async () => {
+    const alice = await account('alice');
+    const id = await published(alice);
+    const before = await postOf(id);
+    const submitted = await alice.call('PUT', `/api/posts/${id}/revision`, {
+      // 正文一字未改，只把「爆料」改成「评测」。
+      kind: 'review', title: before.title, summary: '初版摘要', body: '初版正文', baseVersion: 1,
+    });
+    const submissionId = (await submitted.json() as { submissionId: string }).submissionId;
+    clock = new Date(clock.getTime() + 60_000);
+    await server.app.request(`/api/admin/posts/${submissionId}/review`, {
+      method: 'POST', headers: bearer, body: JSON.stringify({ status: 'approved' }),
+    });
+    const after = await postOf(id);
+    expect(after.kind).toBe('review');
+    // 少比 kind 的话：内容「没变」→ 不升版 → 「改过才能再报」被锁死，
+    // 「更新于」也不会出现，用户看着像没保存成功。
+    expect(after.contentVersion).toBe(2);
+    expect(after.revisedAt).toBeTruthy();
+  });
+
+  it('举报后、处置前文章又改了一版：仍按「判成立时的版本」拦重复举报', async () => {
+    const alice = await account('alice');
+    const bob = await account('bob');
+    const id = await published(alice);
+    const report = await bob.call('POST', '/api/reports', { targetType: 'post', targetId: id, reason: '像广告' });
+    const reportId = (await report.json() as { id: string }).id;
+
+    // 举报之后、管理员点「驳回」之前，文章改到 v2 并上线。
+    const submitted = await alice.call('PUT', `/api/posts/${id}/revision`, {
+      kind: 'community', title: '改过的标题', summary: '改过摘要', body: '改过正文', baseVersion: 1,
+    });
+    const submissionId = (await submitted.json() as { submissionId: string }).submissionId;
+    clock = new Date(clock.getTime() + 60_000);
+    await server.app.request(`/api/admin/posts/${submissionId}/review`, {
+      method: 'POST', headers: bearer, body: JSON.stringify({ status: 'approved' }),
+    });
+
+    // 管理员这时驳回：他看到的是 v2。
+    clock = new Date(clock.getTime() + 60_000);
+    expect((await server.app.request(`/api/admin/reports/${reportId}/resolve`, {
+      method: 'POST', headers: bearer, body: JSON.stringify({ status: 'dismissed', note: '看过' }),
+    })).status).toBe(200);
+    const stored = server.db.prepare('SELECT targetVersion, handledVersion FROM reports WHERE id = ?').get(reportId) as
+      { targetVersion: number; handledVersion: number };
+    // 展示用举报时的 v1，判重必须记处置时的 v2。
+    expect(stored).toEqual({ targetVersion: 1, handledVersion: 2 });
+
+    // v2 没改过 → 仍然拦住；拿 targetVersion(v1) 判的话这里会误许重报。
+    const again = await bob.call('POST', '/api/reports', { targetType: 'post', targetId: id, reason: '还是像广告' });
+    expect(again.status).toBe(409);
+    expect(await again.json()).toMatchObject({ error: { code: 'ALREADY_DISMISSED' } });
+
+    // 改到 v3 之后才允许再报。
+    const second = await alice.call('PUT', `/api/posts/${id}/revision`, {
+      kind: 'community', title: '第三版', summary: 's', body: '第三版正文', baseVersion: 2,
+    });
+    const secondId = (await second.json() as { submissionId: string }).submissionId;
+    clock = new Date(clock.getTime() + 60_000);
+    await server.app.request(`/api/admin/posts/${secondId}/review`, {
+      method: 'POST', headers: bearer, body: JSON.stringify({ status: 'approved' }),
+    });
+    expect((await bob.call('POST', '/api/reports', { targetType: 'post', targetId: id, reason: '第三版又出现了' })).status).toBe(200);
+  });
+
+  it('文章下架后处置举报：仍记下当时的版本，恢复后不能重复举报', async () => {
+    const alice = await account('alice');
+    const bob = await account('bob');
+    const id = await published(alice);
+    // 先升到 v2，再让 bob 举报、管理员在文章下架状态下驳回。
+    const submitted = await alice.call('PUT', `/api/posts/${id}/revision`, {
+      kind: 'community', title: '第二版', summary: 's', body: '第二版正文', baseVersion: 1,
+    });
+    const submissionId = (await submitted.json() as { submissionId: string }).submissionId;
+    clock = new Date(clock.getTime() + 60_000);
+    await server.app.request(`/api/admin/posts/${submissionId}/review`, {
+      method: 'POST', headers: bearer, body: JSON.stringify({ status: 'approved' }),
+    });
+    const report = await bob.call('POST', '/api/reports', { targetType: 'post', targetId: id, reason: '像广告' });
+    const reportId = (await report.json() as { id: string }).id;
+    server.store.markRemoved('post', id, clock.toISOString());
+    clock = new Date(clock.getTime() + 60_000);
+    expect((await server.app.request(`/api/admin/reports/${reportId}/resolve`, {
+      method: 'POST', headers: bearer, body: JSON.stringify({ status: 'dismissed' }),
+    })).status).toBe(200);
+    // 下架状态下 store.get 拿不到版本，写成 1 的话恢复后 `1 >= 2` 不成立，
+    // 同一版可以被无限重报。
+    expect(server.db.prepare('SELECT handledVersion FROM reports WHERE id = ?').get(reportId)).toEqual({ handledVersion: 2 });
+
+    server.store.restore('post', id);
+    const again = await bob.call('POST', '/api/reports', { targetType: 'post', targetId: id, reason: '还是' });
+    expect(again.status).toBe(409);
+  });
+
+  it('内容一字未改的「编辑」不留回退快照：不能凭空造一个版本再举报', async () => {
+    const alice = await account('alice');
+    const bob = await account('bob');
+    const id = await published(alice);
+    const submitted = await alice.call('PUT', `/api/posts/${id}/revision`, {
+      kind: 'community', title: '初版标题', summary: '初版摘要', body: '初版正文', baseVersion: 1,
+    });
+    const submissionId = (await submitted.json() as { submissionId: string }).submissionId;
+    clock = new Date(clock.getTime() + 60_000);
+    await server.app.request(`/api/admin/posts/${submissionId}/review`, {
+      method: 'POST', headers: bearer, body: JSON.stringify({ status: 'approved' }),
+    });
+    // 没变的内容不该有可回退的旧版——否则「撤销」会把版本 +1，
+    // 让「判不成立后必须改过才能再报」被一个空操作绕过。
+    expect(server.db.prepare('SELECT previousPayload FROM submissions WHERE id = ?').get(submissionId))
+      .toEqual({ previousPayload: null });
+    expect((await server.app.request(`/api/admin/posts/${id}/revert`, { method: 'POST', headers: bearer })).status).toBe(409);
+    expect((await postOf(id)).contentVersion ?? 1).toBe(1);
+  });
+
+  it('管理员误批之后能退回上一版，而不是只能下架', async () => {
+    const alice = await account('alice');
+    const id = await published(alice);
+    const submitted = await alice.call('PUT', `/api/posts/${id}/revision`, {
+      kind: 'community', title: '误批的标题', summary: '误批摘要', body: '误批正文', baseVersion: 1,
+    });
+    const submissionId = (await submitted.json() as { submissionId: string }).submissionId;
+    clock = new Date(clock.getTime() + 60_000);
+    await server.app.request(`/api/admin/posts/${submissionId}/review`, {
+      method: 'POST', headers: bearer, body: JSON.stringify({ status: 'approved' }),
+    });
+    expect((await postOf(id)).title).toBe('误批的标题');
+
+    const reverted = await server.app.request(`/api/admin/posts/${id}/revert`, { method: 'POST', headers: bearer });
+    expect(reverted.status).toBe(200);
+    const after = await postOf(id);
+    // 内容退回修改前，但版本继续往前（回退本身也是一次修改）。
+    expect(after.title).toBe('初版标题');
+    expect(after.body).toBe('初版正文');
+    expect(after.contentVersion).toBe(3);
+
+    // 作者要收到通知：不然他只会看到「内容变回去了」，以为编辑从没生效。
+    const notices = await (await alice.call('GET', '/api/me/notifications?pageSize=10')).json() as
+      { items: Array<{ title: string; detail: string | null; href: string | null }> };
+    const notice = notices.items.find(item => item.title.includes('修改被撤回'));
+    expect(notice).toBeTruthy();
+    expect(notice?.detail).toContain('退回修改前');
+    expect(notice?.href).toBe(`/posts/${id}`);
+
+    // 同一份旧版只能回退一次，否则会来回把内容拉回旧版。
+    const again = await server.app.request(`/api/admin/posts/${id}/revert`, { method: 'POST', headers: bearer });
+    expect(again.status).toBe(409);
+    expect(await again.json()).toMatchObject({ error: { code: 'NOTHING_TO_REVERT' } });
+  });
+
+  it('举报列表标出举报时的版本，文章改过之后审核员能看出来', async () => {
+    const alice = await account('alice');
+    const bob = await account('bob');
+    const id = await published(alice);
+    const report = await bob.call('POST', '/api/reports', { targetType: 'post', targetId: id, reason: '像广告' });
+    const reportId = (await report.json() as { id: string }).id;
+
+    // 举报之后作者改了一版并上线。
+    const submitted = await alice.call('PUT', `/api/posts/${id}/revision`, {
+      kind: 'community', title: '改过的标题', summary: '改过摘要', body: '改过正文', baseVersion: 1,
+    });
+    const submissionId = (await submitted.json() as { submissionId: string }).submissionId;
+    clock = new Date(clock.getTime() + 60_000);
+    await server.app.request(`/api/admin/posts/${submissionId}/review`, {
+      method: 'POST', headers: bearer, body: JSON.stringify({ status: 'approved' }),
+    });
+
+    const list = await (await server.app.request('/api/admin/reports?status=open', { headers: bearer })).json() as
+      { items: Array<{ id: string; targetVersion: number | null; currentVersion: number | null }> };
+    const row = list.items.find(item => item.id === reportId);
+    // 举报快照是第 1 版、现在是第 2 版：审核员不能拿新版内容去判断旧版的问题。
+    expect(row).toMatchObject({ targetVersion: 1, currentVersion: 2 });
+  });
+
+  it('审核前文章又被改过：不覆盖，落 rejected 并说明原因', async () => {
+    const alice = await account('alice');
+    const id = await published(alice);
+    const submitted = await alice.call('PUT', `/api/posts/${id}/revision`, {
+      kind: 'community', title: '基于第 1 版写的', summary: 's', body: 'b', baseVersion: 1,
+    });
+    const submissionId = (await submitted.json() as { submissionId: string }).submissionId;
+
+    // 直接改库模拟「提交之后、审核之前文章又上线了一版」——目前站内只有审核这一条
+    // 改版路径，但别的写入方（运维脚本、未来的批量工具）同样能让版本前进。
+    // 这条防线要能在那种情况下保住用户那次改动，而不是悄悄覆盖。
+    const raw = server.db.prepare("SELECT data FROM entities WHERE kind = 'post' AND id = ?").get(id) as { data: string };
+    const data = JSON.parse(raw.data) as Record<string, unknown>;
+    server.db.prepare("UPDATE entities SET data = ? WHERE kind = 'post' AND id = ?")
+      .run(JSON.stringify({ ...data, contentVersion: 2, title: '别人改的标题' }), id);
+
+    clock = new Date(clock.getTime() + 60_000);
+    const reviewed = await server.app.request(`/api/admin/posts/${submissionId}/review`, {
+      method: 'POST', headers: bearer, body: JSON.stringify({ status: 'approved' }),
+    });
+    expect(reviewed.status).toBe(200);
+
+    const after = await postOf(id);
+    // 关键：正文没被那次「基于旧版」的修改覆盖掉。
+    expect(after.title).toBe('别人改的标题');
+    expect(after.contentVersion).toBe(2);
+    const mine = await revisionOf(alice, id);
+    expect(mine.revision?.status).toBe('rejected');
+    expect(mine.revision?.reviewReason).toContain('已更新到第 2 版');
+  });
+
+  it('内容一个字都没改时不算新版本，也不允许借此重新举报', async () => {
+    const alice = await account('alice');
+    const bob = await account('bob');
+    const id = await published(alice);
+    const before = await postOf(id);
+
+    // 原样重发一次（作者可能只是点了保存）。
+    const submitted = await alice.call('PUT', `/api/posts/${id}/revision`, {
+      kind: 'community', title: before.title, summary: '初版摘要', body: '初版正文', baseVersion: 1,
+    });
+    const submissionId = (await submitted.json() as { submissionId: string }).submissionId;
+    clock = new Date(clock.getTime() + 60_000);
+    await server.app.request(`/api/admin/posts/${submissionId}/review`, {
+      method: 'POST', headers: bearer, body: JSON.stringify({ status: 'approved' }),
+    });
+
+    const after = await postOf(id);
+    // 版本号是「内容变过」的凭证：白涨一版会让「举报判不成立后改过才能再报」
+    // 这条规则失效，也会让「更新于」显示一个假时间。
+    expect(after.contentVersion ?? 1).toBe(1);
+    expect(after.revisedAt ?? null).toBeNull();
+
+    // 只改正文、标题摘要不变，仍然算新版本。少比一个字段就会把「改了正文」
+    // 判成没改——那等于让作者的一次真实修改静默失效。
+    const bodyOnly = await alice.call('PUT', `/api/posts/${id}/revision`, {
+      kind: 'community', title: before.title, summary: '初版摘要', body: '换了一个说法', baseVersion: 1,
+    });
+    const bodyOnlyId = (await bodyOnly.json() as { submissionId: string }).submissionId;
+    clock = new Date(clock.getTime() + 60_000);
+    await server.app.request(`/api/admin/posts/${bodyOnlyId}/review`, {
+      method: 'POST', headers: bearer, body: JSON.stringify({ status: 'approved' }),
+    });
+    expect((await postOf(id)).contentVersion).toBe(2);
+    expect((await postOf(id)).body).toBe('换了一个说法');
+
+    // 顺带确认效力：判定不成立后，原样重发一次仍然拦住重复举报。
+    const report = await bob.call('POST', '/api/reports', { targetType: 'post', targetId: id, reason: '像广告' });
+    const reportId = (await report.json() as { id: string }).id;
+    await server.app.request(`/api/admin/reports/${reportId}/resolve`, {
+      method: 'POST', headers: bearer, body: JSON.stringify({ status: 'dismissed', note: '看过' }),
+    });
+    const again = await bob.call('POST', '/api/reports', { targetType: 'post', targetId: id, reason: '还是像广告' });
+    expect(again.status).toBe(409);
+  });
+
+  it('同一时刻的两次编辑不会把顺序写乱（版本号单调）', async () => {
+    const alice = await account('alice');
+    const id = await published(alice);
+    // clock 不动：两次提交与审核都发生在同一毫秒。
+    for (const title of ['第二版', '第三版']) {
+      const submitted = await alice.call('PUT', `/api/posts/${id}/revision`, {
+        kind: 'community', title, summary: 's', body: 'b',
+        baseVersion: (await postOf(id)).contentVersion ?? 1,
+      });
+      expect(submitted.status).toBe(200);
+      const submissionId = (await submitted.json() as { submissionId: string }).submissionId;
+      await server.app.request(`/api/admin/posts/${submissionId}/review`, {
+        method: 'POST', headers: bearer, body: JSON.stringify({ status: 'approved' }),
+      });
+    }
+    expect((await postOf(id)).contentVersion).toBe(3);
+  });
+});

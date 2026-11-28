@@ -1,0 +1,266 @@
+import type { Store } from './database.ts';
+import type { PostRecord, Entities } from './database.ts';
+
+/**
+ * 服务端 SEO：详情页 meta 注入、sitemap、RSS。
+ *
+ * 三件事放在一个模块里，因为它们共用同一条规则：**只有真实内容才进索引**。
+ * 演示数据是虚构样例，把它塞进 sitemap 等于向搜索引擎承诺不存在的页面；
+ * 站内投稿/Agent 采集的内容未经平台核实，正文里可能写着别人的站名，同样不该
+ * 被索引成「什么值得蹬对该站的评价」。
+ *
+ * 域名还没定，所以这里不硬编码任何主机名：`origin` 只在生成绝对 URL
+ * （canonical / og:url / sitemap 的 loc）时用到，由调用方传入——生产传
+ * PUBLIC_ORIGIN，未配置时退回请求自身的 origin。
+ */
+
+export const SITE_NAME = '什么值得蹬';
+export const DEFAULT_DESCRIPTION = '中转站与模型的横向对比：倍率、报价口径、可用率都标明来源与时间，没有实测数据的地方一律写「暂无」，不猜。';
+
+export interface SeoMeta {
+  title: string;
+  description: string;
+  /** 站内路径，如 `/stations/x`。拼 canonical / og:url 用。 */
+  path: string;
+  type: 'website' | 'article';
+  /** 不该被索引的页面（演示数据、未核实内容）带 noindex。 */
+  noindex?: boolean;
+}
+
+/**
+ * 列表页的固定 meta：canonical 自指 + 各自的标题。
+ * 只有真实内容才进 sitemap 与 RSS，但列表页本身永远可索引——它们是入口。
+ */
+const LISTING_PAGES = new Map<string, SeoMeta>([
+  ['/stations', { title: `中转站对比 · ${SITE_NAME}`, description: '按倍率、可用率与报价口径横向对比中转站；没有实测数据的指标显示「暂无」。', path: '/stations', type: 'website' }],
+  ['/models', { title: `模型目录 · ${SITE_NAME}`, description: '模型在各中转站的报价与倍率对比，标明计价口径与报价来源时间。', path: '/models', type: 'website' }],
+  ['/compare', { title: `多站对比 · ${SITE_NAME}`, description: '把两到四个中转站放在一起对比倍率、可用率与结算门槛。', path: '/compare', type: 'website' }],
+  ['/rank', { title: `排行榜 · ${SITE_NAME}`, description: '按可用率、首字延迟与倍率排序，缺少实测数据的站点不参与排名。', path: '/rank', type: 'website' }],
+  ['/community', { title: `社区 · ${SITE_NAME}`, description: '群友与 AI Agent 提交的内容，均标注来源、未经平台核实。', path: '/community', type: 'website' }],
+  ['/reviews', { title: `评测 · ${SITE_NAME}`, description: '中转站与模型的实测记录，标注来源与时间。', path: '/reviews', type: 'website' }],
+  ['/docs', { title: `API 文档与口径说明 · ${SITE_NAME}`, description: '公开接口文档，以及数据来源、口径说明与不构成消费建议的声明。', path: '/docs', type: 'website' }],
+  ['/search', { title: `搜索 · ${SITE_NAME}`, description: DEFAULT_DESCRIPTION, path: '/search', type: 'website', noindex: true }],
+  ['/admin', { title: `审核台 · ${SITE_NAME}`, description: DEFAULT_DESCRIPTION, path: '/admin', type: 'website', noindex: true }],
+  ['/login', { title: `登录 · ${SITE_NAME}`, description: DEFAULT_DESCRIPTION, path: '/login', type: 'website', noindex: true }],
+  ['/register', { title: `注册 · ${SITE_NAME}`, description: DEFAULT_DESCRIPTION, path: '/register', type: 'website', noindex: true }],
+  ['/submit', { title: `投稿 · ${SITE_NAME}`, description: DEFAULT_DESCRIPTION, path: '/submit', type: 'website', noindex: true }],
+  ['/me', { title: `我的 · ${SITE_NAME}`, description: DEFAULT_DESCRIPTION, path: '/me', type: 'website', noindex: true }],
+]);
+
+const escapeHtml = (value: string) => value
+  .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+  .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+
+/**
+ * XML 1.0 不允许的控制字符。
+ *
+ * 正文来自用户投稿，粘贴里带 控制字符（NUL 到退格）这类字符是常见的；不过滤的话
+ * 生成的 RSS 不是良构 XML，订阅器直接报错——而且整个 feed 一起挂，
+ * 不是只坏那一条。
+ */
+const stripInvalidXml = (value: string) => value
+  // XML 1.0 的合法字符集比 UTF-8 窄：除了 C0 控制字符，U+FFFE/U+FFFF 是非字符，
+  // 孤立代理项（Excel/旧系统粘贴常见）也不是合法码位。只清 C0 的话，正文里一个
+  // U+FFFE 就能让**整份** RSS 解析失败——不是坏那一条，是整个 feed 打不开。
+  .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\uFFFE\uFFFF]/g, '')
+  .replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/g, '')
+  .replace(/(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, '');
+const xml = (value: string) => escapeHtml(stripInvalidXml(value));
+
+/** 详情页的 meta。认不出路径时返回站点级默认值——SPA 自己会渲染 404。 */
+/** 路径段解码。畸形的百分号编码（`%E0%A4%A`、`%FF%FE`）会让 decodeURIComponent
+ * 抛 URIError——那是一个 400 级的输入错误，不该变成 500。解不出来就当没这个页面，
+ * 交给站点级默认 meta。 */
+function decodeSegment(segment: string): string | null {
+  try { return decodeURIComponent(segment); } catch { return null; }
+}
+
+/**
+ * 一条内容是否该进索引。pageMeta 与 sitemap/RSS 必须共用这一份判断——
+ * 两边各写一次，迟早出现「页面标了可索引但不在 sitemap 里」或反之。
+ */
+const indexablePost = (post: PostRecord) => post.status === 'approved' && post.source === 'user';
+const indexableStation = (station: { source?: string }) => station.source !== 'demo';
+
+export function pageMeta(store: Store, path: string): SeoMeta {
+  const segments = path.split('?')[0].split('/').filter(Boolean);
+  // 只把**路由段**归一化成小写：`/ME`、`/Admin` 在 SPA 里是同一个页面，
+  // 不归一化就漏掉 noindex。id/slug 段不能跟着小写——文章 id 可能是
+  // `feishu-<originKey>`，其中 originKey 含大写（实测有 `BÜCHER.COM:443`），
+  // 小写后就查不到那一行，页面 meta 会静默退化成站点级默认值。
+  const [rawSection = '', slug = ''] = segments;
+  const section = rawSection.toLowerCase();
+
+  if (section === 'stations' && slug) {
+    const decoded = decodeSegment(slug);
+    const station = decoded === null ? undefined : store.get('station', decoded);
+    if (station) {
+      const demo = !indexableStation(station);
+      return {
+        title: `${station.name} · ${SITE_NAME}`,
+        description: station.description || `${station.name} 的倍率、报价与可用率。`,
+        path: `/stations/${station.slug}`,
+        type: 'article',
+        // 虚构样例不该被搜索引擎收录：页面本身要能打开（给人看演示），
+        // 但不该出现在别人的搜索结果里被当成真实评测。
+        ...(demo ? { noindex: true } : {}),
+      };
+    }
+  }
+
+  if (section === 'posts' && slug) {
+    const decoded = decodeSegment(slug);
+    const post = decoded === null ? undefined : store.get('post', decoded);
+    if (post && post.status === 'approved') {
+      return {
+        title: `${post.title} · ${SITE_NAME}`,
+        description: post.summary || post.body.slice(0, 120),
+        path: `/posts/${post.id}`,
+        type: 'article',
+        // 只有站内用户自己写的文章算「本站在说」；投稿与采集来的照旧可看，
+        // 但不进索引（见文件头）。判据与 sitemap/RSS 共用 indexablePost。
+        ...(indexablePost(post) ? {} : { noindex: true }),
+      };
+    }
+  }
+
+  if (section === 'models' && slug) {
+    const decoded = decodeSegment(slug);
+    const model = decoded === null ? undefined : store.get('model', decoded);
+    if (model) {
+      return {
+        title: `${model.name} · ${SITE_NAME}`,
+        description: model.description || `${model.name} 在各中转站的报价与倍率对比。`,
+        path: `/models/${model.slug}`,
+        type: 'article',
+      };
+    }
+  }
+
+  // 列表页与登录后页面：canonical 必须自指。全指首页会让搜索引擎把 /stations、
+  // /rank 这些页面当成首页的重复内容，等于白做；标题也各给各的，别都是站点名。
+  const known = LISTING_PAGES.get(`/${section ?? ''}`);
+  if (known) return known;
+
+  return { title: SITE_NAME, description: DEFAULT_DESCRIPTION, path: '/', type: 'website' };
+}
+
+/**
+ * 把 meta 注入 index.html。
+ *
+ * 不用模板引擎：构建产物里只有一个 `<title>` 和一条 description，都是
+ * 一次性的字符串替换。注入点靠 `</head>` 定位，页面结构改了也不会炸。
+ * 两条 meta（description / robots）先删后插，避免同一个名字出现两次——
+ * 重复的 meta 里浏览器取第一个，删掉重建比「找到再改」更不容易漏。
+ */
+export function injectMeta(html: string, meta: SeoMeta, origin: string): string {
+  const url = `${origin.replace(/\/$/, '')}${meta.path}`;
+  const tags = [
+    `<meta name="description" content="${escapeHtml(meta.description)}" />`,
+    ...(meta.noindex ? ['<meta name="robots" content="noindex, follow" />'] : []),
+    `<link rel="canonical" href="${escapeHtml(url)}" />`,
+    `<meta property="og:site_name" content="${escapeHtml(SITE_NAME)}" />`,
+    `<meta property="og:type" content="${meta.type}" />`,
+    `<meta property="og:title" content="${escapeHtml(meta.title)}" />`,
+    `<meta property="og:description" content="${escapeHtml(meta.description)}" />`,
+    `<meta property="og:url" content="${escapeHtml(url)}" />`,
+    '<meta name="twitter:card" content="summary" />',
+  ].join('\n    ');
+
+  const stripped = html
+    .replace(/<meta\s+name="description"[^>]*>\s*/gi, '')
+    .replace(/<meta\s+name="robots"[^>]*>\s*/gi, '')
+    .replace(/<link\s+rel="canonical"[^>]*>\s*/gi, '');
+  // 用回调而不是字符串替换：字符串替换里 `$&`、`$1`、`` $` `` 会被当成引用
+  // 展开，而标题来自用户投稿（「省 $100」「$& 实测」都合法），会把内容写串。
+  const titled = stripped.replace(/<title>[\s\S]*?<\/title>/i, () => `<title>${escapeHtml(meta.title)}</title>`);
+  return /<\/head>/i.test(titled)
+    ? titled.replace(/<\/head>/i, () => `  ${tags}\n  </head>`)
+    : titled;
+}
+
+/** 进 sitemap 的页面：静态入口 + 真实（非演示）的站点、模型、站内文章。 */
+interface SitemapEntry { path: string; lastmod?: string }
+
+export function sitemapEntries(store: Store): SitemapEntry[] {
+  const entries: SitemapEntry[] = [
+    { path: '/' }, { path: '/stations' }, { path: '/models' }, { path: '/compare' },
+    { path: '/community' }, { path: '/reviews' }, { path: '/rank' }, { path: '/docs' },
+  ];
+  for (const station of store.all('station')) {
+    if (!indexableStation(station)) continue;
+    entries.push({ path: `/stations/${station.slug}` });
+  }
+  for (const model of store.all('model')) entries.push({ path: `/models/${model.slug}` });
+  for (const post of store.all('post')) {
+    // 只有 approved 且站内用户写的内容才进索引，理由同 pageMeta。
+    if (!indexablePost(post)) continue;
+    // 改过的文章要重抓：publishedAt 永远不会变（改老文不该让它重新上榜），
+    // 所以 lastmod 必须优先用 revisedAt，否则搜索引擎永远不知道它更新过。
+    entries.push({ path: `/posts/${post.id}`, lastmod: post.revisedAt ?? post.publishedAt });
+  }
+  return entries;
+}
+
+export function sitemapXml(store: Store, origin: string): string {
+  const base = origin.replace(/\/$/, '');
+  const urls = sitemapEntries(store).map(entry =>
+    `  <url><loc>${xml(base + entry.path)}</loc>${entry.lastmod ? `<lastmod>${xml(entry.lastmod)}</lastmod>` : ''}</url>`,
+  );
+  return `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${urls.join('\n')}\n</urlset>\n`;
+}
+
+/** RSS 2.0。只收站内用户写的已发布文章，理由同上。 */
+export function rssXml(store: Store, origin: string, limit = 30): string {
+  const base = origin.replace(/\/$/, '');
+  // 排序与截断交给 SQL：RSS 只要最新 30 条，而 `store.all('post')` 会把全库
+  // 文章 JSON 都解析一遍再排序——文章上万时这是一次阻塞请求的全表扫描。
+  // 筛选条件与 indexablePost 保持一致（approved + user 来源），limit 是常量，
+  // 不来自 URL；解析回来的行再过一遍 indexablePost，防止 json_extract 与
+  // JS 侧判据（例如缺字段的老数据）出现偏差。
+  const posts = (store.db.prepare(
+    `SELECT data FROM entities WHERE kind = 'post' AND removedAt IS NULL
+       AND json_extract(data, '$.status') = 'approved'
+       AND json_extract(data, '$.source') = 'user'
+     ORDER BY json_extract(data, '$.publishedAt') DESC LIMIT ?`,
+  ).all(limit) as Array<{ data: string }>)
+    .map(row => JSON.parse(row.data) as PostRecord)
+    .filter(indexablePost);
+  const items = posts.map(post => [
+    '    <item>',
+    `      <title>${xml(post.title)}</title>`,
+    `      <link>${xml(`${base}/posts/${post.id}`)}</link>`,
+    `      <guid isPermaLink="true">${xml(`${base}/posts/${post.id}`)}</guid>`,
+    `      <pubDate>${new Date(post.publishedAt).toUTCString()}</pubDate>`,
+    `      <description>${xml(post.summary || post.body.slice(0, 200))}</description>`,
+    '    </item>',
+  ].join('\n'));
+  return [
+    '<?xml version="1.0" encoding="UTF-8"?>',
+    '<rss version="2.0">',
+    '  <channel>',
+    `    <title>${xml(SITE_NAME)}</title>`,
+    `    <link>${xml(base)}</link>`,
+    `    <description>${xml(DEFAULT_DESCRIPTION)}</description>`,
+    ...items,
+    '  </channel>',
+    '</rss>',
+    '',
+  ].join('\n');
+}
+
+/** robots.txt：后台与接口不抓，其余放行，并指出 sitemap。 */
+export function robotsTxt(origin: string): string {
+  return [
+    'User-agent: *',
+    'Disallow: /admin',
+    'Disallow: /api/',
+    'Allow: /',
+    '',
+    `Sitemap: ${origin.replace(/\/$/, '')}/sitemap.xml`,
+    '',
+  ].join('\n');
+}
+
+/** 供测试与调用方直接读的类型别名，避免依赖 Entities 的泛型细节。 */
+export type StationEntity = Entities['station'];

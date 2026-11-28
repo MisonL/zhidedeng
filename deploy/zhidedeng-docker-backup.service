@@ -1,0 +1,32 @@
+#容器部署专用备份单元。和 zhidedeng-backup.service（直跑 node /opt/zhidedeng）不是一回事：
+#那边假设宿主机上有个 sqlite3能直接打开库；容器部署时数据库在 docker卷里，
+#宿主机上没有可用的库文件路径，只能靠 docker exec进容器 VACUUM INTO再 docker cp出来。
+#
+#安装：
+# sudo install -m0755 deploy/zhidedeng-docker-backup.sh /usr/local/bin/zhidedeng-backup
+# sudo cp deploy/zhidedeng-docker-backup.{service,timer} /etc/systemd/system/
+# sudo systemctl daemon-reload
+# sudo systemctl enable --now zhidedeng-docker-backup.timer
+#
+#注意 ReadWritePaths：ProtectSystem=strict下只有这里列出的目录可写，
+#备份目录必须列进来，否则脚本会在 chmod/mv阶段失败。
+[Unit]
+Description=zhidedeng container SQLite backup
+
+[Service]
+Type=oneshot
+#备份要在宿主机上执行 docker命令，所以这里不能用 zhidedeng用户，
+#用能访问 docker.sock的账号（通常是 root或 docker组成员）。
+User=root
+Group=root
+Environment=BACKUP_DIR=/var/backups/zhidedeng
+Environment=BACKUP_KEEP=14
+Environment=CONTAINER=zhidedeng
+ExecStart=/usr/local/bin/zhidedeng-backup
+#备份最多跑10分钟：库再大也不该更久，卡住要能看见失败。
+TimeoutStartSec=600
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/backups/zhidedeng
+PrivateTmp=true

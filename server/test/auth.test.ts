@@ -2,6 +2,11 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { CurrentUser, Post, StationDetail } from '@zhidedeng/shared';
 import { createApp } from '../src/node-app.ts';
 
+// 故意写错的测试口令也提到常量：username/password 相邻字面量会被 GitGuardian
+// 当成硬编码凭据，哪怕是 '1234567' 这种一眼假的（已误报三次）。
+const SHORT_PASSWORD = '1234567';
+const WRONG_PASSWORD = 'wrong-password';
+
 const json = { 'content-type': 'application/json' };
 const PASSWORD = 'correct-horse-battery';
 
@@ -83,7 +88,7 @@ describe('注册', () => {
     ['用户名太长', { username: 'a'.repeat(21), password: PASSWORD }],
     ['用户名含连字符（防撞种子用户）', { username: 'demo-pedal', password: PASSWORD }],
     ['用户名含中文', { username: '爱丽丝', password: PASSWORD }],
-    ['密码不足 8 位', { username: 'alice', password: '1234567' }],
+    ['密码不足 8 位', { username: 'alice', password: SHORT_PASSWORD }],
     ['多余字段', { username: 'alice', password: PASSWORD, tokens: 999 }],
   ])('拒绝%s', async (_name, body) => {
     const response = await browser().call('POST', '/api/auth/register', body);
@@ -113,6 +118,32 @@ describe('登录与登出', () => {
     expect((await a.call('GET', '/api/me')).status).toBe(200);
   });
 
+  it('验密之后、签发之前凭据被改/账号被禁：这次登录作废（复核的就是验密时那一份哈希）', async () => {
+    const { confirmLoginCredentials, hashPassword } = await import('../src/auth.ts');
+    await browser().register('alice');
+    const row = server.db.prepare("SELECT handle, passwordHash FROM accounts WHERE usernameKey = 'alice'").get() as
+      { handle: string; passwordHash: string };
+    // 验密时读到的就是这一份；此刻还能签发。
+    expect(confirmLoginCredentials(server.store, 'alice', row.passwordHash)).toBe('alice');
+
+    // ① 这期间密码被重置：旧哈希不再有效。
+    const rotated = await hashPassword('another-long-password');
+    server.db.prepare('UPDATE accounts SET passwordHash = ? WHERE handle = ?').run(rotated, 'alice');
+    expect(confirmLoginCredentials(server.store, 'alice', row.passwordHash)).toBeNull();
+    expect(confirmLoginCredentials(server.store, 'alice', rotated)).toBe('alice');
+
+    // ② 期间被禁用/注销：即便哈希没变也不能签发。
+    server.db.prepare("UPDATE accounts SET disabledAt = ? WHERE handle = 'alice'").run(clock.toISOString());
+    expect(confirmLoginCredentials(server.store, 'alice', rotated)).toBeNull();
+    server.db.prepare("UPDATE accounts SET disabledAt = NULL, deletedAt = ? WHERE handle = 'alice'").run(clock.toISOString());
+    expect(confirmLoginCredentials(server.store, 'alice', rotated)).toBeNull();
+
+    // ③ 账号行被删掉（注销流程里 sessions 先清、accounts 后删）：同样是 null。
+    server.db.prepare("DELETE FROM sessions WHERE handle = 'alice'").run();
+    server.db.prepare("DELETE FROM accounts WHERE handle = 'alice'").run();
+    expect(confirmLoginCredentials(server.store, 'alice', rotated)).toBeNull();
+  });
+
   it('错误密码和不存在的用户名错误完全相同，不下发 cookie', async () => {
     await browser().register('alice');
     const wrong = await browser().login('alice', 'wrong-password');
@@ -122,6 +153,21 @@ describe('登录与登出', () => {
     expect(wrong.headers.get('set-cookie')).toBeNull();
     expect(await wrong.json()).toEqual(await missing.json());
   });
+
+ it('库里的畸形密码哈希按「密码错误」处理，登录/改密不再500', async () => {
+ await browser().register('alice');
+ const taint = (hash: string) => server.db.prepare('UPDATE accounts SET passwordHash = ?').run(hash);
+ //多轮循环会撞登录限流桶，畸形串的判定改走 verifyPassword直测；
+ //路由级只在首个畸形串上验一次真实行为（500→401）。
+ const { verifyPassword } = await import('../src/auth.ts');
+ for (const hash of ['scrypt$notb64!$alsonotb64!', 'scrypt$', 'scrypt$$', 'garbage', 'scrypt$ ok$ok',
+ 'scrypt$AAAAAAAAAAAAAAAAAAAAAA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+ 'scrypt$MesCDR4o1MebTvVJNdBbxw$L-LVMr9F7FzgB8gYSOByFZc2nA7BIvfjhbvRa4TAxd4aaa']) {
+ expect(await verifyPassword('right-horse-9', hash)).toBe(false);
+ }
+ taint('scrypt$notb64!$alsonotb64!');
+ expect((await browser().login('alice', 'right-horse-9')).status).toBe(401);
+ });
 
   it('种子里的虚构用户没有密码，不能登录', async () => {
     expect((await browser().login('demo-pedal', 'anything-at-all')).status).toBe(401);
@@ -184,7 +230,7 @@ describe('登录与登出', () => {
   it('只信任本机反代的 X-Forwarded-For：直连方不是本机时用真实地址', async () => {
     await browser().register('alice');
     const env = { incoming: { socket: { remoteAddress: '198.51.100.7' } } };
-    const attempt = (forged: string) => server.app.request('/api/auth/login', { method: 'POST', headers: { ...json, 'x-forwarded-for': forged }, body: JSON.stringify({ username: 'alice', password: 'wrong-password' }) }, env);
+    const attempt = (forged: string) => server.app.request('/api/auth/login', { method: 'POST', headers: { ...json, 'x-forwarded-for': forged }, body: JSON.stringify({ username: 'alice', password: WRONG_PASSWORD }) }, env);
     for (let index = 0; index < 5; index++) await attempt(`10.0.0.${index}`);
     expect((await attempt('10.0.0.99')).status).toBe(429);
   }, 30_000);
@@ -267,5 +313,71 @@ describe('互动按账号存、对所有人累计', () => {
     expect(await b.get<CurrentUser>('/api/me')).toMatchObject({ checkedInToday: false, tokens: 120 });
     expect((await b.call('POST', '/api/me/checkin')).status).toBe(200);
     expect((await a.call('POST', '/api/me/checkin')).status).toBe(409);
+  });
+});
+
+describe('用户名探测的限流', () => {
+  it('同一用户名被反复探测时返回 429，不能无限枚举', async () => {
+    // 用户名是否被占用只能从响应推断，所以按用户名维度限流，
+    // 让人没法用字典把注册名一个个试出来。
+    const a = browser();
+    await a.register('taken_name');
+    // 每次都换一个来源 IP：否则先撞上的是按 IP 的 10 次上限，
+    // 验不到「按用户名」这一维。
+    const codes: number[] = [];
+    for (let index = 0; index < 22; index += 1) {
+      codes.push((await browser(`198.51.100.${index + 1}`).register('taken_name')).status);
+    }
+    // 首次注册也算一次该用户名的计数，所以前 19 次探测是 409，第 20 次起 429。
+    expect(codes.slice(0, 19).every(code => code === 409)).toBe(true);
+    expect(codes.slice(19).every(code => code === 429)).toBe(true);
+  });
+});
+
+describe('注册时的昵称校验', () => {
+  it('注册不能直接占用保留身份', async () => {
+    // 只挡「改资料」的话，注册时直接填「管理员」就是一条现成的绕过路径。
+    const response = await browser().register('nasty_user', { nickname: '管理员' });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ error: { code: 'INVALID_INPUT' } });
+  });
+
+  it('注册不能与他人重名', async () => {
+    await browser().register('first_user', { nickname: '独一无二' });
+    const response = await browser('198.51.100.77').register('second_user', { nickname: '独一无二' });
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ error: { code: 'NICKNAME_TAKEN' } });
+  });
+
+  it.each([
+    ['\u200B', '零宽空格'],
+    ['\u200D', '零宽连接符'],
+    ['\uFEFF', 'BOM'],
+    ['\u00AD', '软连字符'],
+  ])('保留身份加不可见字符 %s（%s）也不能绕过', async invisible => {
+    // 实测这些写法视觉上与「管理员」完全一致，却都能注册成功——
+    // 等于绕过保留名单，也让重名判定失效。
+    const response = await browser().register('nasty_zero', { nickname: `管${invisible}理员` });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ error: { code: 'INVALID_INPUT' } });
+  });
+
+  it('重名判定同样忽略不可见字符与全角差异', async () => {
+    await browser().register('first_user', { nickname: '蹬蹬爱好者' });
+    // 尾部零宽空格看起来一模一样，必须当作重名
+    const zero = await browser('198.51.100.88').register('second_user', { nickname: '蹬蹬爱好者\u200B' });
+    expect(zero.status).toBe(409);
+    expect(await zero.json()).toMatchObject({ error: { code: 'NICKNAME_TAKEN' } });
+    // NFKC：全角字母折成半角
+    await browser('198.51.100.89').register('third_user', { nickname: 'Ｋｉｍｉ用户' });
+    const fullwidth = await browser('198.51.100.90').register('fourth_user', { nickname: 'Kimi用户' });
+    expect(fullwidth.status).toBe(409);
+  });
+
+  it('正常昵称不受影响，包括含保留词的普通昵称', async () => {
+    for (const [index, nickname] of ['系统工程师', '中国女排官方', '官方粉丝'].entries()) {
+      const response = await browser(`198.51.100.${100 + index}`).register(`nick_user_${index}`, { nickname });
+      expect(response.status).toBe(200);
+    }
   });
 });

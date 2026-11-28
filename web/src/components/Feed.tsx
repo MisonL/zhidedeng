@@ -5,7 +5,7 @@ import { api } from '../api';
 import { formatRate, formatUptime, KIND_LABEL } from '../format';
 import { useAsync, useCarousel, usePaged } from '../hooks';
 import { useCatalog } from '../state';
-import AsyncView, { LoadMore, Skeleton } from './AsyncView';
+import AsyncView, { Empty, LoadMore, Skeleton } from './AsyncView';
 import PostCard from './PostCard';
 import { PostCover } from './visuals';
 
@@ -20,13 +20,16 @@ interface FeedProps {
 }
 
 export default function Feed({ title, heading: Heading = 'h2', kind: fixedKind }: FeedProps) {
-  const [ownKind, setOwnKind] = useState<PostKind>('deal');
+  // 默认「全部」而不是「爆料」：新站往往先有评测/指南，默认停在爆料会让首屏
+  // 只剩一句「这里还没有内容」，新用户会以为站点是空的。
+  const [ownKind, setOwnKind] = useState<PostKind | ''>('');
   const [sort, setSort] = useState<PostSort>('latest');
   const [vendor, setVendor] = useState('');
   const { data: catalog } = useCatalog();
   const kind = fixedKind ?? ownKind;
   const paged = usePaged(
-    (page, signal) => api.getPosts({ kind, sort, vendor, page, pageSize: 10 }, signal),
+    // kind 为空串表示「全部」：请求里不带这个参数，服务端就不按类型过滤。
+    (page, signal) => api.getPosts({ ...(kind ? { kind } : {}), sort, vendor, page, pageSize: 10 }, signal),
     [kind, sort, vendor],
   );
 
@@ -36,6 +39,7 @@ export default function Feed({ title, heading: Heading = 'h2', kind: fixedKind }
         <Heading className="feed-title">{title}</Heading>
         {!fixedKind && (
           <div className="segmented">
+            <button type="button" className="segment" aria-pressed={kind === ''} onClick={() => setOwnKind('')}>全部</button>
             {FEED_KINDS.map((value) => (
               <button key={value} type="button" className="segment" aria-pressed={value === kind} onClick={() => setOwnKind(value)}>
                 {KIND_LABEL[value]}
@@ -103,7 +107,13 @@ export function FeedSidebar() {
           <h2 className="side-title">热门中转站</h2>
           <Link className="module-more" to="/stations">全部站点</Link>
         </header>
-        <AsyncView state={catalog}>
+        {/* children 不读 state.data（数据在上面先切过片），所以数组默认空态在这里不生效，
+            必须显式传 isEmpty：否则没有站点时这一块只剩标题和「全部站点」，看起来像坏了。 */}
+        <AsyncView
+          state={catalog}
+          isEmpty={() => stations.length === 0}
+          empty={<Empty title="还没有收录站点" action={{ to: '/submit', label: '推荐一个' }} />}
+        >
           {() => (
             <ol className="side-stations">
               {stations.map((station, position) => (

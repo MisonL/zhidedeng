@@ -1,24 +1,22 @@
 import { z, ZodError } from 'zod';
-import type { CatalogImportRequest, CatalogImportResponse } from '@zhidedeng/shared';
-import type { Store } from './database.ts';
+import { MAX_RATE, MIN_RATE } from '@zhidedeng/shared';
+import { adminSlug, httpUrl, offerRate, rateBasis } from '@zhidedeng/shared/submission';
+import type {
+  AdminCreateModelRequest, AdminCreateVendorRequest, AdminDeleteModelResponse, AdminUpdateModelRequest,
+  CatalogImportRequest, CatalogImportResponse, Model, Vendor,
+} from '@zhidedeng/shared';
+import type { StationRecord, Store } from './database.ts';
 import { ApiError } from './errors.ts';
 
-// 群友提交的全量导入。只替换 source=submission 的站点、报价和文章，种子和访客的数据都不动。
+// 通用全量导入。替换 source=submission 的集合并处理全部输入 slug，账号和互动保留。
 
 const IS_SUBMISSION = "json_extract(data,'$.source') = 'submission'";
 const SUBMITTED_STATIONS = `(SELECT id FROM entities WHERE kind = 'station' AND ${IS_SUBMISSION})`;
 
 const singleLine = (max: number) => z.string().min(1).max(max);
-const httpUrl = z.string().max(300).refine(value => {
-  if (value.includes('?') || value.includes('#')) return false;
-  try {
-    const url = new URL(value);
-    return (url.protocol === 'http:' || url.protocol === 'https:') && !url.username && !url.password;
-  } catch {
-    return false;
-  }
-});
+export { httpUrl, offerRate };
 const importSchema: z.ZodType<CatalogImportRequest> = z.strictObject({
+  allowNewModels: z.boolean().optional(),
   stations: z.array(z.strictObject({
     slug: z.string().regex(/^sub-[a-z0-9-]{1,120}$/),
     name: singleLine(60),
@@ -26,7 +24,16 @@ const importSchema: z.ZodType<CatalogImportRequest> = z.strictObject({
     url: httpUrl,
     rechargeThreshold: z.number().min(0).nullable(),
     paymentMethods: z.array(singleLine(20)).max(10),
-    offers: z.array(z.strictObject({ modelSlug: singleLine(200), rate: z.number().positive() })).max(100),
+    // basis 与 quotedAt 必须放进来：写入 SQL 早就带这两列了，schema 不放行的话
+    // 运维带上口径会被当成未知字段整条拒掉，库里的口径永远是默认值。
+    offers: z.array(z.strictObject({
+      modelSlug: singleLine(200),
+      rate: offerRate,
+      // 用 shared 的 rateBasis，别在这里另写一份 enum：两处枚举一旦不同步，
+      // 同一个值会出现「导入接受、Agent 提交被拒」这种查不出原因的漂移。
+      basis: rateBasis.optional(),
+      quotedAt: z.iso.datetime({ offset: true }).nullish(),
+    })).max(100),
   })),
   posts: z.array(z.strictObject({
     recordId: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/),
@@ -49,31 +56,117 @@ const importSchema: z.ZodType<CatalogImportRequest> = z.strictObject({
 function submissionFingerprint(store: Store) {
   return JSON.stringify([
     store.db.prepare(`SELECT kind, id, data FROM entities WHERE ${IS_SUBMISSION} ORDER BY kind, id`).all(),
-    store.db.prepare(`SELECT stationSlug, modelSlug, rate FROM offers WHERE stationSlug IN ${SUBMITTED_STATIONS} ORDER BY stationSlug, modelSlug`).all(),
+    store.db.prepare(`SELECT stationSlug, modelSlug, rate, basis, quotedAt FROM offers WHERE stationSlug IN ${SUBMITTED_STATIONS} ORDER BY stationSlug, modelSlug`).all(),
   ]);
 }
 
 function importCatalog(store: Store, input: CatalogImportRequest): CatalogImportResponse {
   return store.transaction(() => {
+    const stations = input.stations.filter(station => {
+      const existing = store.get('station', station.slug);
+      if (existing && existing.source !== 'submission' && existing.source !== 'demo') {
+        console.warn(`跳过导入站点 ${station.slug}：已有来源 ${existing.source}`);
+        return false;
+      }
+      // store.get 只看得见在线实体。已下架站点在这里查不到，会被当成新站点
+      // 走下面的 INSERT，removedAt 随之清成 null——一次全量同步就把下架撤销了，
+      // 而下面的清理逻辑明确写着「已下架的行留着，恢复接口还要用」，
+      // 说明下架本来就该由人工恢复，不该被同步顺带复活。
+      if (store.removedAt('station', station.slug) !== null) {
+        console.warn(`跳过导入站点 ${station.slug}：已下架，需要人工恢复`);
+        return false;
+      }
+      return true;
+    });
+    // 模型 slug 统一按 adminSlug 解析后再入队：自动收录时用的是解析后的值，
+    // 报价却用原值的话，' m1 ' 会写成一条查不到模型的孤儿报价，页面上渲染不出来。
+    const offers = stations.flatMap(({ slug, offers: stationOffers }) => stationOffers.map(offer => ({ stationSlug: slug, ...offer, modelSlug: adminSlug.parse(offer.modelSlug) })));
+
     const models = new Set(store.all('model').map(model => model.slug));
-    const offers = input.stations.flatMap(({ slug, offers }) => offers.map(offer => ({ stationSlug: slug, ...offer })));
-    const unknown = offers.find(offer => !models.has(offer.modelSlug));
-    if (unknown) throw new ApiError(400, 'INVALID_INPUT', `未知模型：${unknown.modelSlug}`);
+    const unknown = [...new Set(offers.map(offer => offer.modelSlug).filter(slug => !models.has(slug)))];
+    if (unknown.length && !input.allowNewModels) throw new ApiError(400, 'INVALID_INPUT', `未知模型：${unknown[0]}`);
 
     const before = submissionFingerprint(store);
-    store.db.prepare(`DELETE FROM offers WHERE stationSlug IN ${SUBMITTED_STATIONS}`).run();
-    store.db.prepare(`DELETE FROM entities WHERE ${IS_SUBMISSION}`).run();
-    for (const { offers: _offers, ...station } of input.stations) {
-      store.put('station', station.slug, { ...station, uptime: null, firstTokenLatencyMs: null, foundedAt: null, status: null, source: 'submission' });
+    // 自动创建的占位模型统一挂在 unknown 厂商下，等管理员补全或改建正式厂商。
+    // slug 与直接新增用同一套规则校验，否则像 foo/bar 这种会成为 /models/:slug 无法路由的孤儿。
+    if (unknown.length) {
+      const resolved: string[] = [];
+      for (const slug of unknown) {
+        const parsed = adminSlug.safeParse(slug);
+        // 用解析后的值（已 trim），否则 ' x ' 会带着空格入库，两条 URL 都路由不到。
+        if (!parsed.success) throw new ApiError(400, 'INVALID_INPUT', `未知模型 ${slug} 不符合 slug 规则，无法自动收录，请先在模型管理接口补录`);
+        resolved.push(parsed.data);
+      }
+      if (!store.get('vendor', 'unknown')) store.put('vendor', 'unknown', { slug: 'unknown', name: '未知厂商', iconKey: 'unknown' });
+      for (const slug of resolved) {
+        // 已存在的模型一律不动：这里只是补录缺失的占位模型，
+        // 无条件 put 会把管理员维护好的厂商、名称、描述整个覆盖成占位内容。
+        if (store.get('model', slug)) throw new ApiError(400, 'INVALID_INPUT', `模型 ${slug} 已存在，报价里请直接用它的 slug`);
+        store.put('model', slug, { slug, vendor: 'unknown', name: slug, description: '群友/Agent 提交时自动创建，待补全', tags: [] });
+      }
+    }
+    // 只删在线站点的报价。已下架站点的报价要留着，否则恢复之后变成没有报价的空站，
+    // 而「可恢复」正是软删除存在的理由——全量导入不该把它变成「恢复了一半」。
+    store.db.prepare(`DELETE FROM offers WHERE stationSlug IN (SELECT id FROM entities WHERE kind = 'station' AND ${IS_SUBMISSION} AND removedAt IS NULL)`).run();
+    // 只清在线的：已下架的行留着，恢复接口还要用。
+    // 全量导入再干净也不该把「可恢复」变成「永久没了」。
+    // 先把旧指标抄下来再删。删完再 store.get() 只会拿到 undefined，
+    // 注释里说的「沿用旧值」就变成了把可用率、首字延迟、建站时间全部清零。
+    // 文章的既有 id 也要在删之前算好，理由同上：下面那句 DELETE 会把在线的
+    // submission 实体全删掉，循环里再问「feishu-<recordId> 还在吗」永远查不到，
+    // 于是每次都切到 `sub-<投稿id>`——文章 id 翻转一次，读者的投票、收藏、
+    // 站外链接就全挂在旧 id 上成了孤儿。只要队列里存着一条已通过的飞书文章投稿，
+    // 这个翻转就是**常态**，不是一次性事件。
+    const postIds = new Map<string, string>();
+    for (const { recordId } of input.posts) {
+      const legacyId = `feishu-${recordId}`;
+      // 判据必须和 submissions.ts 的 materialize 逐字对齐，否则两条路径会给
+      // 同一个飞书记录算出不同的 id，同一篇内容就有了两个实体。
+      // 两边都只认 channel，**不认 batchId**：batchId 为空的管理端单条投稿
+      // 走 materialize 会得到 `sub-<投稿id>`，导入这边也必须算成同一个。
+      const legacyExists = store.getWithRemoved('post', legacyId)?.source === 'submission';
+      const approved = store.db.prepare(
+        "SELECT id FROM submissions WHERE kind = 'post' AND channel = 'feishu' AND originKey = ? AND status = 'approved' ORDER BY rowid LIMIT 1",
+      ).get(recordId) as { id: string } | undefined;
+      postIds.set(recordId, approved && !legacyExists ? `sub-${approved.id}` : legacyId);
+    }
+    const metrics = new Map<string, { status: StationRecord['status']; uptime: number | null; firstTokenLatencyMs: number | null; foundedAt: string | null }>();
+    for (const { offers: _offers, ...station } of stations) {
+      const previous = store.get('station', station.slug);
+      metrics.set(station.slug, {
+        status: previous?.status ?? null, uptime: previous?.uptime ?? null,
+        firstTokenLatencyMs: previous?.firstTokenLatencyMs ?? null, foundedAt: previous?.foundedAt ?? null,
+      });
+    }
+    store.db.prepare(`DELETE FROM entities WHERE ${IS_SUBMISSION} AND removedAt IS NULL`).run();
+    store.invalidate();
+    for (const { offers: _offers, ...station } of stations) {
+      // 允许导入的 slug 要先替换原报价，避免残留或撞唯一约束。
+      store.db.prepare('DELETE FROM offers WHERE stationSlug = ?').run(station.slug);
+      const previous = metrics.get(station.slug);
+      store.put('station', station.slug, {
+        ...station,
+        status: previous?.status ?? null, uptime: previous?.uptime ?? null,
+        firstTokenLatencyMs: previous?.firstTokenLatencyMs ?? null, foundedAt: previous?.foundedAt ?? null,
+        source: 'submission',
+      });
     }
     for (const offer of offers) {
-      store.db.prepare('INSERT INTO offers (stationSlug, modelSlug, rate) VALUES (?, ?, ?)').run(offer.stationSlug, offer.modelSlug, offer.rate);
+      store.db.prepare("INSERT INTO offers (stationSlug, modelSlug, rate, basis, quotedAt) VALUES (?, ?, ?, ?, ?)")
+        .run(offer.stationSlug, offer.modelSlug, offer.rate, offer.basis ?? 'blended', offer.quotedAt ?? null);
     }
     for (const { recordId, authorName, ...post } of input.posts) {
-      const id = `feishu-${recordId}`;
+      // id 必须和队列物化那条路径算得一样（见上面 postIds 的注释）：
+      // 两边一致，软删除才挡得住，读者的互动也才挂在同一个 id 上。
+      const id = postIds.get(recordId)!;
+      // 管理员下架过的文章不能被下一次导入复活。上面那句 DELETE 带 `removedAt IS NULL`，
+      // 已下架的行走不到，于是这份 put 会把标记清掉、文章原样回来——下架等于白做。
+      // 走 submissions 队列的那条物化路径有同样的守卫（见 submissions.ts 的 materialize），
+      // 两条路都得拦住，否则换个入口就能绕过。
+      if (store.removedAt('post', id) !== null) continue;
       store.put('post', id, { ...post, id, kind: 'review', authorHandle: 'feishu-submission', authorNickname: authorName, modelSlug: null, cover: null, source: 'submission', status: 'approved' });
     }
-    return { changed: submissionFingerprint(store) !== before, stations: input.stations.length, offers: offers.length, posts: input.posts.length };
+    return { changed: unknown.length > 0 || submissionFingerprint(store) !== before, stations: stations.length, offers: offers.length, posts: input.posts.length, createdModels: unknown.sort() };
   });
 }
 
@@ -84,7 +177,11 @@ export function importResponse(store: Store, rawBody: string) {
   try {
     return respond(importCatalog(store, importSchema.parse(JSON.parse(rawBody))), 200);
   } catch (error) {
-    if (error instanceof ZodError || error instanceof SyntaxError) return refuse(400, 'INVALID_INPUT', '导入内容无效');
+    if (error instanceof ZodError) {
+      const rateIssue = error.issues.find(issue => issue.code === 'custom' && issue.message.startsWith('倍率 '));
+      return refuse(400, 'INVALID_INPUT', rateIssue?.message ?? '导入内容无效');
+    }
+    if (error instanceof SyntaxError) return refuse(400, 'INVALID_INPUT', '导入内容无效');
     if (error instanceof ApiError) return refuse(error.status, error.code, error.message);
     throw error;
   }
@@ -92,6 +189,73 @@ export function importResponse(store: Store, rawBody: string) {
 
 /** 管理接口密钥的最短长度，短于它视为未配置。 */
 export const MIN_SYNC_TOKEN_LENGTH = 32;
+
+export { adminSlug };
+
+export function createVendor(store: Store, input: AdminCreateVendorRequest): Vendor {
+  return store.transaction(() => {
+    if (store.get('vendor', input.slug)) throw new ApiError(409, 'VENDOR_EXISTS', `厂商已存在：${input.slug}`);
+    const vendor: Vendor = { slug: input.slug, name: input.name, iconKey: input.iconKey ?? input.slug };
+    store.put('vendor', vendor.slug, vendor);
+    return vendor;
+  });
+}
+
+export function createModel(store: Store, input: AdminCreateModelRequest): Model {
+  return store.transaction(() => {
+    if (store.get('model', input.slug)) throw new ApiError(409, 'MODEL_EXISTS', `模型已存在：${input.slug}`);
+    if (!store.get('vendor', input.vendor)) throw new ApiError(400, 'INVALID_INPUT', `厂商不存在：${input.vendor}`);
+    const model: Model = { slug: input.slug, vendor: input.vendor, name: input.name, description: input.description, tags: [] };
+    store.put('model', model.slug, model);
+    return model;
+  });
+}
+
+/** 修改已收录模型的可编辑字段。slug 是主键，改不了；被引用也不影响改名字和厂商。 */
+export function updateModel(store: Store, slug: string, input: AdminUpdateModelRequest): Model {
+  return store.transaction(() => {
+    const model = store.get('model', slug);
+    if (!model) throw new ApiError(404, 'NOT_FOUND', `模型不存在：${slug}`);
+    if (!store.get('vendor', input.vendor)) throw new ApiError(400, 'INVALID_INPUT', `厂商不存在：${input.vendor}`);
+    // tags 不在这个接口的可编辑范围，保持原值，避免顺手清空。
+    const updated: Model = { ...model, vendor: input.vendor, name: input.name, description: input.description };
+    store.put('model', slug, updated);
+    return updated;
+  });
+}
+
+export function deleteModel(store: Store, slug: string): AdminDeleteModelResponse {
+  return store.transaction(() => {
+    if (!store.get('model', slug)) throw new ApiError(404, 'NOT_FOUND', `模型不存在：${slug}`);
+    const offers = store.db.prepare('SELECT COUNT(DISTINCT stationSlug) AS count FROM offers WHERE modelSlug = ?').get(slug)!;
+    const stationCount = Number(offers.count);
+    // 文章也会关联模型，直接删会留下指向不存在模型的引用。已下架的文章也算：
+ // 它们可以被管理员恢复，恢复后 modelSlug必须有处可寻（wa-data实测：删除
+ // 被「已下架文章」引用的模型后，恢复的文章查不到模型、也不出现在任何 vendor
+ // 过滤组里——引用计数里漏掉它们就是这个缺口）。
+    const posts = store.db.prepare("SELECT COUNT(*) AS count FROM entities WHERE kind = 'post' AND json_extract(data,'$.modelSlug') = ?").get(slug)!;
+    const postCount = Number(posts.count);
+    // 待审投稿也算引用：站点投稿在入队时就校验过模型，删掉模型之后它再也没法
+    // 通过审核，会变成一条永远拒绝的记录——而管理员并不知道自己刚删的模型
+    // 还在队列里等着。
+    // 编辑稿也算引用：它同样会在审核时去查这个模型，删了模型就过不去。
+    const pending = store.db.prepare(`SELECT COUNT(*) AS count FROM submissions WHERE status = 'pending'
+      AND (json_extract(payload,'$.modelSlug') = ? OR EXISTS (SELECT 1 FROM json_each(json_extract(payload,'$.offers')) WHERE json_extract(value,'$.modelSlug') = ?))`)
+      .get(slug, slug)!;
+    const pendingCount = Number(pending.count);
+    if (stationCount + postCount + pendingCount > 0) {
+      const used = [
+        stationCount && `${stationCount} 个站点的报价`,
+        postCount && `${postCount} 篇文章`,
+        pendingCount && `${pendingCount} 条待审投稿`,
+      ].filter(Boolean).join('和');
+      throw new ApiError(409, 'MODEL_IN_USE', `模型仍被${used}引用`, { stationCount, postCount, pendingCount });
+    }
+    store.db.prepare('DELETE FROM entities WHERE kind = ? AND id = ?').run('model', slug);
+    store.invalidate();
+    return { slug, deleted: true };
+  });
+}
 
 /** 先取摘要再逐字节比较，耗时与 token 内容和长度都无关。 */
 async function constantTimeEqual(left: string, right: string) {

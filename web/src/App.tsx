@@ -1,5 +1,7 @@
 import { Route, Routes } from 'react-router';
+import ErrorBoundary from './components/ErrorBoundary';
 import Layout from './components/Layout';
+import Admin from './pages/Admin';
 import { Login, Register } from './pages/Auth';
 import FeedPage from './pages/Feeds';
 import Business from './pages/Business';
@@ -9,14 +11,18 @@ import Me from './pages/Me';
 import { ModelDetailPage, Models } from './pages/Models';
 import NotFound from './pages/NotFound';
 import PostDetail from './pages/PostDetail';
+import PostEdit from './pages/PostEdit';
 import Rank from './pages/Rank';
 import Search from './pages/Search';
+import Author from './pages/Author';
+import Compare from './pages/Compare';
 import { StationDetailPage, Stations } from './pages/Stations';
 import Submit from './pages/Submit';
 
 export default function App() {
   return (
-    <Routes>
+    <ErrorBoundary>
+      <Routes>
       <Route element={<Layout />}>
         <Route index element={<Home />} />
         <Route path="models" element={<Models />} />
@@ -24,7 +30,11 @@ export default function App() {
         <Route path="community" element={<FeedPage title="社区" kind="community" />} />
         <Route path="reviews" element={<FeedPage title="评测" kind="review" />} />
         <Route path="posts/:id" element={<PostDetail />} />
+        {/* 编辑已发布文章：改动进审核队列，线上仍是旧版。 */}
+        <Route path="posts/:id/edit" element={<PostEdit />} />
         <Route path="stations" element={<Stations />} />
+        <Route path="compare" element={<Compare />} />
+        <Route path="u/:handle" element={<Author />} />
         <Route path="stations/:slug" element={<StationDetailPage />} />
         <Route path="rank" element={<Rank />} />
         <Route path="search" element={<Search />} />
@@ -33,9 +43,12 @@ export default function App() {
         <Route path="login" element={<Login />} />
         <Route path="register" element={<Register />} />
         <Route path="docs" element={<Docs />} />
+        {/* 审核台：用管理密钥进入，不走登录会话。 */}
+        <Route path="admin" element={<Admin />} />
         <Route path="business" element={<Business />} />
         <Route path="*" element={<NotFound />} />
       </Route>
-    </Routes>
+      </Routes>
+    </ErrorBoundary>
   );
 }

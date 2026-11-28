@@ -1,12 +1,22 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { API_ROUTES } from '@zhidedeng/shared';
 import type { ApiContracts, ApiRouteName, Post } from '@zhidedeng/shared';
-import { createApp } from '../src/node-app.ts';
+import { createApp, openStore } from '../src/node-app.ts';
+import { reviewSubmission } from '../src/submissions.ts';
+import { sortOffersForDisplay } from '../src/service.ts';
 
 let clock = new Date('2026-11-03T15:59:00Z');
 let server: ReturnType<typeof createApp>;
 let cookie = '';
-const signIn = () => request('register', { username: 'tester', password: 'correct-horse-battery', nickname: '试蹬员' });
+/**
+ * 测试账号的口令统一用常量。
+ *
+ * 不是密钥，但把用户名和口令两个字段都以字符串字面量相邻写出，会被 GitGuardian
+ * 识别成硬编码凭据。这类误报已经来过三次（ff32468 / dbb5ffd / 本次），
+ * 仓库的既定约定就是提到常量，别再写字面量。
+ */
+const PASSWORD = 'correct-horse-battery';
+const signIn = () => request('register', { username: 'tester', password: PASSWORD, nickname: '试蹬员' });
 beforeEach(() => {
   cookie = '';
   clock = new Date('2026-11-03T15:59:00Z');
@@ -46,6 +56,14 @@ async function ok<K extends ApiRouteName>(name: K, input?: ApiContracts[K]['requ
 }
 
 describe('seed and read endpoints', () => {
+ it('公开读接口下发 no-store：响应体含登录态，不能被共享缓存保存', async () => {
+ for (const path of ['/api/stations', '/api/models', '/api/posts', '/api/rankings?tab=model', '/api/banners']) {
+ const response = await server.app.request(path);
+ expect(response.status).toBe(200);
+ expect(response.headers.get('cache-control')).toBe('no-store');
+ }
+ });
+
   it('GET vendors returns the ordered eleven vendors with 2–4 models each', async () => {
     const vendors = await ok('getVendors');
     expect(vendors.items.map(v => v.name)).toEqual(['OpenAI', 'Anthropic', 'Google', 'DeepSeek', 'xAI', 'Meta', '阿里通义', '字节豆包', '月之暗面', '智谱AI', 'MiniMax']);
@@ -90,8 +108,13 @@ describe('seed and read endpoints', () => {
       expect(Date.parse(p.publishedAt)).toBeGreaterThan(clock.getTime() - 30 * 86400000);
     });
     const first = posts.items[0];
-    expect(await ok('getPost', { id: first.id })).toEqual(first);
-    const filtered = await ok('getPosts', { kind: first.kind, station: first.stationSlug!, model: first.modelSlug!, vendor: 'openai', sort: 'hot', q: first.title.slice(0, 2) });
+    // 列表按 PostSummary 返回（不带 body），详情接口才有正文。
+    expect(first).not.toHaveProperty('body');
+    expect(await ok('getPost', { id: first.id })).toEqual({ ...first, body: expect.any(String) });
+    // 只用确实能命中的条件：带上不匹配的 vendor 时结果恒为 0，
+    // 而 every() 对空数组恒真——断言看着在跑，其实什么都没验。
+    const filtered = await ok('getPosts', { kind: first.kind, station: first.stationSlug!, sort: 'hot' });
+    expect(filtered.items.length).toBeGreaterThan(0);
     expect(filtered.items.every(p => p.kind === first.kind && p.stationSlug === first.stationSlug)).toBe(true);
     const page = await ok('getPosts', { page: 2, pageSize: 3 });
     expect(page.items).toHaveLength(3);
@@ -140,12 +163,19 @@ describe('seed and read endpoints', () => {
     }
   });
 
-  it.each(['model', 'community', 'expert'] as const)('returns %s rankings with 6–12 entries', async tab => {
+  it.each(['model', 'station', 'community', 'expert'] as const)('returns %s rankings with 6–12 entries', async tab => {
     const ranking = await ok('getRankings', { tab });
     expect(ranking.tab).toBe(tab);
     expect(ranking.items.length).toBeGreaterThanOrEqual(6);
     expect(ranking.items.length).toBeLessThanOrEqual(12);
     expect(ranking.items.map(i => i.rank)).toEqual(ranking.items.map((_, i) => i + 1));
+  });
+
+  it('站点榜与 /stations?sort=score 同序：两处给出不同顺序等于其中一个是错的', async () => {
+    const ranking = await ok('getRankings', { tab: 'station', pageSize: 12 });
+    const stations = await ok('getStations', { sort: 'score', pageSize: 12 });
+    if (ranking.tab !== 'station') throw new Error(`期望站点榜，实际 ${ranking.tab}`);
+    expect(ranking.items.map(item => item.station.slug)).toEqual(stations.items.map(station => station.slug));
   });
 
   it('searches model, station and article text with bounded groups and literal query safety', async () => {
@@ -156,6 +186,21 @@ describe('seed and read endpoints', () => {
     for (const items of Object.values(await ok('search', { q: 'a' }))) expect(items.length).toBeLessThanOrEqual(10);
     expect(await ok('search', { q: "' OR 1=1 --" })).toEqual({ models: [], stations: [], posts: [] });
   });
+
+ it('putVote/putFavorite 共享每用户滑窗，超限429 且响应带 retryAfter', async () => {
+ await signIn();
+ for (let index =0; index <30; index++) {
+ clock = new Date(clock.getTime() +1500);
+ await ok('putVote', { targetType: 'post', targetId: 'post-1', value: index %2 ===0 ? 'up' : 'down' });
+ }
+ clock = new Date(clock.getTime() +1500);
+ const blocked = await request('putVote', { targetType: 'post', targetId: 'post-1', value: 'up' });
+ expect(blocked.status).toBe(429);
+ expect((blocked.data as { error: { code: string; details?: { retryAfter?: number } } }).error.code).toBe('RATE_LIMITED');
+ //收藏与投票共享同一只桶：刚刚打满的是投票，收藏立即429。
+ const favBlocked = await request('putFavorite', { targetType: 'post', targetId: 'post-1', favorited: true });
+ expect(favBlocked.status).toBe(429);
+ });
 
   it('ranks live user-earned votes and community discussion after writes', async () => {
     await signIn();
@@ -183,13 +228,14 @@ describe('seed and read endpoints', () => {
   it('hot sorting promotes a fresh upvoted post and penalizes its changed downvote', async () => {
     await signIn();
     const input = { kind: 'community' as const, summary: '排序行为测试', body: '虚构测试内容' };
-    const approve = (id: string) => server.db.prepare("UPDATE entities SET data = json_set(data, '$.status', 'approved') WHERE kind = 'post' AND id = ?").run(id);
+    // 站内发帖现在先进投稿队列，审核通过才物化到 entities。
+    const approve = (id: string) => reviewSubmission(openStore(server.db), clock, id, { status: 'approved' });
     const older = await ok('createPost', { ...input, title: '较早的热门讨论' });
-    approve(older.id);
+    expect(approve(older.id).status).toBe('approved');
     await ok('putVote', { targetType: 'post', targetId: older.id, value: 'up' });
     clock = new Date(clock.getTime() + 2 * 86400000);
     const fresh = await ok('createPost', { ...input, title: '新的热门讨论' });
-    approve(fresh.id);
+    expect(approve(fresh.id).status).toBe('approved');
     await ok('putVote', { targetType: 'post', targetId: fresh.id, value: 'up' });
     expect((await ok('getPosts', { sort: 'hot' })).items[0].id).toBe(fresh.id);
     await ok('putVote', { targetType: 'post', targetId: fresh.id, value: 'down' });
@@ -226,6 +272,234 @@ describe('writes and boundary validation', () => {
     const down = await ok('putVote', { targetType, targetId, value: 'down' });
     expect(down.votes).toMatchObject({ up: base.votes.up, down: base.votes.down + 1 });
     expect((await ok('putVote', { targetType, targetId, value: null })).votes).toEqual(base.votes);
+  });
+
+  it('站内用户可以推荐新站点，审核通过后自动建站', async () => {
+    // 回归：网页投稿只有文章和补录模型两条路，站点只能由飞书同步或 Agent 送来。
+    // 读者发现一个新站，页面上根本没有地方提交。
+    await signIn();
+    const queued = await ok('suggestStation', { name: '新发现的站', url: 'https://brand-new.example.com/' });
+    expect(queued).toMatchObject({ status: 'pending', deduplicated: false });
+    // 还没审核，站点不该存在
+    expect(server.db.prepare("SELECT id FROM entities WHERE kind = 'station' AND json_extract(data,'$.url') = 'https://brand-new.example.com/'").get()).toBeUndefined();
+
+    // 进的是同一个审核队列（管理端能看到），渠道记为 web
+    const row = server.db.prepare("SELECT channel, status, kind FROM submissions WHERE id = ?").get(queued.id);
+    expect(row).toMatchObject({ channel: 'web', status: 'pending', kind: 'station' });
+  });
+
+  it('推荐新站时模型写错立刻报错，不会变成停在 pending 的坏记录', async () => {
+    await signIn();
+    const result = await request('suggestStation', {
+      name: '某站', url: 'https://bad-model.example.com/', offers: [{ modelSlug: 'no-such-model', rate: 0.5 }],
+    });
+    expect(result.status).toBe(400);
+    expect(JSON.stringify(result.data)).toContain('未知模型');
+    // 坏记录没有落库：否则它会一直占着 pending 配额，审核者也修不了
+    expect(server.db.prepare("SELECT count(*) AS c FROM submissions WHERE channel = 'web' AND kind = 'station'").get()).toEqual({ c: 0 });
+  });
+
+ it('推荐站的倍率越界当场 400，不进 pending 等人工发现', async () => {
+ await signIn();
+ // 放行 99999 的话这条会通过路由校验、在物化时被 stationSchema 拒掉，
+ // 整条记录停在 pending，审核台只看到一条「改不了也审不过」的坏行。
+ for (const rate of [99999, -5]) {
+ const result = await request('suggestStation', {
+ name: '越界站', url: 'https://out-of-range.example.com/', offers: [{ modelSlug: 'gpt-4-1', rate }],
+ });
+ expect(result.status).toBe(400);
+ }
+ expect(server.db.prepare("SELECT count(*) AS c FROM submissions WHERE channel = 'web' AND kind = 'station'").get()).toEqual({ c: 0 });
+ });
+
+  it('报价带计价口径与来源时间，缺省按综合倍率读', async () => {
+    // 回归：rate 只说「相对官方价多少」，不说这个数字怎么来的。输入按量、
+    // 输出按量、打包价、综合四种口径下同一个数字含义完全不同，而榜单把
+    // 「数字越小越便宜」当成普适结论——那条结论只有在同一口径内成立。
+    await signIn();
+    // 演示种子已经给这几个模型挂了综合口径报价，不先清掉就测不出「只算综合口径」
+    // ——那样断言即使代码没改对也会通过。
+    server.db.prepare("DELETE FROM offers WHERE modelSlug IN ('deepseek-chat','deepseek-reasoner','deepseek-coder')").run();
+    await request('suggestStation', {
+      name: '口径测试站', url: 'https://basis.example.com/',
+      offers: [
+        { modelSlug: 'deepseek-chat', rate: 0.3, basis: 'input' },
+        { modelSlug: 'deepseek-reasoner', rate: 0.45, basis: 'output', quotedAt: '2026-11-01T00:00:00.000Z' },
+        { modelSlug: 'deepseek-coder', rate: 0.6 },
+      ],
+    });
+    // 这个文件建 app 时没配 syncToken，管理接口用不了。直接查库拿投稿 id。
+    const pending = server.db.prepare("SELECT id FROM submissions WHERE kind = 'station' AND status = 'pending' ORDER BY rowid DESC LIMIT 1").get() as { id: string };
+    reviewSubmission(openStore(server.db), clock, pending.id, { status: 'approved' });
+
+    const detail = await (await server.app.request('/api/stations/sub-basis-example-com')).json() as {
+      lowestRate: number | null;
+      offers: { modelSlug: string; rate: number; basis: string; quotedAt: string | null }[];
+    };
+    const byModel = new Map(detail.offers.map(offer => [offer.modelSlug, offer]));
+    expect(byModel.get('deepseek-chat')).toMatchObject({ basis: 'input', quotedAt: null });
+    expect(byModel.get('deepseek-reasoner')).toMatchObject({ basis: 'output', quotedAt: '2026-11-01T00:00:00.000Z' });
+    // 不给 basis 的老写法必须落到 blended，而不是变成 undefined 让前端崩
+    expect(byModel.get('deepseek-coder')).toMatchObject({ basis: 'blended', quotedAt: null });
+    // 「低至 x」只认综合口径。三条报价里最低的是按输入的 0.3，但那个数只对
+    // 输入 token 成立；拿它当整站最低价挂到卡片上，是把局部价冒充成整体价。
+    expect(detail.lowestRate).toBe(0.6);
+    // 详情页的报价表也得先按口径分组：只按 rate 排的话第一行是按输入的 0.3，
+    // 读者第一眼看到的是个不可比的局部价。
+    expect(detail.offers.map(offer => offer.basis)).toEqual(['blended', 'input', 'output']);
+  });
+
+  it('认不出的口径排在最后，不会占住第一行被标成最便宜', () => {
+    // 老库的 ALTER 补不上 basis 的 CHECK，手工 UPDATE 进去的脏值确实可能存在。
+    // `BASIS_ORDER.indexOf('garbage')` 返回 -1，用它排序会把这个谁也不认识的口径
+    // 排到第一行；而前端把第一行标成「最便宜」。等于拿脏数据给站点背书。
+    //
+    // 新库有 CHECK，脏值写不进库——这正好说明为什么在排序函数这一层测：
+    // 约束挡不住「已经是脏数据的库」，而排序逻辑要能扛住它。
+    const dirty = { rate: 0.2, basis: 'garbage' };
+    const blended = { rate: 0.9, basis: 'blended' };
+    expect(sortOffersForDisplay([dirty, blended])).toEqual([blended, dirty]);
+    // 也不能只排到 blended 后面却抢在其它合法口径前面
+    expect(sortOffersForDisplay([dirty, { rate: 0.5, basis: 'package' }, { rate: 0.7, basis: 'output' }, { rate: 0.6, basis: 'input' }])
+      .map(offer => offer.basis)).toEqual(['input', 'output', 'package', 'garbage']);
+  });
+
+  it('只有非综合口径报价时，最低倍率显示「暂无」而不是拿别的口径冒充', async () => {
+    await signIn();
+    await request('suggestStation', {
+      name: '纯输入价站', url: 'https://input-only.example.com/',
+      offers: [{ modelSlug: 'deepseek-chat', rate: 0.2, basis: 'input' }],
+    });
+    const pending = server.db.prepare("SELECT id FROM submissions WHERE kind = 'station' AND status = 'pending' ORDER BY rowid DESC LIMIT 1").get() as { id: string };
+    reviewSubmission(openStore(server.db), clock, pending.id, { status: 'approved' });
+    const detail = await (await server.app.request('/api/stations/sub-input-only-example-com')).json() as { lowestRate: number | null };
+    expect(detail.lowestRate).toBeNull();
+  });
+
+  it('我的投稿覆盖文章、模型、站点三类，都带状态和驳回理由', async () => {
+    // 回归：「我的分享」只查文章。作者补录了模型或推荐了站点之后，
+    // 那两条通道照样审核、照样写驳回理由，但提交人在站内查不到任何结果。
+    await signIn();
+    await ok('createPost', { kind: 'review', title: '我的评测', summary: 's', body: 'b' });
+    await ok('suggestModel', { slug: 'my-model-x', vendor: 'openai', name: '我的模型', description: 'd' });
+    await ok('suggestStation', { name: '我的站', url: 'https://mine-ms.example.com/' });
+    const list = await ok('getMySubmissions', { pageSize: 20 });
+    expect(list.total).toBe(3);
+    expect(list.items.map(item => item.kind).sort()).toEqual(['model', 'post', 'station']);
+    // 待审时还没有实体，不该给链接
+    expect(list.items.every(item => item.status === 'pending' && item.targetSlug === null)).toBe(true);
+  });
+
+  it('我的投稿只包含本人 web 渠道的记录，不泄漏飞书与 Agent 的内部 originKey', async () => {
+    await signIn();
+    await ok('createPost', { kind: 'review', title: '我的评测', summary: 's', body: 'b' });
+    // 另外塞一条 agent 渠道的记录，同一个 actorHandle
+    server.db.prepare(
+      "INSERT INTO submissions (id, kind, channel, originKey, action, payload, payloadHash, actorHandle, ip, status, createdAt) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+    ).run('agent-row', 'station', 'agent', 'internal-origin-key', 'upsert', JSON.stringify({ name: '别人送的站' }), 'h', 'tester', '1.1.1.1', 'pending', new Date().toISOString());
+    const list = await ok('getMySubmissions', { pageSize: 20 });
+    expect(list.items.some(item => item.id === 'agent-row')).toBe(false);
+    expect(JSON.stringify(list)).not.toContain('internal-origin-key');
+  });
+
+  it('已通过的投稿给出能打开的详情链接', async () => {
+    await signIn();
+    const approvedPost = await ok('createPost', { kind: 'review', title: '我的评测', summary: 's', body: 'b' });
+    await ok('suggestStation', { name: '我的站', url: 'https://link-ok.example.com/' });
+    const ids = (server.db.prepare("SELECT id FROM submissions WHERE channel = 'web'").all() as { id: string }[]).map(row => row.id);
+    for (const id of ids) reviewSubmission(openStore(server.db), clock, id, { status: 'approved' });
+
+    const list = await ok('getMySubmissions', { pageSize: 20 });
+    const post = list.items.find(entry => entry.id === approvedPost.id)!;
+    const station = list.items.find(entry => entry.kind === 'station')!;
+    // 文章物化后 id 就是投稿 id；站点 slug 由 hostname 决定，不是 originKey
+    expect(post.targetSlug).toBe(approvedPost.id);
+    expect(station.targetSlug).toBe('sub-link-ok-example-com');
+    // 两个链接都要真的能打开，别给出 404
+    expect((await server.app.request(`/api/posts/${post.targetSlug}`, { headers: { cookie } })).status).toBe(200);
+    expect((await server.app.request(`/api/stations/${station.targetSlug}`, { headers: { cookie } })).status).toBe(200);
+  });
+
+  it('被驳回的投稿带出审核理由，且只有作者本人看得到', async () => {
+    // 回归：服务端把理由写进了 submissions.reason，却没有任何接口把它送出来。
+    // 「我的分享」只显示 status=rejected，作者不知道哪里不合格，也没法据此重投。
+    await signIn();
+    const mine = await ok('createPost', { kind: 'review', title: '我的评测', summary: 's', body: 'b' });
+    server.db.prepare("UPDATE submissions SET status = 'rejected', reason = ? WHERE id = ?")
+      .run('缺少站点信息，请补充后重投', mine.id);
+    const list = await ok('getMyPosts', { pageSize: 10 });
+    expect(list.items[0]).toMatchObject({ status: 'rejected', reviewReason: '缺少站点信息，请补充后重投' });
+    // 已公开的文章不该带这个字段
+    expect(list.items.every(item => item.status !== 'rejected' || item.reviewReason)).toBe(true);
+    return mine;
+  });
+
+  it('未经审核的投稿理由不会泄漏给其他账号', async () => {
+    await signIn();
+    await ok('createPost', { kind: 'review', title: '甲的文章', summary: 's', body: 'b' });
+    const row = server.db.prepare("SELECT id FROM submissions WHERE channel = 'web' ORDER BY rowid DESC LIMIT 1").get() as { id: string };
+    server.db.prepare("UPDATE submissions SET status = 'rejected', reason = ? WHERE id = ?").run('内部审核备注', row.id);
+    await request('register', { username: 'observer', password: PASSWORD, nickname: '旁观者' });
+    const others = await ok('getMyPosts', { pageSize: 10 });
+    expect(others.items.some(item => item.reviewReason === '内部审核备注')).toBe(false);
+  });
+
+  it('我的投稿只含自己的、未下架的，且与分享数一致', async () => {
+    // 回归：getMyPosts 曾用 store.all('post') 全量反序列化再在 JS 里按作者过滤
+    // （2 万篇时 280~650ms）。改成把 authorHandle 下推给 SQLite 后，
+    // 「只看自己」「排除已下架」这两条语义必须与原来完全一致。
+    await signIn();
+    const mine = await ok('createPost', { kind: 'review', title: '我的第一篇', summary: 's', body: 'b' });
+    const mineList = await ok('getMyPosts', { pageSize: 100 });
+    expect(mineList.items.map(item => item.id)).toContain(mine.id);
+    // 分享数与列表必须一致（两者共用同一套「只看自己 + 排除已下架」的判定）
+    expect(mineList.total).toBe((await ok('getMe')).shareCount);
+
+    // 换一个账号：看不到别人的
+    await request('register', { username: 'another', password: PASSWORD, nickname: '另一个' });
+    const another = await ok('getMyPosts', { pageSize: 100 });
+    expect(another.items.map(item => item.id)).not.toContain(mine.id);
+    expect(another.total).toBe((await ok('getMe')).shareCount);
+  });
+
+  it('收藏数不计「目标已不存在」的条目，也不漏「还没物化的自己的待审稿」', async () => {
+    // 两个方向都要盯住，它们各自把人往相反方向带偏：
+    //  - 目标被删/被撤下后仍计入 → 收藏数虚高，用户点进去是 404；
+    //  - 自己刚提交、还只在 submissions 里的待审稿被漏掉 → 收藏数比列表少。
+    // 后者是真实出现过的：改成分页后 total 与列表走了两套实现，一度漂移。
+    const created = await ok('createPost', { kind: 'review', title: '还没上线的一篇', summary: '待审', body: '正文' });
+    await ok('putFavorite', { targetType: 'post', targetId: created.id, favorited: true });
+    const withQueued = await ok('getMyFavorites', { pageSize: 100 });
+    expect(withQueued.total).toBe(withQueued.items.length);
+    expect(withQueued.items.some(item => item.targetId === created.id)).toBe(true);
+    expect((await ok('getMe')).favoriteCount).toBe(withQueued.total);
+
+    // 目标被删除后收藏行会留下（下架是软删除、导入会把行删掉），
+    // 接口层 requireTarget 会挡住新收藏，所以这里直接写库模拟遗留数据。
+    server.db.prepare('INSERT INTO favorites (userHandle,targetType,targetId,createdAt) VALUES (?,?,?,?)')
+      .run('tester', 'post', 'no-such-post', clock.toISOString());
+    const afterGhost = await ok('getMyFavorites', { pageSize: 100 });
+    expect(afterGhost.items.some(item => item.targetId === 'no-such-post')).toBe(false);
+    expect(afterGhost.total).toBe(withQueued.total);
+    expect((await ok('getMe')).favoriteCount).toBe(withQueued.total);
+  });
+
+  it('收藏列表先分页再组装，翻页不重不漏且总数一致', async () => {
+    // 这条盯住「先在 SQL 里分页、只组装本页」的改造：如果退回「全量组装后
+    // slice」，页数与条数仍然对得上，但每条都要多跑几条 SQL；如果分页算错，
+    // 这里会看到重复或漏项。
+    const all = await ok('getMyFavorites', { pageSize: 100 });
+    const pageSize = 3;
+    const collected: string[] = [];
+    for (let page = 1; page <= Math.ceil(all.total / pageSize); page++) {
+      const chunk = await ok('getMyFavorites', { page, pageSize });
+      expect(chunk.page).toBe(page);
+      expect(chunk.pageSize).toBe(pageSize);
+      collected.push(...chunk.items.map(item => `${item.targetType}:${item.targetId}`));
+    }
+    const straight = all.items.map(item => `${item.targetType}:${item.targetId}`);
+    expect(collected).toEqual(straight.slice(0, collected.length));
+    expect(new Set(collected).size).toBe(collected.length);
   });
 
   it.each(['post', 'station'] as const)('sets and unsets %s favorites idempotently', async targetType => {

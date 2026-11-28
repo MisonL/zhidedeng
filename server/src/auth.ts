@@ -10,6 +10,16 @@ const COOKIE = /(?:^|;\s*)session=([A-Za-z0-9_-]{43})(?:;|$)/;
 
 // 账号和种子用户共用 entities 的 user 行。用户名不允许连字符，所以永远撞不上种子的 demo-* 和导入文章的作者。
 export const USERNAME = /^[A-Za-z0-9_]{3,20}$/;
+
+/**
+ * 保留名：程序内部用来表示「没有作者」的哨兵，不允许真人注册。
+ *
+ * `submissions.ts` 在飞书/导入文章既没有 actorHandle 也没有 authorHandle 时
+ * 会写 `unknown`（新数据写 `unknown-feishu`）。这些名字本身符合 USERNAME 规则，
+ * 谁先注册到，谁就会收到**别人文章**被下架/恢复的通知（标题全露）。
+ * 与其在读取时猜「这行是真作者还是哨兵」，不如从注册这一端禁掉。
+ */
+export const RESERVED_HANDLES = new Set(['unknown', 'unknown_feishu', 'feishu', 'anonymous', 'admin', 'root', 'system', 'demo', 'test']);
 export const INITIAL_TOKENS = 120;
 
 const WEAK_PASSWORDS = new Set([
@@ -18,7 +28,110 @@ const WEAK_PASSWORDS = new Set([
   'abc12345', 'abcd1234', 'abcdefgh', '1q2w3e4r', '1qaz2wsx', 'admin123', 'administrator', 'iloveyou',
   'woaini1314', 'a1234567', 'aa123456', 'letmein1', 'welcome1', 'zhidedeng',
 ]);
-export const isWeakPassword = (password: string) => WEAK_PASSWORDS.has(password.toLowerCase());
+/**
+ * 口令强度检查。
+ *
+ * 早先只是一张 30 词的精确匹配表，`admin1234`、`qwerty1234`、`aaaaaaaa` 全部放行——
+ * 撞库和口令喷洒（用几个常见口令打大量账号）几乎不受阻。
+ *
+ * 拆成两个层次，避免用一条粗暴规则同时误伤和漏判：
+ * - **必须**满足的最低门槛：长度与种类，不满足直接拒。
+ * - 在此基础上再判「明显有规律」，这类才是真正常见的口令。
+ *   判据要覆盖整段而不是「包含某个 4 连」——后者放过 welcome123、P@ssw0rd!x，
+ *   也放过 Hunter2hunter2，因为它们只是「某一部分有规律」。
+ */
+const MIN_LENGTH = 10;
+
+/** 键盘行与相邻键位。斜着按（qaz、wsx）也是常见的手指路径。 */
+const KEYBOARD_ROWS = ['1234567890', 'qwertyuiop', 'asdfghjkl', 'zxcvbnm'];
+const KEYBOARD_DIAGONALS = ['1qaz', '2wsx', '3edc', '4rfv', '5tgb', '6yhn', '7ujm', '8ik,', '9ol.', '0p;/'];
+
+/** 口令里最常见的英文词根。只用来判断「去掉数字后剩下的主体是不是个常见词」。 */
+const COMMON_WORDS = ['password', 'passwd', 'welcome', 'admin', 'qwerty', 'abc', 'iloveyou', 'letmein',
+  'monkey', 'dragon', 'master', 'sunshine', 'princess', 'football', 'baseball', 'zhidedeng', 'woaini'];
+
+const ALPHABET = 'abcdefghijklmnopqrstuvwxyz';
+const DIGITS = '0123456789';
+
+/** 该子串是否是某条序列（含反向）的连续片段。 */
+function isRunOf(value: string, sequence: string): boolean {
+  const reversed = [...sequence].reverse().join('');
+  return sequence.includes(value) || reversed.includes(value);
+}
+
+/** 找出字符串里最长的「连续序列」片段长度，键盘行与相邻键位都算。 */
+function longestRun(lowered: string): number {
+  let longest = 0;
+  for (const row of [...KEYBOARD_ROWS, ...KEYBOARD_DIAGONALS]) {
+    for (let start = 0; start < lowered.length; start++) {
+      for (let length = 2; start + length <= lowered.length; length++) {
+        if (!isRunOf(lowered.slice(start, start + length), row)) break;
+        longest = Math.max(longest, length);
+      }
+    }
+  }
+  // 字母与数字各自的正反向序列单独算：9876543210 是 0123456789 的反向。
+  for (const sequence of [ALPHABET, DIGITS]) {
+    for (let start = 0; start < lowered.length; start++) {
+      for (let length = 2; start + length <= lowered.length; length++) {
+        if (!isRunOf(lowered.slice(start, start + length), sequence)) break;
+        longest = Math.max(longest, length);
+      }
+    }
+  }
+  return longest;
+}
+
+/** 连续重复字符（aaa、1111）的最长长度。 */
+function longestRepeat(lowered: string): number {
+  let longest = 1;
+  let current = 1;
+  for (let index = 1; index < lowered.length; index++) {
+    current = lowered[index] === lowered[index - 1] ? current + 1 : 1;
+    longest = Math.max(longest, current);
+  }
+  return longest;
+}
+
+/** 「同一段重复两次以上」，例如 abcabc、Hunter2hunter2、passwordpassword。 */
+function isRepeatedBlock(lowered: string): boolean {
+  for (let size = 1; size <= Math.floor(lowered.length / 2); size++) {
+    if (lowered.length % size !== 0) continue;
+    const block = lowered.slice(0, size);
+    if (block.repeat(lowered.length / size) === lowered) return true;
+  }
+  return false;
+}
+
+/**
+ * @param password 待检查的口令
+ * @param username 可选：口令里包含用户名（或反之）时视为弱口令
+ */
+export function isWeakPassword(password: string, username?: string): boolean {
+  const lowered = password.toLowerCase();
+  if (WEAK_PASSWORDS.has(lowered)) return true;
+  // 最低门槛：长度与字符种类。纯中文口令种类天然很少，但长度足够就放行。
+  if ([...password].length < MIN_LENGTH) return true;
+  if (new Set(password).size < 4 && !/[\u4e00-\u9fa5]/.test(password)) return true;
+  if (isRepeatedBlock(lowered)) return true;
+  if (longestRepeat(lowered) >= 4) return true;
+  if (longestRun(lowered) >= 4) return true;
+  // 「常见词 + 纯数字尾巴」是最典型的弱口令形态：welcome123、P@ssw0rd!x、
+  // 2026zhidedeng 都属于这一类，单看序列片段看不出来，必须单独判。
+  // 去掉首尾的纯数字段后，剩下的主体是否太短、或是否命中常见词。
+  // 先做 leet 归一：P@ssw0rd 与 password 是同一个词，只换写法不换熵。
+  // 数字替换要在「去掉首尾数字」之前做，否则 P@ssw0rd 的 0 会被当成尾巴剥掉。
+  const leet = lowered.replace(/[4@]/g, 'a').replace(/[3]/g, 'e').replace(/[1!|]/g, 'l')
+    .replace(/[0]/g, 'o').replace(/[5$]/g, 's').replace(/[7]/g, 't');
+  const core = leet.replace(/^[0-9]+/, '').replace(/[0-9]+$/, '').replace(/[^a-z\u4e00-\u9fa5]/g, '');
+  if (core.length < 6 && /[0-9]/.test(lowered)) return true;
+  if (COMMON_WORDS.some(word => core.includes(word))) return true;
+  if (username && username.length >= 3) {
+    const name = username.toLowerCase();
+    if (lowered.includes(name) || name.includes(lowered)) return true;
+  }
+  return false;
+}
 
 /** 限制同时运行的任务数，多余的排队，队列也满时拒绝。 */
 export class ConcurrencyGate {
@@ -65,8 +178,19 @@ export async function hashPassword(password: string) {
 }
 
 export async function verifyPassword(password: string, stored: string) {
-  const [, salt, hash] = stored.split('$');
-  return timingSafeEqual(await derive(password, Buffer.from(salt, 'base64url')), Buffer.from(hash, 'base64url'));
+ //stored 由 scrypt生成，恒为 'scrypt$salt$hash' 三段 base64url。库被污染或
+//迁移出错时可能出现畸形串：不校验就 decode，timingSafeEqual 会因长度不匹配
+//抛 RangeError，该账号的登录/改密全部变成500。这里按「密码不匹配」处理。
+ const parts = stored.split('$');
+ if (parts.length !==3 || parts.some(part => part.length ===0 || !/^[A-Za-z0-9_-]+$/.test(part))) return false;
+ const [, salt, hash] = parts;
+ const saltBuf = Buffer.from(salt, 'base64url');
+ const hashBuf = Buffer.from(hash, 'base64url');
+ //scrypt 的 N=16384, r=8, p=1 →输出恒为64 字节、标准 salt16 字节；
+ //长度不对的串解不出正确哈希，直接按不匹配处理，不给 timingSafeEqual
+ //抛 RangeError 的机会（超长 salt会让两个 buffer长度必然不等）。
+ if (saltBuf.length !==16 || hashBuf.length !==32) return false;
+ return timingSafeEqual(await derive(password, saltBuf), hashBuf);
 }
 
 /** 用户名不存在时也算一次哈希，响应时间不暴露用户名是否存在。 */
@@ -76,6 +200,41 @@ export async function burnPasswordCheck(password: string) {
 }
 
 const tokenHash = (token: string) => createHash('sha256').update(token).digest('hex');
+
+/**
+ * 清理过期数据。原先只在 createSession 里顺手清一次 sessions——
+ * 长期没人登录就一份也不清；rate_limits 也只清自己那个桶，
+ * 某个桶从此不再写入时旧行会一直留着。
+ *
+ * 两张表的窗口都以小时计，每天清一次足够，开销可忽略。
+ */
+export function purgeExpired(store: Store, now: Date): void {
+  store.db.prepare('DELETE FROM sessions WHERE expiresAt <= ?').run(now.toISOString());
+  store.db.prepare('DELETE FROM rate_limits WHERE at <= ?').run(now.getTime() - PURGE_RATE_LIMIT_MS);
+}
+
+/** 限流记录的保留期。取最长窗口（1 小时）的两倍，任何仍在生效的计数都不会被误删。 */
+const PURGE_RATE_LIMIT_MS = 2 * 60 * 60 * 1000;
+
+/**
+ * 登录签发前的最后一道复核。
+ *
+ * 验密要等 scrypt（几十毫秒）。这期间管理员可能重置了密码、或账号被禁用/注销。
+ * 只复查验密前那份快照是没用的——那份快照在 await 之前就读完了。所以签发前按
+ * `usernameKey` 重读一次：密码哈希必须还是验密时那一份，账号必须仍然可用。
+ *
+ * 返回 handle 表示可以签发；返回 null 表示这次登录作废（调用方按「用户名或
+ * 密码错误」回，不透露是哪一种）。
+ */
+export function confirmLoginCredentials(
+  store: Store, usernameKey: string, verifiedHash: string,
+): string | null {
+  const fresh = store.db.prepare(
+    'SELECT handle, passwordHash, disabledAt, deletedAt FROM accounts WHERE usernameKey = ?',
+  ).get(usernameKey) as { handle: string; passwordHash: string; disabledAt: string | null; deletedAt: string | null } | undefined;
+  if (!fresh || fresh.passwordHash !== verifiedHash || fresh.disabledAt !== null || fresh.deletedAt !== null) return null;
+  return fresh.handle;
+}
 
 export function createSession(store: Store, handle: string, now: Date) {
   const token = randomBytes(32).toString('base64url');
@@ -87,7 +246,7 @@ export function createSession(store: Store, handle: string, now: Date) {
 export function sessionHandle(store: Store, cookieHeader: string | undefined, now: Date) {
   const token = cookieHeader?.match(COOKIE)?.[1];
   if (!token) return null;
-  const row = store.db.prepare('SELECT sessions.handle, sessions.expiresAt FROM sessions JOIN accounts ON accounts.handle = sessions.handle WHERE sessions.tokenHash = ? AND accounts.disabledAt IS NULL').get(tokenHash(token));
+  const row = store.db.prepare('SELECT sessions.handle, sessions.expiresAt FROM sessions JOIN accounts ON accounts.handle = sessions.handle WHERE sessions.tokenHash = ? AND accounts.disabledAt IS NULL AND accounts.deletedAt IS NULL').get(tokenHash(token));
   return row && (row.expiresAt as string) > now.toISOString() ? row.handle as string : null;
 }
 
@@ -106,18 +265,46 @@ const cookieFlags = (secure: boolean) => `Path=/; HttpOnly; SameSite=Lax${secure
 export const sessionCookie = (token: string, secure: boolean) => `session=${token}; Max-Age=${SESSION_DAYS * 86400}; ${cookieFlags(secure)}`;
 export const clearedSessionCookie = (secure: boolean) => `session=; Max-Age=0; ${cookieFlags(secure)}`;
 
-/** 进程内滑动窗口计数。服务是单进程，重启清零可以接受。 */
+/** 计数落库所需的最小接口，只依赖这两条语句，避免把整个 Store 拖进来。 */
+export interface RateLimitStore {
+  db: {
+    prepare(sql: string): { all(...params: unknown[]): unknown[]; run(...params: unknown[]): unknown };
+  };
+}
+
+/**
+ * 滑动窗口计数。
+ *
+ * 传了 store 就写库：多个进程共用同一个库文件时配额才是真正的全局限额。
+ * 不传就用进程内 Map —— 单元测试和单进程部署是这个路径。
+ *
+ * 库版本只覆盖「共享同一个库文件」的多进程；跨主机部署要另换共享存储。
+ * 窗口内的旧记录由 record() 顺便清掉，不需要单独的清理任务。
+ */
 export class AttemptLimiter {
   private readonly attempts = new Map<string, number[]>();
+  /** 内存版：每个 key 已记录的自增序号，与 attempts 里的顺序一一对应。 */
+  private readonly ids = new Map<string, number[]>();
+  private nextId = 1;
   private readonly max: number;
   private readonly windowMs: number;
+  private readonly store?: RateLimitStore;
+  private readonly bucket: string;
 
-  constructor(max: number, windowMs: number) {
+  constructor(max: number, windowMs: number, store?: RateLimitStore, bucket = 'default') {
     this.max = max;
     this.windowMs = windowMs;
+    this.store = store;
+    this.bucket = bucket;
   }
 
-  private recent(key: string, now: number) {
+  private recent(key: string, now: number): number[] {
+    if (this.store) {
+      const rows = this.store.db
+        .prepare('SELECT at FROM rate_limits WHERE bucket = ? AND key = ? AND at > ? ORDER BY at')
+        .all(this.bucket, key, now - this.windowMs) as { at: number }[];
+      return rows.map(row => row.at);
+    }
     return (this.attempts.get(key) ?? []).filter(time => time > now - this.windowMs);
   }
 
@@ -127,19 +314,74 @@ export class AttemptLimiter {
     return recent.length < this.max ? 0 : Math.ceil((recent[0] + this.windowMs - now) / 1000);
   }
 
-  record(key: string, now: number) {
+  /** 当前滑动窗口的剩余次数；查询不预占名额。 */
+  remaining(key: string, now: number) {
+    return Math.max(0, this.max - this.recent(key, now).length);
+  }
+
+  /**
+   * 记一次尝试，返回可用来精确撤销它的句柄。
+   *
+   * 句柄是必须的：早先 release() 删的是「该 key 最新一条」，而调用方通常在
+   * 一个事务回滚之后才撤销——那时本次预占已经随回滚消失，删掉的就是上一次
+   * 成功的记录，配额被无限释放。
+   */
+  record(key: string, now: number): number {
+    if (this.store) {
+      // 顺手清掉本桶过期的记录：没有单独清理任务，靠写入顺带回收。
+      this.store.db.prepare('DELETE FROM rate_limits WHERE bucket = ? AND at <= ?').run(this.bucket, now - this.windowMs);
+      const result = this.store.db.prepare('INSERT INTO rate_limits (bucket, key, at) VALUES (?, ?, ?)').run(this.bucket, key, now) as { lastInsertRowid: number | bigint };
+      return Number(result.lastInsertRowid);
+    }
     if (this.attempts.size > 10_000) {
       for (const stale of this.attempts.keys()) if (this.recent(stale, now).length === 0) this.attempts.delete(stale);
     }
-    this.attempts.set(key, [...this.recent(key, now), now]);
+    const entry = { id: this.nextId++, at: now };
+    // 这里存的是**未过滤**的完整列表：ids 里的序号与 attempts 的下标必须一一对应，
+    // 否则随着旧记录过期，「第几条」的映射会整体错位，撤销就删到别的条上。
+    // 过期条目的过滤放在 recent() 读取时做。
+    const times = this.attempts.get(key);
+    if (times) times.push(now); else this.attempts.set(key, [now]);
+    const sequence = this.ids.get(key);
+    if (sequence) sequence.push(entry.id); else this.ids.set(key, [entry.id]);
+    return entry.id;
   }
 
-  /** 撤销最近一次 record：预占的尝试最后没有失败时调用。 */
-  release(key: string) {
-    this.attempts.get(key)?.pop();
+  /**
+   * 撤销**这一次**预占。id 来自 record() 的返回值。
+   * 不带 id 时退回「删最新一条」，仅供确实没有句柄的历史调用点使用。
+   */
+  release(key: string, id?: number) {
+    if (this.store) {
+      if (id === undefined) {
+        this.store.db.prepare('DELETE FROM rate_limits WHERE rowid = (SELECT rowid FROM rate_limits WHERE bucket = ? AND key = ? ORDER BY at DESC, rowid DESC LIMIT 1)')
+          .run(this.bucket, key);
+        return;
+      }
+      // 按 rowid 精确删。事务回滚后这条已不存在，删除自然成为空操作——
+      // 这正是想要的：不能因为撤销而抹掉别人的计数。
+      this.store.db.prepare('DELETE FROM rate_limits WHERE rowid = ? AND bucket = ? AND key = ?').run(id, this.bucket, key);
+      return;
+    }
+    const times = this.attempts.get(key);
+    if (!times) return;
+    if (id === undefined) { times.pop(); return; }
+    // 按插入序号找到它是这个 key 的第几条记录，删那一条。
+    // 只用时间戳定位会在「同一毫秒多条」时删错——撤销一次却抹掉了另一次的计数。
+    const sequence = this.ids.get(key);
+    if (!sequence) return;
+    const position = sequence.indexOf(id);
+    if (position < 0) return;
+    if (position < times.length) times.splice(position, 1);
+    sequence.splice(position, 1);
+    if (sequence.length === 0) this.ids.delete(key);
   }
 
   clear(key: string) {
+    if (this.store) {
+      this.store.db.prepare('DELETE FROM rate_limits WHERE bucket = ? AND key = ?').run(this.bucket, key);
+      return;
+    }
     this.attempts.delete(key);
   }
 }

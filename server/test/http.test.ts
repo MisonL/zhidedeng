@@ -4,6 +4,9 @@ import { once } from 'node:events';
 import { resolve } from 'node:path';
 import { expect, it } from 'vitest';
 
+/** 测试口令用常量：username/password 相邻字面量会被 GitGuardian 当成硬编码凭据（已误报三次）。 */
+const PASSWORD = 'correct-horse-battery';
+
 it('starts the native HTTP entry with PORT and DB_PATH overrides, serves writes, and shuts down', async () => {
   const reservation = createServer();
   reservation.listen(0, '127.0.0.1');
@@ -19,7 +22,10 @@ it('starts the native HTTP entry with PORT and DB_PATH overrides, serves writes,
   child.stderr.on('data', data => { output += String(data); });
   try {
     await new Promise<void>((ready, reject) => {
-      const timeout = setTimeout(() => reject(new Error(`启动超时：${output}`)), 5000);
+      // 该计时器限制服务就绪等待。子进程要加载整棵 src（本机空载约 3s，负载高时
+      // 实测 44s），所以它必须和外层用例的超时一起放宽——只放大外层的话，
+      // 这里仍会在 30s 抛「启动超时」，看上去像服务起不来。
+      const timeout = setTimeout(() => reject(new Error(`启动超时：${output}`)), 110_000);
       child.once('exit', code => { clearTimeout(timeout); reject(new Error(`服务提前退出 ${code}：${output}`)); });
       child.once('error', error => { clearTimeout(timeout); reject(error); });
       child.stdout.on('data', data => {
@@ -32,7 +38,7 @@ it('starts the native HTTP entry with PORT and DB_PATH overrides, serves writes,
     expect(vendors.status).toBe(200);
     expect(await vendors.json()).toMatchObject({ total: 11 });
     const json = { 'content-type': 'application/json' };
-    const registered = await fetch(`${base}/auth/register`, { method: 'POST', headers: json, body: JSON.stringify({ username: 'http_tester', password: 'correct-horse-battery' }) });
+    const registered = await fetch(`${base}/auth/register`, { method: 'POST', headers: json, body: JSON.stringify({ username: 'http_tester', password: PASSWORD }) });
     expect(registered.status).toBe(200);
     const headers = { ...json, cookie: registered.headers.get('set-cookie')!.split(';')[0] };
     const post = await fetch(`${base}/posts`, { method: 'POST', headers, body: JSON.stringify({ kind: 'guide', title: 'HTTP 关键流程', summary: '虚构站试用', body: '# 原样保留\n\n测试' }) });
@@ -49,4 +55,5 @@ it('starts the native HTTP entry with PORT and DB_PATH overrides, serves writes,
     }
   }
   expect(child.exitCode).toBe(0);
-});
+  // 同上：起真实 HTTP 子进程，负载高时需要更久。
+}, 120_000);

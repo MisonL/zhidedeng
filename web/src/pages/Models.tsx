@@ -5,7 +5,7 @@ import { api } from '../api';
 import AsyncView, { Empty, LoadMore } from '../components/AsyncView';
 import PostCard from '../components/PostCard';
 import { VendorIcon } from '../components/visuals';
-import { formatLatency, formatRate, formatStatus, formatUptime, SUBMISSION_LABEL } from '../format';
+import { formatLatency, formatQuotedAt, formatRate, formatRateBasis, formatStatus, formatUptime, sourceLabel } from '../format';
 import { useAsync, usePaged } from '../hooks';
 import { useCatalog } from '../state';
 
@@ -101,21 +101,34 @@ export function ModelDetailPage() {
                   </div>
                 </header>
                 <h2 className="section-title">各中转站倍率比价</h2>
-                <p className="hint">倍率为相对官方价的系数，数字越小越便宜。</p>
+                {/* 「数字越小越便宜」只在同一口径内成立。输入按量、输出按量、
+                    打包价、综合倍率四种口径下的同一个数字说的不是一回事，
+                    原先不标口径就直接排序并高亮最低价，是在替读者下一个
+                    它下不了的结论。 */}
+                <p className="hint">
+                  倍率为相对官方价的系数。<strong>只有同一计价口径之间才能比大小</strong>，
+                  不同口径（按输入 / 按输出 / 打包价 / 综合）的数字不可直接比较。
+                </p>
                 {model.offers.length === 0
-                  ? <Empty title="暂时没有站点报价" />
+                  // 演示站的虚构报价在有真实报价时不参与市场统计（与榜单一致），
+                  // 所以这里可能为空——说清楚「为什么空」，别让人以为没加载。
+                  ? <Empty title="暂时没有可展示的报价" hint="演示站的虚构报价在有真实报价时不参与对比。" />
                   : (
                     <div className="table-scroll">
                       <table className="data-table">
-                        <thead><tr><th>中转站</th><th>倍率</th><th>可用率</th><th>首 token 延迟</th><th>状态</th><th><span className="sr-only">操作</span></th></tr></thead>
+                        <thead><tr><th>中转站</th><th>倍率</th><th>计价口径</th><th>报价时间</th><th>可用率</th><th>首 token 延迟</th><th>状态</th><th><span className="sr-only">操作</span></th></tr></thead>
                         <tbody>
                           {model.offers.map((offer) => (
-                            <tr key={offer.stationSlug} className={offer.rate === model.offers[0].rate ? 'is-best' : undefined}>
+                            // 只有和最低价同口径时才高亮：跨口径比出来的「最低」
+                            // 是假便宜（按输入 0.3 和综合 0.5 本来就不可比）。
+                            <tr key={offer.stationSlug} className={offer.rate === model.offers[0].rate && offer.basis === model.offers[0].basis ? 'is-best' : undefined}>
                               <td>
                                 <Link to={`/stations/${offer.stationSlug}`}>{offer.station.name}</Link>{' '}
-                                {offer.station.source === 'submission' && <span className="tag tag-warn">{SUBMISSION_LABEL}</span>}
+                                {sourceLabel(offer.station.source) && <span className="tag tag-warn">{sourceLabel(offer.station.source)}</span>}
                               </td>
                               <td className="num rate-cell">{formatRate(offer.rate)}</td>
+                              <td>{formatRateBasis(offer.basis)}</td>
+                              <td className="num">{formatQuotedAt(offer.quotedAt)}</td>
                               <td className="num">{formatUptime(offer.station.uptime)}</td>
                               <td className="num">{formatLatency(offer.station.firstTokenLatencyMs)}</td>
                               <td>{formatStatus(offer.station.status)}</td>

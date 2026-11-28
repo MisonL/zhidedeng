@@ -1,0 +1,1093 @@
+import { useEffect, useId, useRef, useState } from 'react';
+import type { FormEvent } from 'react';
+import { feishuHostnameKey } from '@zhidedeng/shared';
+import type { Station, SubmissionRecord } from '@zhidedeng/shared';
+import { admin, adminToken, AdminError } from '../admin';
+import type { AdminDeletedAccount, AdminPostRow, AdminReport, RemovedPost, RemovedStation, RevertibleStation } from '../admin';
+import { displayTime } from '../format';
+import { Skeleton } from '../components/AsyncView';
+import ConfirmButton from '../components/ConfirmButton';
+import { useCatalog } from '../state';
+
+/** 举报每页条数。跟服务端 /api/admin/reports 的上限（50）留出余量。 */
+const REPORTS_PAGE_SIZE = 20;
+
+/** 服务端 ids 模式的单批上限，与 submissions.ts 的 schema 保持一致。 */
+const BATCH_REVIEW_LIMIT = 100;
+
+const KIND_LABEL: Record<string, string> = { station: '站点', model: '模型', post: '文章' };
+const TARGET_LABEL: Record<string, string> = { post: '文章', station: '站点', comment: '评论' };
+const CHANNEL_LABEL: Record<string, string> = { feishu: '飞书', agent: 'Agent', web: '站内' };
+/** 常见驳回原因。Agent 通道必须给理由，点一下就填上，省得每次手打。 */
+const REJECT_PRESETS = ['报价与页面不一致', '站点无法访问', '与已有投稿重复', '内容含广告或推荐语', '字段填写有误'];
+
+/** 投稿内容摘要：待审列表要能一眼看出这条改的是什么。 */
+function summarize(submission: SubmissionRecord): string {
+  const payload = submission.payload as Record<string, unknown> | null;
+  if (!payload || typeof payload !== 'object') return '';
+  if (submission.action === 'remove') return `下架 ${String(payload.slug ?? '')}`;
+  const name = payload.name ?? payload.title;
+  const url = payload.url;
+  if (typeof name === 'string' && typeof url === 'string') return `${name} · ${url}`;
+  if (typeof name === 'string') return name;
+  return typeof payload.slug === 'string' ? payload.slug : '';
+}
+
+/**
+ * 这条投稿对上线的实际影响。
+ *
+ * 审核一个站点投稿时，物化是**整包替换**：报价先全删再按投稿重插，
+ * 描述、支付方式也是覆盖写。原来这里只显示「名称 · URL」，审核员看不到
+ * 「这一通过会删掉多少条报价、把描述换成另一段」，只能靠域名眼熟做判断。
+ *
+ * 列表接口不返回 offers（只有 lowestRate 汇总），所以这里按条数 + 最低倍率
+ * 的变化给出提示，不做逐条 diff——那需要新接口，等真有审核量再说。
+ */
+function impact(submission: SubmissionRecord, current: Station | undefined): string[] {
+  const payload = submission.payload as Record<string, unknown> | null;
+  if (!payload || typeof payload !== 'object') return [];
+  const offers = Array.isArray(payload.offers) ? payload.offers as Array<{ modelSlug?: unknown; rate?: unknown }> : null;
+  if (!offers) return [];
+  const rates = offers.map(offer => Number(offer.rate)).filter(rate => Number.isFinite(rate));
+  const lowest = rates.length ? Math.min(...rates) : null;
+  if (!current) return [`新建站点，提交 ${offers.length} 条报价`];
+  const lines = [`更新已有站点：报价将被整包替换为 ${offers.length} 条`];
+  if (lowest !== null && current.lowestRate !== null && lowest !== current.lowestRate) {
+    lines.push(`最低倍率 ${current.lowestRate}x → ${lowest}x`);
+  }
+  if (typeof payload.description === 'string' && payload.description !== current.description) {
+    lines.push(`描述将被覆盖：${payload.description.slice(0, 60)}${payload.description.length > 60 ? '…' : ''}`);
+  }
+  return lines;
+}
+
+type Tab = 'submissions' | 'posts' | 'published' | 'removed' | 'removedPosts' | 'revertible' | 'reports' | 'accounts';
+
+/**
+ * 手动加减 Token。只用于补偿与扣回——理由必填，因为流水就是审计日志，
+ * 一条没有理由的负数事后没人解释得清。
+ */
+function TokenAdjust({ handle: fixedHandle = '' }: { handle?: string }) {
+  // 从已注销列表进来时 handle 固定；从页面顶部进来时手填（活跃账号也要能补发）。
+  const [open, setOpen] = useState(false);
+  const [handle, setHandle] = useState(fixedHandle);
+  // 表单 id 必须唯一：页面上会同时有多份这个表单（顶部一份 + 每个已注销账号一份），
+  // 用 handle 拼 id 会在 handle 为空时撞成同一个，label 指到别人家的输入框。
+  const uid = useId();
+  const deltaId = `${uid}-delta`;
+  const memoId = `${uid}-memo`;
+  const handleId = `${uid}-handle`;
+  const [delta, setDelta] = useState('');
+  const [memo, setMemo] = useState('');
+  const [message, setMessage] = useState<{ ok: boolean; text: string }>();
+  const [busy, setBusy] = useState(false);
+
+  async function apply(event: FormEvent) {
+    event.preventDefault();
+    const value = Number(delta);
+    if (!handle.trim()) return setMessage({ ok: false, text: '请填写用户名' });
+    if (!Number.isInteger(value) || value === 0) return setMessage({ ok: false, text: '请填写一个非零整数' });
+    if (!memo.trim()) return setMessage({ ok: false, text: '必须填写理由' });
+    setBusy(true);
+    try {
+      // 大小写不转：服务端按 usernameKey（小写）查，输入原样传过去就好，
+      // 响应里的 handle 是账号的规范写法，回显用它。
+      const result = await admin.adjustTokens(handle.trim(), value, memo.trim());
+      setMessage({ ok: true, text: `已调整，当前余额 ${result.balance}` });
+      setDelta(''); setMemo('');
+    } catch (error) {
+      setMessage({ ok: false, text: (error as Error).message });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (!open) {
+    return (
+      <div className="tags">
+        <button type="button" className="btn btn-small btn-ghost" onClick={() => setOpen(true)}>
+          {fixedHandle === '' ? '按用户名调整 Token' : '调整 Token'}
+        </button>
+      </div>
+    );
+  }
+  return (
+    <form onSubmit={apply} noValidate>
+      <div className="field-row">
+        {fixedHandle === '' && (
+          <div className="field">
+            <label className="field-label" htmlFor={handleId}>用户名</label>
+            <input id={handleId} value={handle} onChange={event => setHandle(event.target.value)} />
+          </div>
+        )}
+        <div className="field">
+          <label className="field-label" htmlFor={deltaId}>增减（负数＝扣回）</label>
+          <input id={deltaId} value={delta} onChange={event => setDelta(event.target.value)} inputMode="numeric" />
+        </div>
+        <div className="field">
+          <label className="field-label" htmlFor={memoId}>理由（必填）</label>
+          <input id={memoId} value={memo} onChange={event => setMemo(event.target.value)} maxLength={200} />
+        </div>
+      </div>
+      {message && <p className={message.ok ? 'form-success' : 'form-error'}>{message.text}</p>}
+      <div className="tags">
+        <button type="submit" className="btn btn-small btn-red" disabled={busy}>{busy ? '提交中…' : '确认调整'}</button>
+        <button type="button" className="btn btn-small btn-ghost" onClick={() => setOpen(false)}>取消</button>
+      </div>
+    </form>
+  );
+}
+
+/** 编辑稿「改动了什么」的中文名，只给审核员一个大概，不需要精确到字符。 */
+const FIELD_LABEL: Record<string, string> = { title: '标题', summary: '摘要', body: '正文', stationSlug: '关联站点', modelSlug: '关联模型' };
+
+export default function Admin() {
+  const [token, setToken] = useState(adminToken.get());
+  /**
+   * 会话代际。每次退出/换密钥都 +1，异步回调据此判断自己是不是上一个会话的遗留。
+   *
+   * 不能用密钥字符串本身当代际：退出后用**同一个**密钥重进，字符串没变，
+   * 上一会话的翻页响应照样会落进新列表（实测 20 条变 40 条）。
+   */
+  const sessionRef = useRef(0);
+  const [draft, setDraft] = useState('');
+  const [tab, setTab] = useState<Tab>('submissions');
+  const [submissions, setSubmissions] = useState<SubmissionRecord[]>();
+  const [posts, setPosts] = useState<AdminPostRow[]>();
+  const [removed, setRemoved] = useState<RemovedStation[]>();
+  const [revertible, setRevertible] = useState<RevertibleStation[]>();
+  // 已注销账号。管理员在这里能看到「谁走了」，并决定要不要恢复。
+  const [deletedAccounts, setDeletedAccounts] = useState<AdminDeletedAccount[]>();
+  const [removedPosts, setRemovedPosts] = useState<RemovedPost[]>();
+  const [published, setPublished] = useState<AdminPostRow[]>();
+  const [reports, setReports] = useState<AdminReport[]>();
+  // 举报是唯一会无限增长的列表，必须分页。用**游标**而不是页码：
+  // offset 在「翻页期间有人新提交举报」时会重复上一条、并永久漏掉真正该出现的那条。
+  const [reportTotal, setReportTotal] = useState(0);
+  const [reportCursor, setReportCursor] = useState<string | null>(null);
+  const [moreReports, setMoreReports] = useState(false);
+  const [error, setError] = useState<string>();
+  const [message, setMessage] = useState<string>();
+  const [busy, setBusy] = useState(false);
+  // 驳回理由会写进 submissions.reason，作者在 /me 能看到；不填就只显示「已驳回」。
+  const [rejecting, setRejecting] = useState<string>();
+  const [reasons, setReasons] = useState<Record<string, string>>({});
+  // 文章页签单独一套。文章 id 与投稿 id 在「站内投稿物化」时是同一个值，
+  // 共用一张 map 会让两个页签互相 prefetch 对方的输入。
+  const [rejectingPost, setRejectingPost] = useState<string>();
+  const [postReasons, setPostReasons] = useState<Record<string, string>>({});
+  const [openReportId, setOpenReportId] = useState<string>();
+  const [reportNotes, setReportNotes] = useState<Record<string, string>>({});
+  // 理由必填错误要有就地播报，不能只写在页面顶部的通用错误里：
+  // 读屏用户停在输入框上，听不到别处的错误。
+  const [postReasonError, setPostReasonError] = useState<string>();
+  const postReasonRef = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    if (rejectingPost) postReasonRef.current?.focus();
+  }, [rejectingPost]);
+
+  function clearPostReason(id: string) {
+    setPostReasons((current) => { const { [id]: _removed, ...rest } = current; return rest; });
+    setPostReasonError(undefined);
+  }
+  // reload 用来在恢复/下架/审核通过后失效目录缓存：否则公开页要手动刷新浏览器
+  // 才看得到刚恢复的站点，用户会以为操作没生效。
+  const { stationBySlug, reload: reloadCatalog } = useCatalog();
+
+  async function load(active: string, signal?: AbortSignal) {
+    // 不在这里清错误：调用方可能刚设好一条操作结果，清掉就等于把它吞了。
+    try {
+      // 快速切页签时旧请求可能后到，覆盖当前页签的数据。
+      // 每个分支各自写状态，中止后就不再落盘。
+      if (active === 'submissions') {
+        const data = await admin.listAllSubmissions('pending', signal);
+        if (!signal?.aborted) setSubmissions(data);
+      }
+      if (active === 'posts') {
+        const data = (await admin.listPosts('pending', signal)).items;
+        if (!signal?.aborted) setPosts(data);
+      }
+      if (active === 'removed') {
+        const data = (await admin.listRemovedStations(signal)).items;
+        if (!signal?.aborted) setRemoved(data);
+      }
+      if (active === 'revertible') {
+        const data = (await admin.listRevertibleStations(signal)).items;
+        if (!signal?.aborted) setRevertible(data);
+      }
+      if (active === 'published') {
+        const data = (await admin.listPosts('approved', signal)).items;
+        if (!signal?.aborted) setPublished(data);
+      }
+      if (active === 'removedPosts') {
+        const data = (await admin.listRemovedPosts(signal)).items;
+        if (!signal?.aborted) setRemovedPosts(data);
+      }
+      if (active === 'accounts') {
+        const data = (await admin.listDeletedAccounts(signal)).items;
+        if (!signal?.aborted) setDeletedAccounts(data);
+      }
+      if (active === 'reports') {
+        const data = await admin.listReports('open', REPORTS_PAGE_SIZE, null, signal);
+        if (!signal?.aborted) {
+          setReports(data.items);
+          setReportTotal(data.total);
+          setReportCursor(data.nextCursor);
+        }
+      }
+    } catch (caught) {
+      if (signal?.aborted) return;
+      // 密钥缺失或被服务端拒绝：退回输入态。留在审核台上只会让用户
+      // 对着一个空列表和一条「密钥无效」发呆。
+      if (caught instanceof AdminError && (caught.code === 'NO_TOKEN' || caught.unauthorized)) {
+        reset();
+        // 退回输入态之后必须说明原因。只清空、不提示的话，用户看到的是
+        // 「点了进入、输入框自己空了、什么都没发生」，会以为按钮坏了。
+        setError(caught.code === 'NO_TOKEN' ? '请填写管理密钥' : '管理密钥无效，请重新输入');
+        return;
+      }
+      setError((caught as Error).message);
+    }
+  }
+
+  // 换密钥或切页时重新取数；密钥为空就停在输入态。
+  useEffect(() => {
+    if (!token) return;
+    const controller = new AbortController();
+    setSubmissions(undefined);
+    setPosts(undefined);
+    setRemoved(undefined);
+ setRemovedPosts(undefined);
+ setPublished(undefined);
+    setReports(undefined);
+    setReportTotal(0);
+    setReportCursor(null);
+    setMoreReports(false);
+    // 切页签/换密钥时收起处理中的举报表单并丢掉备注：
+    // 上一条举报的备注跟到另一条上，是很典型的误提交来源。
+    setOpenReportId(undefined);
+    setReportNotes({});
+    void load(tab, controller.signal);
+    return () => controller.abort();
+    // 只在密钥或页签变化时重取；load 每次渲染都是新函数，不参与依赖。
+  }, [token, tab]);
+
+  /** 退出或密钥失效时把内存里的列表也清掉，不留残留数据。 */
+  function reset() {
+    sessionRef.current += 1;
+    setToken('');
+    setSubmissions(undefined);
+    setPosts(undefined);
+    setRemoved(undefined);
+ setRemovedPosts(undefined);
+ setPublished(undefined);
+    setError(undefined);
+    setMessage(undefined);
+    // 退出/换密钥时不能留着上一位审核员写的驳回理由。
+    setRejecting(undefined);
+    setRejectingPost(undefined);
+    setReasons({});
+    setPostReasons({});
+    setPostReasonError(undefined);
+    setReports(undefined);
+    setReportTotal(0);
+    setReportCursor(null);
+    setMoreReports(false);
+    setOpenReportId(undefined);
+    setReportNotes({});
+  }
+
+  function unlock(event: FormEvent) {
+    event.preventDefault();
+    const value = draft.trim();
+    if (!value) return setError('请填写管理密钥');
+    adminToken.set(value);
+    setDraft('');
+    setError(undefined);
+    // 不在这里推进代际：进到这里之前一定先经过 reset()（退出或密钥失效），
+    // 代际已经变过。两处都加会让人分不清哪一处才是真正的保护。
+    setToken(value);
+  }
+
+  /**
+   * 批量审核。服务端逐条独立事务，单条失败不改 HTTP 状态码，
+   * 只把错误放进 results[].error——不看它就会把部分失败报成全部成功。
+   */
+  async function approveAll(only?: 'remove' | 'upsert') {
+    // only 把「下架站点」和「新增/更新」分开批：下架请求通过之后站点就从线上
+    // 消失，和「放一条投稿出去」是完全两种后果，混在一个「全部通过」里
+    // 一点就是不可逆的删除。两个按钮各传一个值，没有「全量」入口了。
+    //
+    // 站点/模型必须排在文章前面：文章物化时要靠 hostname 反查站点 slug，
+    // 站点还没通过的话 stationSlug 会落成 null。服务端只在单次请求内排序，
+    // 超过 BATCH_REVIEW_LIMIT 时分块会把这个保证切断——所以在这里先排好，
+    // 再按顺序切块，块间也保持依赖顺序（与服务端 orderByMaterializeDependency 同规则）。
+    const ordered = (submissions ?? []).filter(item => !only || item.action === only).sort(
+      (a, b) => Number(a.kind === 'post') - Number(b.kind === 'post'),
+    );
+    const ids = ordered.map(item => item.id);
+    if (ids.length === 0) return;
+    setBusy(true);
+    setError(undefined);
+    setMessage(undefined);
+    try {
+      // 服务端 ids 模式一次最多 100 条，超过是整个请求 400（不是逐条失败）。
+      // 飞书全量导入一次就可能推入几百条，所以这里必须分批。
+      const results: Awaited<ReturnType<typeof admin.batchReview>>['results'] = [];
+      for (let start = 0; start < ids.length; start += BATCH_REVIEW_LIMIT) {
+        const chunk = await admin.batchReview(ids.slice(start, start + BATCH_REVIEW_LIMIT), 'approved');
+        results.push(...chunk.results);
+      }
+      const failed = results.filter(result => result.error);
+      const ok = results.length - failed.length;
+      // superseded 不是失败——它表示这条已被同站的新版本替代，线上是另一版。
+      // 但也不能笼统算进「已通过」：审核员会以为这批内容都按自己看到的版本
+      // 上线了。单独报出来，两者的差别对被替代的那几条是实质性的。
+      const superseded = results.filter(result => result.status === 'superseded').length;
+      const through = ok - superseded;
+      const parts: string[] = [];
+      if (through > 0) parts.push(`已通过 ${through} 条`);
+      if (superseded > 0) parts.push(`另有 ${superseded} 条已被同站新版本替代`);
+      if (failed.length === 0) setMessage(parts.join('，'));
+      else {
+        setMessage(parts.length > 0 ? parts.join('，') : undefined);
+        // 逐条原因要露出来：后端会把 MODEL_EXISTS 这类不可自愈的失败
+        // 直接写成 rejected，不说清楚审核员根本不知道发生了什么。
+        setError(`${failed.length} 条未通过：${failed.map(result => result.error!.message).join('；')}`);
+      }
+      await load(tab);
+      // 审核通过会让新站/新文章上线，目录缓存必须失效。
+      reloadCatalog();
+    } catch (caught) {
+      // 分块中途炸了，前面几块其实已经审过：不刷新的话列表还显示全部待审，
+      // 审核员重试一次就会把「早已通过」的行报成「已审核或被新版本替代」，
+      // 越重试越乱。刷新拿真实状态，失败信息另说。
+      await load(tab).catch(() => undefined);
+      if (caught instanceof AdminError && caught.unauthorized) {
+        setToken('');
+        setError('管理密钥无效，请重新输入');
+        return;
+      }
+      setError((caught as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  /**
+   * 举报列表翻页。就地追加而不是重取第一页：管理员可能正看着后面的条目。
+   *
+   * 必须带上 token 代际校验：换密钥/退出重进之后，上一次会话的翻页响应可能
+   * 晚到并被追加进新列表（实测出现过列表 2 条却显示「(9)」）。`load()` 的
+   * 其他分支靠 AbortSignal 挡这个，这里同样挡。
+   */
+  async function loadMoreReports() {
+    if (reportCursor === null) return;
+    const generation = sessionRef.current;
+    setMoreReports(true);
+    setError(undefined);
+    try {
+      const data = await admin.listReports('open', REPORTS_PAGE_SIZE, reportCursor);
+      if (sessionRef.current !== generation) return;
+      // 游标分页本身不会重，但翻页期间那条举报可能刚被处置；仍按 id 去重一次，
+      // 重复的 key 会让 React 直接报错。
+      setReports((current) => {
+        const seen = new Set((current ?? []).map(report => report.id));
+        return [...(current ?? []), ...data.items.filter(report => !seen.has(report.id))];
+      });
+      setReportTotal(data.total);
+      setReportCursor(data.nextCursor);
+    } catch (caught) {
+      // 密钥在翻页途中失效（401/403）：必须和 load/act 一样退回输入态，
+      // 否则旧列表还留在屏幕上，而之后每个请求都会失败。
+      if (caught instanceof AdminError && (caught.code === 'NO_TOKEN' || caught.unauthorized)) {
+        reset();
+        setError(caught.code === 'NO_TOKEN' ? '请填写管理密钥' : '管理密钥无效，请重新输入');
+        return;
+      }
+      if (sessionRef.current !== generation) return;
+      setError((caught as Error).message);
+    } finally {
+      if (sessionRef.current === generation) setMoreReports(false);
+    }
+  }
+
+  /**
+   * 处置一条举报。
+   *
+   * 不复用 `act()`：它结尾会 `load(tab)` 从头重取，管理员翻到第 3 页处置一条
+   * 就被弹回第 1 页（实测过）。举报处置只会让这一条从 open 队列里消失，
+   * 就地移除并同步总数即可，位置不动。
+   */
+  async function resolveReport(id: string, status: 'resolved' | 'dismissed') {
+    setBusy(true);
+    setError(undefined);
+    setMessage(undefined);
+    const generation = sessionRef.current;
+    try {
+      await admin.resolveReport(id, status, reportNotes[id]?.trim() || undefined);
+      if (sessionRef.current !== generation) return;
+      setMessage(status === 'resolved' ? '已标记处理' : '已驳回举报');
+      setReports((current) => current?.filter(report => report.id !== id));
+      setReportTotal((total) => Math.max(0, total - 1));
+      setOpenReportId(undefined);
+      setReportNotes((current) => { const { [id]: _drop, ...rest } = current; return rest; });
+    } catch (caught) {
+      if (sessionRef.current !== generation) return;
+      if (caught instanceof AdminError && (caught.code === 'NO_TOKEN' || caught.unauthorized)) {
+        reset();
+        setError(caught.code === 'NO_TOKEN' ? '请填写管理密钥' : '管理密钥无效，请重新输入');
+        return;
+      }
+      setError((caught as Error).message);
+    } finally {
+      if (sessionRef.current === generation) setBusy(false);
+    }
+  }
+
+  async function act(run: () => Promise<unknown>, done: string): Promise<boolean> {
+    setBusy(true);
+    setError(undefined);
+    setMessage(undefined);
+    try {
+      await run();
+      setMessage(done);
+      await load(tab);
+      // 单条通过/拒绝、下架、恢复都会改变「哪些站和文章在线」，目录缓存跟着失效。
+      reloadCatalog();
+      return true;
+    } catch (caught) {
+      if (caught instanceof AdminError && caught.unauthorized) {
+        reset();
+        // reset() 会连着把 error 清掉，这里补回来：否则密钥失效后输入框
+        // 重现却没有任何说明，看着像操作没生效。
+        setError('管理密钥无效，请重新输入');
+        return false;
+      }
+      setError((caught as Error).message);
+      return false;
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (!token) {
+    return (
+      <section className="page">
+        <title>审核台 · 什么值得蹬</title>
+        <h1 className="page-title">审核台</h1>
+        <p className="hint">
+          管理接口用密钥鉴权，不是登录会话。密钥只存在本标签页，关掉就没了。
+        </p>
+        <form onSubmit={unlock}>
+          <div className="field">
+            <label className="field-label" htmlFor="admin-token">管理密钥</label>
+            <input
+              id="admin-token" type="password" value={draft} autoComplete="off"
+              onChange={event => setDraft(event.target.value)}
+            />
+          </div>
+          {error && <p className="form-error">{error}</p>}
+          <button className="btn btn-red" type="submit">进入</button>
+        </form>
+      </section>
+    );
+  }
+
+  const pendingSubmissions = submissions ?? [];
+  // 按 action 拆开：下架与新增/更新的后果完全不同（见 approveAll 的注释）。
+  const pendingRemovals = pendingSubmissions.filter(item => item.action === 'remove');
+  const pendingUpserts = pendingSubmissions.filter(item => item.action !== 'remove');
+  // 站点类投稿要拿线上当前状态做对比；已下架的站点不在 catalog 里，按「新建」提示。
+  /**
+   * 站点投稿 payload 里**没有 slug**（只有 name/description/url/报价等），
+   * 所以不能按 slug 找当前站点——那样永远找不到，所有卡片都会显示「新建站点」，
+   * 而审核员最需要被告警的恰恰是「这条在覆盖已有站点」。按 URL 的 hostname 反查。
+   */
+  /**
+   * 两张索引：**精确 hostname** 与**飞书分组键**。
+   *
+   * 必须区分开。服务端认领是「精确优先、分组兜底」，而且只有 `channel === 'feishu'`
+   * 才分组（agent/web 可以各自持有 www 与裸域两条实体）。审核台只压成一张分组表时：
+   *  - www 与裸域各有一条站时，后写覆盖先写，impact 提示指向错的那条；
+   *  - web/agent 投稿明明会**新建**一条站，却提示「更新已有站点」。
+   */
+  type StationEntry = typeof stationBySlug extends Map<string, infer V> ? V : never;
+  const stationIndex = (() => {
+    const exact = new Map<string, StationEntry>();
+    const grouped = new Map<string, StationEntry>();
+    for (const station of stationBySlug.values()) {
+      if (station.url === null) continue;
+      let host: string;
+      try { host = new URL(station.url).hostname.toLowerCase().replace(/\.+$/, ''); } catch { continue; }
+      if (!exact.has(host)) exact.set(host, station);
+      const key = feishuHostnameKey(host);
+      if (!grouped.has(key)) grouped.set(key, station);
+    }
+    return { exact, grouped };
+  })();
+  /**
+   * 投稿正文摘要。审核台原来只显示「名称 · URL」，管理员看不到描述、支付方式、
+   * 报价明细——而站点审核是整包替换，看不到明细就没法判断这次通过会丢掉什么。
+   */
+  const payloadDetail = (item: SubmissionRecord) => {
+    const payload = item.payload as Record<string, unknown> | null;
+    if (!payload || typeof payload !== 'object') return null;
+    const lines: string[] = [];
+    const description = payload.description;
+    if (typeof description === 'string' && description.trim() !== '') {
+      lines.push(`描述：${description}`);
+    }
+    const threshold = payload.rechargeThreshold;
+    if (threshold === null) lines.push('充值门槛：无');
+    else if (typeof threshold === 'number') lines.push(`充值门槛：¥${threshold}`);
+    const methods = Array.isArray(payload.paymentMethods) ? payload.paymentMethods.filter((m): m is string => typeof m === 'string') : null;
+    if (methods) lines.push(`支付方式：${methods.length ? methods.join('、') : '未填'}`);
+    const offers = Array.isArray(payload.offers)
+      ? payload.offers as Array<{ modelSlug?: unknown; rate?: unknown }>
+      : null;
+    if (offers && offers.length) {
+      const rated = offers
+        .filter(offer => typeof offer.modelSlug === 'string' && Number.isFinite(Number(offer.rate)))
+        .map(offer => `${String(offer.modelSlug)} ${Number(offer.rate)}x`);
+      lines.push(`报价（${offers.length} 条）：${rated.join('、')}`);
+    }
+    const body = payload.body;
+    if (typeof body === 'string') lines.push(`正文：${body}`);
+    const summary = payload.summary;
+    if (typeof summary === 'string') lines.push(`摘要：${summary}`);
+    return lines.length ? lines : null;
+  };
+
+  const impactLines = (item: SubmissionRecord): string[] => {
+    if (item.kind !== 'station' || item.action === 'remove') return [];
+    const payload = item.payload as Record<string, unknown> | null;
+    const url = payload && typeof payload.url === 'string' ? payload.url : null;
+    if (url === null) return impact(item, undefined);
+    let host: string;
+    try { host = new URL(url).hostname.toLowerCase().replace(/\.+$/, ''); } catch { return impact(item, undefined); }
+    // 精确命中优先；分组只在飞书渠道兜底——与服务端认领口径一致。
+    const target = stationIndex.exact.get(host)
+      ?? (item.channel === 'feishu' ? stationIndex.grouped.get(feishuHostnameKey(host)) : undefined);
+    return impact(item, target);
+  };
+  const pendingPosts = posts ?? [];
+  const removedStations = removed ?? [];
+  const withdrawnPosts = removedPosts ?? [];
+  const openReports = reports ?? [];
+  const publishedPosts = published ?? [];
+
+  return (
+    <section className="page">
+      <h1 className="page-title">审核台</h1>
+<div className="tags" role="tablist" aria-label="审核台">
+        <button type="button" role="tab" aria-selected={tab === 'submissions'} className={`btn btn-small ${tab === 'submissions' ? 'btn-red' : 'btn-ghost'}`} onClick={() => setTab('submissions')}>
+          待审投稿 {submissions ? `(${pendingSubmissions.length})` : ''}
+        </button>
+        <button type="button" role="tab" aria-selected={tab === 'posts'} className={`btn btn-small ${tab === 'posts' ? 'btn-red' : 'btn-ghost'}`} onClick={() => setTab('posts')}>
+          待审文章 {posts ? `(${pendingPosts.length})` : ''}
+        </button>
+        <button type="button" role="tab" aria-selected={tab === 'published'} className={`btn btn-small ${tab === 'published' ? 'btn-red' : 'btn-ghost'}`} onClick={() => setTab('published')}>
+          已上线文章 {published ? `(${publishedPosts.length})` : ''}
+        </button>
+        <button type="button" role="tab" aria-selected={tab === 'removed'} className={`btn btn-small ${tab === 'removed' ? 'btn-red' : 'btn-ghost'}`} onClick={() => setTab('removed')}>
+          已下架站点 {removed ? `(${removedStations.length})` : ''}
+        </button>
+        <button type="button" role="tab" aria-selected={tab === 'removedPosts'} className={`btn btn-small ${tab === 'removedPosts' ? 'btn-red' : 'btn-ghost'}`} onClick={() => setTab('removedPosts')}>
+          已下架文章 {removedPosts ? `(${withdrawnPosts.length})` : ''}
+        </button>
+        {/* 站点投稿是整包替换，误批一条在线站的新投稿同样要能退回——它没被下架，
+            所以不在「已下架站点」里。 */}
+        <button type="button" role="tab" aria-selected={tab === 'revertible'} className={`btn btn-small ${tab === 'revertible' ? 'btn-red' : 'btn-ghost'}`} onClick={() => setTab('revertible')}>
+          可回退站点 {revertible ? `(${revertible.length})` : ''}
+        </button>
+        <button type="button" role="tab" aria-selected={tab === 'reports'} className={`btn btn-small ${tab === 'reports' ? 'btn-red' : 'btn-ghost'}`} onClick={() => setTab('reports')}>
+          举报 {reports ? `(${reportTotal})` : ''}
+        </button>
+        <button type="button" role="tab" aria-selected={tab === 'accounts'} className={`btn btn-small ${tab === 'accounts' ? 'btn-red' : 'btn-ghost'}`} onClick={() => setTab('accounts')}>
+          账号
+        </button>
+      </div>
+      {/* 退出不是页签：它不切换内容区，放在 tablist 外面，否则读屏会把它
+          念成一个「当前未选中」的页签。 */}
+      <div className="tags">
+        <button type="button" className="btn btn-small btn-ghost" onClick={() => { adminToken.clear(); reset(); }}>
+          退出
+        </button>
+      </div>
+
+      {error && <p className="form-error">{error}</p>}
+      {message && <p className="form-success">{message}</p>}
+
+      {tab === 'submissions' && (
+        submissions === undefined ? <Skeleton /> : pendingSubmissions.length === 0
+          ? <p className="state">没有待审投稿</p>
+          : (
+            <>
+              <div className="tags">
+                {/* 通过不可撤销：服务端对非 pending 一律 409 ALREADY_REVIEWED。
+                    站点以自动运行为主，但一次误点把几百条全放出去没有回退手段，
+                    所以这里必须二次确认，且和其它破坏性操作共用同一个组件。 */}
+                {/* 下架请求和新增/更新分开批：前者一通过站点就从线上消失，
+                    后者是放内容上线。混在一个按钮里，一次误点就是不可逆的删除。 */}
+                {pendingUpserts.length > 0 && (
+                  <ConfirmButton
+                    label={`全部通过（${pendingUpserts.length} 条新增/更新）`} busy={busy} tone="red"
+                    description={`确认通过 ${pendingUpserts.length} 条新增/更新投稿？此操作不可撤销。`}
+                    confirmLabel="确认全部通过"
+                    onConfirm={() => approveAll('upsert')}
+                  />
+                )}
+                {pendingRemovals.length > 0 && (
+                  <ConfirmButton
+                    label={`批准下架（${pendingRemovals.length} 条）`} busy={busy} tone="red"
+                    description={`确认批准 ${pendingRemovals.length} 条下架请求？站点会立刻从线上消失，可在「已下架」里恢复。`}
+                    confirmLabel="确认批准下架"
+                    onConfirm={() => approveAll('remove')}
+                  />
+                )}
+              </div>
+              <ul className="card-list">
+                {pendingSubmissions.map(item => (
+                  <li key={item.id}>
+                    <div className="tags">
+                      <span className="tag">{KIND_LABEL[item.kind] ?? item.kind}</span>
+                      <span className="tag">{CHANNEL_LABEL[item.channel] ?? item.channel}</span>
+                      {item.action === 'remove' && <span className="tag tag-warn">下架</span>}
+                      {item.actorHandle && <span className="tag">{item.actorHandle}</span>}
+                      <span className="hint">{displayTime(item.createdAt)}</span>
+                    </div>
+                    <p>{summarize(item)}</p>
+                    <p className="hint">{item.originKey}</p>
+                    {(() => {
+                      const detail = payloadDetail(item);
+                      if (!detail) return null;
+                      return (
+                        <details className="payload-detail">
+                          <summary>展开投稿内容</summary>
+                          {detail.map(line => <p className="hint" key={line}>{line}</p>)}
+                        </details>
+                      );
+                    })()}
+                    {impactLines(item).map(line => (
+                      <p className="hint" key={line}>{line}</p>
+                    ))}
+                    {rejecting === item.id && (
+                      <div className="field">
+                        <label className="field-label" htmlFor={`reason-${item.id}`}>
+                          {(item.channel === 'agent' || item.kind === 'post') ? '驳回理由（必填，作者可见）' : '驳回理由（可选）'}
+                        </label>
+                        <input
+                          id={`reason-${item.id}`} value={reasons[item.id] ?? ''} maxLength={200}
+                          onChange={event => setReasons({ ...reasons, [item.id]: event.target.value })}
+                        />
+                        {item.channel === 'agent' && (
+                          <div className="tags">
+                            {REJECT_PRESETS.map(preset => (
+                              <button
+                                key={preset} type="button" className="tag"
+                                onClick={() => setReasons({ ...reasons, [item.id]: preset })}
+                              >
+                                {preset}
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                        <button
+                          className="btn btn-small btn-ghost" disabled={busy}
+                          onClick={() => {
+                            const reason = reasons[item.id]?.trim();
+                            // 服务端对 Agent 通道与所有文章强制要求理由；这里先拦一下，省一次往返。
+                            if ((item.channel === 'agent' || item.kind === 'post') && !reason) {
+                              setError(item.kind === 'post' ? '驳回文章时必须填写理由，作者要靠它修改后重投' : 'Agent 投稿驳回时必须填理由，点上面的常用原因即可');
+                              return;
+                            }
+                            void act(
+                              () => admin.reviewSubmission(item.id, 'rejected', reason || undefined),
+                              '已拒绝',
+                            ).then(() => setRejecting(undefined));
+                          }}
+                        >
+                          确认拒绝
+                        </button>
+                      </div>
+                    )}
+                    <div className="tags">
+                      <button
+                        className="btn btn-small btn-red" disabled={busy}
+                        onClick={() => act(() => admin.reviewSubmission(item.id, 'approved'), '已通过')}
+                      >
+                        通过
+                      </button>
+                      <button
+                        className="btn btn-small btn-ghost" disabled={busy}
+                        onClick={() => setRejecting(rejecting === item.id ? undefined : item.id)}
+                      >
+                        拒绝
+                      </button>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            </>
+          )
+      )}
+
+      {tab === 'posts' && (
+        posts === undefined ? <Skeleton /> : pendingPosts.length === 0
+          ? <p className="state">没有待审文章</p>
+          : (
+            <ul className="card-list">
+              {pendingPosts.map(post => (
+                <li key={post.id}>
+                  <div className="tags">
+                    <span className="tag">{KIND_LABEL[post.kind] ?? post.kind}</span>
+                    {/* 编辑稿必须一眼认出来：否则审核员以为社区又冒出一篇新文章，
+                        按「新投稿」的标准审，而它其实只是在改一篇已经上线的。 */}
+                    {post.editOf && <span className="tag tag-warn">新版本</span>}
+                    <span className="tag">{post.authorHandle ?? '匿名'}</span>
+                    <span className="hint">{displayTime(post.publishedAt)}</span>
+                  </div>
+                  <p>{post.title}</p>
+                  {post.editOf && (
+                    <p className="hint">
+                      修改自：{post.targetTitle ?? post.editOf}
+                      {post.changedFields && post.changedFields.length > 0 && `（改动了${post.changedFields.map(field => FIELD_LABEL[field] ?? field).join('、')}）`}
+                    </p>
+                  )}
+                  <p className="hint">{post.summary}</p>
+                  {/* 正文必须能展开：同一篇站内新稿在「待审投稿」里能看到正文，
+                      而这里的卡片原来只有标题和摘要——只在文章页签审的人会凭标题
+                      就点通过，还看不到另一处更全的信息。 */}
+                  {post.body && (
+                    <details className="payload-detail">
+                      <summary>展开正文</summary>
+                      {post.body.split('\n').filter((line: string) => line.trim()).slice(0, 40).map((line: string, index: number) => (
+                        <p className="hint" key={`${post.id}-body-${index}`}>{line}</p>
+                      ))}
+                    </details>
+                  )}
+                  {rejectingPost === post.id && (
+                    <div className="field">
+                      <label className="field-label" htmlFor={`post-reason-${post.id}`}>驳回理由（必填，作者可见）</label>
+                      <input
+                        ref={postReasonRef} id={`post-reason-${post.id}`} value={postReasons[post.id] ?? ''} maxLength={1000}
+                        placeholder="说明哪里不合格，作者据此修改后重投"
+                        aria-invalid={Boolean(postReasonError)}
+                        aria-describedby={postReasonError ? `post-reason-error-${post.id}` : undefined}
+                        onChange={event => {
+                          setPostReasons({ ...postReasons, [post.id]: event.target.value });
+                          setPostReasonError(undefined);
+                        }}
+                      />
+                      {postReasonError && (
+                        <p id={`post-reason-error-${post.id}`} className="form-error" role="alert">{postReasonError}</p>
+                      )}
+                      <div className="tags">
+                        {REJECT_PRESETS.map(preset => (
+                          <button key={preset} type="button" className="tag"
+                            onClick={() => setPostReasons({ ...postReasons, [post.id]: preset })}>
+                            {preset}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  <div className="tags">
+                    <button
+                      className="btn btn-small btn-red" disabled={busy}
+                      onClick={() => act(() => admin.reviewPost(post.id, 'approved'), '已通过')}
+                    >
+                      通过
+                    </button>
+                    {rejectingPost === post.id ? (
+                      <>
+                        <button
+                          className="btn btn-small btn-ghost" disabled={busy}
+                          onClick={() => {
+                            const reason = postReasons[post.id]?.trim();
+                            if (!reason) {
+                              setPostReasonError('拒绝文章时必须填写理由，作者要靠它修改重投');
+                              postReasonRef.current?.focus();
+                              return;
+                            }
+                            void act(() => admin.reviewPost(post.id, 'rejected', reason), '已拒绝')
+                              .then((ok) => { if (ok) { setRejectingPost(undefined); clearPostReason(post.id); } });
+                          }}
+                        >
+                          确认拒绝
+                        </button>
+                        <button type="button" id={`post-reject-${post.id}`} className="btn btn-small btn-ghost" onClick={() => {
+                          setRejectingPost(undefined);
+                          clearPostReason(post.id);
+                          document.getElementById(`post-reject-${post.id}`)?.focus();
+                        }}>取消</button>
+                      </>
+                    ) : (
+                      <button
+                        className="btn btn-small btn-ghost" disabled={busy}
+                        onClick={() => { setPostReasonError(undefined); setRejectingPost(post.id); }}
+                      >
+                        拒绝
+                      </button>
+                    )}
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )
+      )}
+
+      {tab === 'published' && (
+        // 已上线内容的撤回入口。待审列表里放「下架」是错位的——那些还没上线，
+        // 实体根本不存在，点下去只会 404，而作者那边会以为稿子没了。
+        published === undefined ? <Skeleton /> : publishedPosts.length === 0
+          ? <p className="state">没有已上线的文章</p>
+          : (
+            <ul className="card-list">
+              {publishedPosts.map(post => (
+                <li key={post.id}>
+                  <div className="tags">
+                    <span className="tag">{KIND_LABEL[post.kind] ?? post.kind}</span>
+                    <span className="tag">{post.authorHandle ?? '匿名'}</span>
+                    <span className="hint">{displayTime(post.publishedAt)}</span>
+                  </div>
+                  <p>{post.title}</p>
+                  <p className="hint">{post.summary}</p>
+                  <div className="tags">
+                    <button
+                      className="btn btn-small btn-red" disabled={busy}
+                      onClick={() => act(async () => { await admin.withdrawPost(post.id); setTab('removedPosts'); }, '已下架，可在「已下架文章」里恢复')}
+                    >
+                      下架
+                    </button>
+                    {/* 编辑稿和普通投稿在列表里长得一样，手一滑就会批错。没有这条
+                        回退路径，唯一的补救是「下架」——把误操作变成一次内容删除。 */}
+                    {post.contentVersion !== undefined && post.contentVersion > 1 && (
+                      <ConfirmButton
+                        label="撤销上次修改" tone="red" busy={busy}
+                        description={`把《${post.title}》退回上一版？现在第 ${post.contentVersion} 版，撤销后变成第 ${post.contentVersion + 1} 版（内容回到修改前）。`}
+                        confirmLabel="确认撤销"
+                        onConfirm={async () => { await act(() => admin.revertRevision(post.id), '已退回上一版'); }}
+                      />
+                    )}
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )
+      )}
+
+      {tab === 'removedPosts' && (
+        // 已发布内容也要能撤回。群友来源的文章原先只有「去飞书撤销通过」
+        // 一条路，而那条路走不通（撤销后记录就不在批次里了，生成不了下架请求）。
+        removedPosts === undefined ? <Skeleton /> : withdrawnPosts.length === 0
+          ? <p className="state">没有已下架的文章</p>
+          : (
+            <ul className="card-list">
+              {withdrawnPosts.map(post => (
+                <li key={post.id}>
+                  {/* 标题放在最前：误下架之后管理员是按标题认人的，一串 id 没法判断。 */}
+                  <p>{post.title}</p>
+                  <p className="hint">
+                    {post.authorHandle ?? '匿名'}　下架于 {displayTime(post.removedAt)}　<span className="num">{post.id}</span>
+                  </p>
+                  <div className="tags">
+                    <button
+                      className="btn btn-small btn-red" disabled={busy}
+                      onClick={() => act(() => admin.restorePost(post.id), '已恢复')}
+                    >
+                      恢复
+                    </button>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )
+      )}
+
+      {tab === 'reports' && (
+        reports === undefined ? <Skeleton /> : openReports.length === 0
+          ? <p className="state">没有待处理的举报</p>
+          : (
+            <ul className="card-list">
+              {openReports.map(report => (
+                <li key={report.id}>
+                  <div className="tags">
+                    <span className="tag">{TARGET_LABEL[report.targetType]}</span>
+                    <span className="tag">{report.reporterHandle}</span>
+                    {/* 举报的是评论时，最小处置是隐藏这条评论；原来只能下架
+                        整篇文章，处罚比问题本身重得多。 */}
+                    {report.targetType === 'comment' && (
+                      <button
+                        className="btn btn-small btn-ghost" disabled={busy}
+                        onClick={() => act(() => admin.hideComment(report.targetId, true), '已隐藏这条评论')}
+                      >
+                        隐藏评论
+                      </button>
+                    )}
+                    {/* 举报后文章可能又改过：不标出来，审核员会拿新版内容去判断
+                        旧版的问题（甚至把已经修好的问题当成还在）。 */}
+                    {report.targetVersion !== null && (
+                      <span className={`tag ${report.currentVersion !== null && report.currentVersion !== report.targetVersion ? 'tag-warn' : ''}`}>
+                        {report.currentVersion !== null && report.currentVersion !== report.targetVersion
+                          ? `举报第 ${report.targetVersion} 版，现在第 ${report.currentVersion} 版`
+                          : `第 ${report.targetVersion} 版`}
+                      </span>
+                    )}
+                    <span className="hint">{displayTime(report.createdAt)}</span>
+                  </div>
+                  <p><strong>{report.reason}</strong></p>
+                  {report.detail && <p className="hint">{report.detail}</p>}
+                  <p className="hint">
+                    被举报：{report.targetId === report.targetLabel ? <code>{report.targetId}</code> : report.targetLabel}
+                    {' '}{report.targetAlive ? '' : <span className="tag tag-warn">已不在线</span>}
+                  </p>
+                  <p className="hint">
+                    {/* 处置不等于处置内容：下架要走各自的接口（下架/撤下）。 */}
+                    <button type="button" className="text-btn" onClick={() => { if (openReportId !== report.id) setOpenReportId(report.id); else setOpenReportId(undefined); }}>
+                      处理…
+                    </button>
+                  </p>
+                  {openReportId === report.id && (
+                    <div className="field">
+                      <input
+                        aria-label="处理备注（可选）" maxLength={500}
+                        value={reportNotes[report.id] ?? ''}
+                        onChange={event => setReportNotes({ ...reportNotes, [report.id]: event.target.value })}
+                      />
+                      <div className="tags">
+                        <button
+                          className="btn btn-small btn-red" disabled={busy}
+                          onClick={() => {
+                            void resolveReport(report.id, 'resolved');
+                          }}
+                        >
+                          已处理
+                        </button>
+                        <button
+                          className="btn btn-small btn-ghost" disabled={busy}
+                          onClick={() => {
+                            void resolveReport(report.id, 'dismissed');
+                          }}
+                        >
+                          不成立
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </li>
+              ))}
+              {/* 举报会一直攒着，翻页比一次全取更稳：管理员正在处理第 1 页时，
+                  后面几百条不该一起塞进 DOM。 */}
+              {reportCursor !== null && (
+                <li>
+                  <button type="button" className="btn btn-small btn-ghost" disabled={moreReports} onClick={() => { void loadMoreReports(); }}>
+                    {moreReports ? '加载中…' : `加载更多（共 ${reportTotal} 条）`}
+                  </button>
+                </li>
+              )}
+            </ul>
+          )
+      )}
+
+      {tab === 'accounts' && (
+        <TokenAdjust handle="" />
+      )}
+
+      {tab === 'accounts' && (
+        deletedAccounts === undefined ? <Skeleton /> : deletedAccounts.length === 0
+          ? <p className="state">没有已注销的账号</p>
+          : (
+            <>
+              <p className="hint">
+                注销是用户自己的决定：账号行保留、用户名永久占用、内容保留但署名变成
+                「已注销用户」。恢复只能由这里做，投票与收藏在注销时已删除，找不回来。
+              </p>
+              <ul className="card-list">
+                {deletedAccounts.map(account => (
+                  <li key={account.handle}>
+                    <p>{account.handle}</p>
+                    <p className="hint">
+                      注销于 {displayTime(account.deletedAt)}，仍在线 {account.postCount} 篇文章
+                    </p>
+                    <div className="tags">
+                      <ConfirmButton
+                        label="恢复账号" tone="red" busy={busy}
+                        description={`恢复 ${account.handle}？昵称会回落为用户名，投票与收藏不会回来。`}
+                        confirmLabel="确认恢复"
+                        onConfirm={async () => { await act(() => admin.restoreAccount(account.handle), '已恢复'); }}
+                      />
+                      <TokenAdjust handle={account.handle} />
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            </>
+          )
+      )}
+
+      {tab === 'removed' && (
+        removed === undefined ? <Skeleton /> : removedStations.length === 0
+          ? <p className="state">没有已下架的站点</p>
+          : (
+            <ul className="card-list">
+              {removedStations.map(station => (
+                <li key={station.slug}>
+                  <p>{station.name}</p>
+                  <p className="hint">
+                    {station.url ?? station.slug}　下架于 {displayTime(station.removedAt)}
+                  </p>
+                  <div className="tags">
+                    <button
+                      className="btn btn-small btn-red" disabled={busy}
+                      onClick={() => act(() => admin.restoreStation(station.slug), '已恢复')}
+                    >
+                      恢复
+                    </button>
+                    {/* 站点投稿是整包替换：误批之后内容与报价都被覆盖了，「恢复」
+                        只能恢复下架状态，恢复不了上一版内容。这里给撤回上一版投稿；
+                        没有快照的站（例如目录导入写进来的）不显示按钮。 */}
+                    {station.hasRevert && (
+                      <ConfirmButton
+                        label="退回上次投稿前" tone="red" busy={busy}
+                        description={`把「${station.name}」的内容与报价整体退回上一次投稿之前？现在展示的投稿内容会被替换。`}
+                        confirmLabel="确认退回"
+                        onConfirm={async () => { await act(() => admin.revertStation(station.slug), '已退回上次投稿前'); }}
+                      />
+                    )}
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )
+      )}
+      {tab === 'revertible' && (
+        revertible === undefined ? <Skeleton /> : revertible.length === 0
+          ? <p className="state">没有可退回的站点投稿。站点投稿是整包替换，通过之后才会留下快照。</p>
+          : (
+            <ul className="card-list">
+              {revertible.map(station => (
+                <li key={station.slug}>
+                  <p>{station.name}</p>
+                  <p className="hint">
+                    {station.url ?? station.slug}　
+                    {station.removedAt ? `已下架（${displayTime(station.removedAt)}）` : '在线'}
+                    {station.snapshotAt ? `　可退回至 ${displayTime(station.snapshotAt)} 之前的版本` : ''}
+                  </p>
+                  <div className="tags">
+                    <ConfirmButton
+                      label="退回上次投稿前" tone="red" busy={busy}
+                      description={`把「${station.name}」的内容与报价整体退回上一次投稿之前？现在展示的投稿内容会被替换（上下架状态不变）。`}
+                      confirmLabel="确认退回"
+                      onConfirm={async () => { await act(() => admin.revertStation(station.slug), '已退回上次投稿前'); }}
+                    />
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )
+      )}
+    </section>
+  );
+}

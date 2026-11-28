@@ -1,5 +1,6 @@
 import type { CSSProperties } from 'react';
-import type { Model, Post, Station } from '@zhidedeng/shared';
+import type { Model, PostSummary, Station } from '@zhidedeng/shared';
+import { AVATAR_PRESETS } from '@zhidedeng/shared';
 import anthropic from '@lobehub/icons-static-svg/icons/anthropic.svg';
 import deepseek from '@lobehub/icons-static-svg/icons/deepseek-color.svg';
 import doubao from '@lobehub/icons-static-svg/icons/doubao-color.svg';
@@ -13,6 +14,7 @@ import xai from '@lobehub/icons-static-svg/icons/xai.svg';
 import zhipu from '@lobehub/icons-static-svg/icons/zhipu-color.svg';
 import { formatLatency, formatRate, NOT_AVAILABLE } from '../format';
 import { useCatalog } from '../state';
+import { normalizeDisplay } from '../format';
 
 // 厂商图标仅作分类标识；tint 是封面底色，deep 是同色系的深色，用于水印和纹理。
 const VENDOR_ART: Record<string, { src: string; tint: string; deep: string }> = {
@@ -29,6 +31,10 @@ const VENDOR_ART: Record<string, { src: string; tint: string; deep: string }> = 
   minimax: { src: minimax, tint: '#FBE3E7', deep: '#E2455F' },
 };
 const SEAL_ART = { tint: '#F8E7DF', deep: '#E62828' };
+/** 新增厂商的 iconKey 可能还没有内置图标，用站内图标兜底，不能让页面崩掉。 */
+const FALLBACK_ICON = '/favicon.svg';
+// 用 hasOwn 查表，避免 iconKey 为 constructor 等原型链属性名时返回 Object 而不是兜底。
+const VENDOR_ART_OR_FALLBACK = (iconKey: string) => Object.hasOwn(VENDOR_ART, iconKey) ? VENDOR_ART[iconKey] : { src: FALLBACK_ICON, tint: SEAL_ART.tint, deep: SEAL_ART.deep };
 
 const ACCENTS = ['#E62828', '#D9722B', '#2F7D6B', '#2F5BE3', '#7A4FC9', '#B8407A', '#1F8FB3', '#8A6A1F'];
 
@@ -43,13 +49,32 @@ const accentOf = (name: string) => ACCENTS[hashIndex(name, ACCENTS.length)];
 const glyphOf = (name: string) => [...(name.replace(/^虚构·?/, '') || name)][0];
 
 export function VendorIcon({ iconKey, size = 20 }: { iconKey: string; size?: number }) {
-  return <img className="vendor-icon" src={VENDOR_ART[iconKey].src} alt="" width={size} height={size} />;
+  return <img className="vendor-icon" src={VENDOR_ART_OR_FALLBACK(iconKey).src} alt="" width={size} height={size} />;
 }
 
-export function Avatar({ nickname, size = 32 }: { nickname: string; size?: number }) {
+export function Avatar({ nickname, avatar, size = 32 }: { nickname: string; avatar?: string; size?: number }) {
+  // 预设头像来自用户资料。认不出的值（历史脏数据、手工改库）一律回退到
+  // 昵称首字，别渲染成一片空白——头像位置空着很像加载失败。
+  const preset = avatar && AVATAR_PRESETS.some((value) => value === avatar) ? avatar : undefined;
+  if (preset) {
+    return (
+      <span className="avatar avatar-preset-fill" aria-hidden="true" style={{ width: size, height: size, fontSize: size * 0.55, background: accentOf(nickname) }}>
+        {preset}
+      </span>
+    );
+  }
   return (
     <span className="avatar" aria-hidden="true" style={{ width: size, height: size, fontSize: size * 0.45, background: accentOf(nickname) }}>
       {glyphOf(nickname)}
+    </span>
+  );
+}
+
+/** 头像选择器里的预设图案：白底 emoji，一眼看得出选的是哪个。 */
+export function AvatarPresetGlyph({ preset, size = 40 }: { preset: string; size?: number }) {
+  return (
+    <span className="avatar-preset" aria-hidden="true" style={{ width: size, height: size, fontSize: size * 0.6 }}>
+      {preset}
     </span>
   );
 }
@@ -59,7 +84,7 @@ export function Avatar({ nickname, size = 32 }: { nickname: string; size?: numbe
 /** 模型封面：厂商色底 + 按模型名取的纹理 + 模型名水印 + 图标徽章。 */
 export function ModelTile({ model }: { model: Pick<Model, 'vendor' | 'name'> }) {
   const vendor = useCatalog().vendorBySlug.get(model.vendor);
-  const art = vendor ? VENDOR_ART[vendor.iconKey] : SEAL_ART;
+  const art = vendor ? VENDOR_ART_OR_FALLBACK(vendor.iconKey) : SEAL_ART;
   return (
     <span
       className={`cover cover-model pat-${hashIndex(model.name, 4)}`} aria-hidden="true" data-mark={model.name}
@@ -73,15 +98,15 @@ export function ModelTile({ model }: { model: Pick<Model, 'vendor' | 'name'> }) 
 }
 
 /** 文章封面按类型区分：爆料是倍率票券，评测是可用率仪表，指南是书封，社区是气泡引语。 */
-export function PostCover({ post }: { post: Post }) {
+export function PostCover({ post }: { post: PostSummary }) {
   const { modelBySlug, stationBySlug, vendorBySlug } = useCatalog();
   const model = post.modelSlug ? modelBySlug.get(post.modelSlug) : undefined;
   const station = post.stationSlug ? stationBySlug.get(post.stationSlug) : undefined;
   const vendor = model && vendorBySlug.get(model.vendor);
-  const art = vendor ? VENDOR_ART[vendor.iconKey] : SEAL_ART;
+  const art = vendor ? VENDOR_ART_OR_FALLBACK(vendor.iconKey) : SEAL_ART;
   // 种子文章标题是「站名 · 标题」，封面只留标题；用户自己写的间隔号不动。
   const seedPrefix = station ? `${station.name.replace(/^虚构·/, '')} · ` : '';
-  const pitch = <span className="cover-pitch" data-pitch={post.title.startsWith(seedPrefix) ? post.title.slice(seedPrefix.length) : post.title} />;
+  const pitch = <span className="cover-pitch" data-pitch={normalizeDisplay(post.title.startsWith(seedPrefix) ? post.title.slice(seedPrefix.length) : post.title)} />;
   const seal = <img className="cover-seal" src="/favicon.svg" alt="" />;
   const foot = model && (
     <span className="cover-foot" data-label={model.name}>{vendor && <VendorIcon iconKey={vendor.iconKey} size={14} />}</span>

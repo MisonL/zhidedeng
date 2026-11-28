@@ -12,13 +12,23 @@ export interface AsyncState<T> {
 export function useAsync<T>(fetcher: (signal: AbortSignal) => Promise<T>, deps: DependencyList) {
   const [state, setState] = useState<{ data?: T; error?: Error }>({});
   const [attempt, setAttempt] = useState(0);
+  /**
+   * 外部状态代次。
+   *
+   * 初次挂载的请求可能在 signIn/signOut 之后才返回，那时它带的是**旧身份**，
+   * 直接 setState 会把刚登录的账号覆盖成匿名、或把已退出的账号又显示出来。
+   * setData 递增这里，仍在飞行中的旧请求看到代次变了就丢弃自己的结果。
+   */
+  const generation = useRef(0);
 
   useEffect(() => {
     const controller = new AbortController();
+    const started = generation.current;
     setState({});
+    const stale = () => controller.signal.aborted || started !== generation.current;
     fetcher(controller.signal).then(
-      (data) => { if (!controller.signal.aborted) setState({ data }); },
-      (error: Error) => { if (!controller.signal.aborted) setState({ error }); },
+      (data) => { if (!stale()) setState({ data }); },
+      (error: Error) => { if (!stale()) setState({ error }); },
     );
     return () => controller.abort();
     // 请求由调用方的 deps 决定，fetcher 每次渲染都是新函数，不参与依赖。
@@ -27,7 +37,7 @@ export function useAsync<T>(fetcher: (signal: AbortSignal) => Promise<T>, deps: 
   return {
     ...state,
     reload: () => setAttempt((value) => value + 1),
-    setData: (data: T) => setState({ data }),
+    setData: (data: T) => { generation.current += 1; setState({ data }); },
   };
 }
 
@@ -37,12 +47,16 @@ export function usePaged<T>(
   deps: DependencyList,
 ) {
   const first = useAsync((signal) => fetchPage(1, signal), deps);
-  const [more, setMore] = useState<{ source?: unknown; items: T[]; page: number }>({ items: [], page: 1 });
+  // `exhausted`：某一页返回空就认为到底了。只靠 `data.length < total` 不够——
+  // 只要服务端报的 total 比实际能取到的条数多（跳过不可读目标、翻页期间有新写入等），
+  // length 就永远追不上 total，「加载更多」变成一直可点、每点一次发一个空请求。
+  // 实测：total 说还有，但第 2、3 页都是空，hasMore 仍为 true。
+  const [more, setMore] = useState<{ source?: unknown; items: T[]; page: number; exhausted: boolean }>({ items: [], page: 1, exhausted: false });
   const [loadingMore, setLoadingMore] = useState(false);
   const [moreFailure, setMoreFailure] = useState<{ source?: unknown; error: Error }>();
 
   // 换了筛选条件后，上一批的追加内容作废。
-  const extra = more.source === first.data ? more : { items: [], page: 1 };
+  const extra = more.source === first.data ? more : { items: [], page: 1, exhausted: false };
   const data = first.data && [...first.data.items, ...extra.items];
   const source = useRef(first.data);
   source.current = first.data;
@@ -54,7 +68,11 @@ export function usePaged<T>(
     try {
       const next = await fetchPage(extra.page + 1);
       if (source.current === origin) {
-        setMore({ source: origin, items: [...extra.items, ...next.items], page: extra.page + 1 });
+        setMore({
+          source: origin, items: [...extra.items, ...next.items], page: extra.page + 1,
+          // 空页即到底；同时也把 total 的变化记下来，见 hasMore
+          exhausted: next.items.length === 0,
+        });
       }
     } catch (error) {
       if (source.current === origin) setMoreFailure({ source: origin, error: error as Error });
@@ -67,7 +85,7 @@ export function usePaged<T>(
     data,
     error: first.error,
     reload: first.reload,
-    hasMore: first.data !== undefined && data!.length < first.data.total,
+    hasMore: first.data !== undefined && !extra.exhausted && data!.length < first.data.total,
     loadingMore,
     moreError: moreFailure?.source === first.data ? moreFailure?.error : undefined,
     loadMore,

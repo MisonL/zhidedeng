@@ -1,0 +1,17 @@
+node_modules
+**/node_modules
+release
+dist
+**/dist
+.git
+.github
+*.db
+# 别把本地密钥带进构建上下文：build 阶段的 COPY . . 会整份拷贝，
+# 即便最终镜像只拷 release，层历史里仍会留着。
+.env
+.env.*
+!.env.example
+*.db-wal
+*.db-shm
+data
+.DS_Store

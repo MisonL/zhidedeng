@@ -6,11 +6,13 @@ import { api } from '../api';
 import AsyncView, { Empty, LoadMore } from '../components/AsyncView';
 import Comments from '../components/Comments';
 import FavoriteButton from '../components/FavoriteButton';
+import Feedback from '../components/Feedback';
 import PostCard from '../components/PostCard';
+import ReportButton from '../components/ReportButton';
 import StationCard from '../components/StationCard';
 import { StationTile } from '../components/visuals';
 import VoteButtons from '../components/VoteButtons';
-import { DISCLAIMER, formatLatency, formatRate, formatStatus, formatUptime, NOT_AVAILABLE, SITE_NOTICE, SUBMISSION_LABEL } from '../format';
+import { formatLatency, formatQuotedAt, formatRate, formatRateBasis, formatStatus, formatUptime, NOT_AVAILABLE, SITE_NOTICE, sourceLabel } from '../format';
 import { useAsync, usePaged } from '../hooks';
 import { useCatalog } from '../state';
 
@@ -51,6 +53,7 @@ export function Stations() {
       <header className="page-head">
         <h1 className="page-title">中转站库</h1>
         <p className="page-sub">{SITE_NOTICE}。</p>
+        <p className="hint"><Link to="/compare">并排对比几个站</Link></p>
       </header>
       <div className="filter-bar">
         <div className="segmented">
@@ -80,11 +83,15 @@ export function StationDetailPage() {
   const state = useAsync((signal) => api.getStation(slug, signal), [slug]);
   const posts = useAsync((signal) => api.getPosts({ station: slug, pageSize: 5 }, signal), [slug]);
   const { vendorBySlug } = useCatalog();
+  // 四种来源现在都能拿到标签（demo 也有），只剩 user 与「字段缺失」两种要兜底。
+  // 后者按 user 处理：服务端读出来时 source 缺省就是 'user'，能走到这里说明是老数据。
+  const label = sourceLabel(state.data?.source);
+  const notice = label ? `${label}，不构成消费建议` : '用户投稿，未经平台核实，不构成消费建议';
 
   return (
     <>
       <title>{`${state.data?.name ?? '中转站详情'} · 什么值得蹬`}</title>
-      {state.data && <p className="demo-notice" role="note">{state.data.source === 'submission' ? `${SUBMISSION_LABEL}，不构成消费建议` : DISCLAIMER}</p>}
+      {state.data && <p className="demo-notice" role="note">{notice}</p>}
       <section className="module page">
         <AsyncView state={state}>
           {(station) => (
@@ -111,25 +118,41 @@ export function StationDetailPage() {
                 <div><dt>运行状态</dt><dd>{formatStatus(station.status)}</dd></div>
                 <div><dt>综合得分</dt><dd className="num">{station.score ?? NOT_AVAILABLE}</dd></div>
               </dl>
+              <Feedback stationSlug={station.slug} demo={station.source === 'demo'} />
               <h2 className="section-title">模型倍率</h2>
+              {/* 没有报价的站很常见（推荐站点时报价本来就允许留空）。原来这里
+                  渲染一张只有表头的空表，读者会以为表格没加载出来。 */}
+              {station.offers.length === 0 ? (
+                <p className="state">这个站还没有可展示的报价。可以让提交者补充，或在「一句话反馈」里告诉我们。</p>
+              ) : (
               <div className="table-scroll">
                 <table className="data-table data-table-compact">
-                  <thead><tr><th>模型</th><th>厂商</th><th>倍率</th></tr></thead>
+                  <thead><tr><th>模型</th><th>厂商</th><th>倍率</th><th>计价口径</th><th>报价时间</th></tr></thead>
                   <tbody>
                     {station.offers.map((offer) => (
                       <tr key={offer.modelSlug}>
                         <td><Link to={`/models/${offer.modelSlug}`}>{offer.model.name}</Link></td>
                         <td>{vendorBySlug.get(offer.model.vendor)?.name}</td>
                         <td className="num rate-cell">{formatRate(offer.rate)}</td>
+                        <td>{formatRateBasis(offer.basis)}</td>
+                        <td className="num">{formatQuotedAt(offer.quotedAt)}</td>
                       </tr>
                     ))}
                   </tbody>
                 </table>
               </div>
+              )}
             </>
           )}
         </AsyncView>
       </section>
+      {/* 演示数据不显示举报入口：它必然 400（服务端拒绝举报演示站），
+          摆一个点了就报错的按钮比没有更糟。 */}
+      {state.data && state.data.source !== 'demo' && (
+        <div className="station-report">
+          <ReportButton targetType="station" targetId={slug} />
+        </div>
+      )}
       {state.data && <Comments targetType="station" targetId={slug} />}
       <section className="module page" aria-label="相关文章">
         <h2 className="section-title">相关文章</h2>

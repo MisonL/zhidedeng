@@ -48,6 +48,9 @@ function VendorNav() {
 
 function BannerSection() {
   const state = useAsync((signal) => api.getBanners(signal), []);
+  // 生产模式空库没有横幅。这时整个区块都不该占位：留着 16:10 的空框配一句
+  // 「这里还没有内容」，首屏看起来像坏了。加载中与出错仍走 AsyncView。
+  if (state.data && state.data.items.length === 0) return null;
   return (
     <div className="banner-frame">
       <AsyncView

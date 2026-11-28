@@ -1,0 +1,20 @@
+# 每 30 分钟同步一次飞书收集表，随机延迟最多 2 分钟。
+#
+# 为什么不是每小时：群友在表里补一条站点，管理员希望尽快能在审核台看到；30 分钟
+# 内必然被拉进来一次。为什么不更密：lark-cli 读取是外部接口，间隔太短没必要也容易
+# 被限流。
+#
+# 为什么是 :05/:35 而不是 :00/:30：备份 timer 是 04:00 +最多 10 分钟随机延迟，
+# 整点对齐的话两者会正面撞上，一起抢 IO 和数据库连接。错开 5 分钟就够了。
+#
+# Persistent=true让机器重启后立刻补跑一次——停机期间提交的内容不该等下一轮。
+[Unit]
+Description=zhidedeng Feishu table sync (every30 minutes)
+
+[Timer]
+OnCalendar=*:5/30
+RandomizedDelaySec=120
+Persistent=true
+
+[Install]
+WantedBy=timers.target

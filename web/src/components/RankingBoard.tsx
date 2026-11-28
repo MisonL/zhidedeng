@@ -3,13 +3,14 @@ import type { ReactNode } from 'react';
 import { Link } from 'react-router';
 import type { GetRankingsResponse, RankingTab } from '@zhidedeng/shared';
 import { api } from '../api';
-import { formatPercent, formatRate } from '../format';
+import { formatPercent, formatRate, formatUptime } from '../format';
 import { useAsync } from '../hooks';
 import AsyncView from './AsyncView';
-import { ExpertTile, ModelTile, PostCover } from './visuals';
+import { ExpertTile, ModelTile, PostCover, StationTile } from './visuals';
 
 const TABS: { value: RankingTab; label: string }[] = [
   { value: 'model', label: '模型' },
+  { value: 'station', label: '中转站' },
   { value: 'community', label: '社区' },
   { value: 'expert', label: '达人' },
 ];
@@ -35,7 +36,10 @@ function RankCards({ data }: { data: GetRankingsResponse }) {
     return data.items.map(({ rank, model, lowestRate, stationCount }) => (
       <RankCard
         key={model.slug} rank={rank} to={`/models/${model.slug}`} art={<ModelTile model={model} />} title={model.name}
-        highlight={lowestRate === null ? '暂无报价' : `低至 ${formatRate(lowestRate)} · ${stationCount} 站可选`}
+        // 「低至 0.4x · 5 站可选」读起来像「5 个站都能拿到 0.4x」，但 stationCount
+        // 数的是**所有口径**的报价站数，而 0.4x 只来自综合口径。5 站里可能只有 2 站
+        // 报的是综合价。改成「有报价」，只陈述「这些站在报这个模型」，不暗示都能拿到这个价。
+        highlight={lowestRate === null ? '暂无报价' : `低至 ${formatRate(lowestRate)} · ${stationCount} 站有报价`}
       />
     ));
   }
@@ -44,6 +48,15 @@ function RankCards({ data }: { data: GetRankingsResponse }) {
       <RankCard
         key={post.id} rank={rank} to={`/posts/${post.id}`} art={<PostCover post={post} />} title={post.title}
         highlight={`值 ${formatPercent(post.votes.upRatio)} · ${post.votes.total} 票`}
+      />
+    ));
+  }
+  if (data.tab === 'station') {
+    return data.items.map(({ rank, station }) => (
+      <RankCard
+        key={station.slug} rank={rank} to={`/stations/${station.slug}`} art={<StationTile station={station} />} title={station.name}
+        // 分数与可用率都来自平台实测或用户断言，这里只陈述数值，不写「最稳」这类结论。
+        highlight={`评分 ${station.score === null ? '暂无' : station.score.toFixed(1)} · 可用率 ${formatUptime(station.uptime)}`}
       />
     ));
   }
@@ -88,6 +101,23 @@ export default function RankingBoard({ tab: controlled, onTabChange, pageSize = 
       <AsyncView
         state={state}
         skeleton={<ol className="rank-grid " aria-busy="true">{Array.from({ length: 6 }, (_, index) => <li key={index} className="rank-placeholder" />)}</ol>}
+        // 空库时这里原来渲染一个空的 .rank-grid——首页最显眼的模块是个白块，
+        // 看起来像坏了。榜单没有数据是正常状态（真实内容还没起来），
+        // 所以给一句话说清「为什么空」和「能做什么」。
+        // 返回的是 {items,total,tab} 而不是数组，默认的空态判定（看数组长度）不生效，
+        // 必须显式给 isEmpty，否则空库时那段文案永远不出现。
+        isEmpty={(data) => data.items.length === 0}
+        empty={(
+          <p className="state">
+            {tab === 'model'
+              ? <>目录里还没有模型，模型榜暂时为空。 <Link to="/submit?kind=model">补录一个模型</Link></>
+              : tab === 'station'
+                ? <>还没有中转站，站点榜暂时为空。 <Link to="/submit?kind=station">推荐一个站</Link></>
+              : tab === 'community'
+                ? <>还没有已通过的社区文章，社区榜暂时为空。 <Link to="/submit?kind=community">写第一篇</Link></>
+                : <>还没有人分享过内容，达人榜暂时为空。 <Link to="/submit">去写第一篇</Link></>}
+          </p>
+        )}
       >
         {(data) => <ol className="rank-grid"><RankCards data={data} /></ol>}
       </AsyncView>

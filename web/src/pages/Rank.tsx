@@ -2,7 +2,7 @@ import { useSearchParams } from 'react-router';
 import type { RankingTab } from '@zhidedeng/shared';
 import RankingBoard from '../components/RankingBoard';
 
-const TABS: RankingTab[] = ['model', 'community', 'expert'];
+const TABS: RankingTab[] = ['model', 'station', 'community', 'expert'];
 
 export default function Rank() {
   const [params, setParams] = useSearchParams();

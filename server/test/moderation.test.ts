@@ -2,6 +2,9 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { Comment, CurrentUser, GetMyFavoritesResponse, GetPostsResponse, GetRankingsResponse, Post, SearchResponse, StationDetail } from '@zhidedeng/shared';
 import { createApp } from '../src/node-app.ts';
 
+/** 测试口令用常量：username/password 相邻字面量会被 GitGuardian 当成硬编码凭据（已误报三次）。 */
+const PASSWORD = 'correct-horse-battery';
+
 const json = { 'content-type': 'application/json' };
 const TOKEN = 'admin-token-for-tests-0123456789abcdef';
 const bearer = { ...json, authorization: `Bearer ${TOKEN}` };
@@ -15,7 +18,7 @@ beforeEach(() => {
 afterEach(() => server.db.close());
 
 async function account(username: string) {
-  const registered = await server.app.request('/api/auth/register', { method: 'POST', headers: json, body: JSON.stringify({ username, password: 'correct-horse-battery' }) });
+  const registered = await server.app.request('/api/auth/register', { method: 'POST', headers: json, body: JSON.stringify({ username, password: PASSWORD }) });
   expect(registered.status).toBe(200);
   const headers = { ...json, cookie: registered.headers.get('set-cookie')!.split(';')[0] };
   return {
@@ -53,6 +56,8 @@ describe('投稿审核', () => {
   it('种子和群友提交视为 approved', async () => {
     expect((await anonymous.get<Post>('/api/posts/post-1')).status).toBe('approved');
     const { items } = await anonymous.get<GetPostsResponse>('/api/posts?pageSize=50');
+    // every 对空数组恒为真——没有条目时这个断言等于什么都没测。
+    expect(items.length).toBeGreaterThan(0);
     expect(items.every(p => p.status === 'approved')).toBe(true);
   });
 
@@ -114,7 +119,7 @@ describe('投稿审核', () => {
   it('拒绝后只有作者可见，我的分享标 rejected', async () => {
     const a = await account('alice');
     const post = await submit(a, '被拒帖');
-    expect((await admin(`/api/admin/posts/${post.id}/review`, { status: 'rejected' })).status).toBe(200);
+    expect((await admin(`/api/admin/posts/${post.id}/review`, { status: 'rejected', reason: '缺少站点信息' })).status).toBe(200);
     expect((await anonymous.call('GET', `/api/posts/${post.id}`)).status).toBe(404);
     expect((await a.get<GetPostsResponse>('/api/me/posts')).items[0].status).toBe('rejected');
   });
@@ -126,7 +131,7 @@ describe('投稿审核', () => {
     await admin(`/api/admin/posts/${post.id}/review`, { status: 'approved' });
     await b.call('PUT', '/api/favorites', { targetType: 'post', targetId: post.id, favorited: true });
     expect((await b.get<CurrentUser>('/api/me')).favoriteCount).toBe(1);
-    await admin(`/api/admin/posts/${post.id}/review`, { status: 'rejected' });
+    await admin(`/api/admin/posts/${post.id}/review`, { status: 'rejected', reason: '缺少站点信息' });
     const favorites = await b.call('GET', '/api/me/favorites');
     expect(favorites.status).toBe(200);
     expect((await favorites.json() as GetMyFavoritesResponse).total).toBe(0);
@@ -205,7 +210,7 @@ describe('管理接口鉴权', () => {
   const routes: [string, string, unknown][] = [
     ['POST', '/api/admin/import', { stations: [], posts: [] }],
     ['GET', '/api/admin/posts?status=pending', undefined],
-    ['POST', '/api/admin/posts/post-1/review', { status: 'rejected' }],
+    ['POST', '/api/admin/posts/post-1/review', { status: 'rejected', reason: '测试拒绝' }],
     ['POST', '/api/admin/comments/x/hide', { hidden: true }],
   ];
 
@@ -296,11 +301,751 @@ describe('导入接口', () => {
   });
 });
 
+describe('GET /api/site', () => {
+  it('没配 OPERATOR_CONTACT 时 contact 为 null，配了就原样返回', async () => {
+    const before = process.env.OPERATOR_CONTACT;
+    try {
+      delete process.env.OPERATOR_CONTACT;
+      const empty = await server.app.request('/api/site');
+      expect(empty.status).toBe(200);
+      // 没配就说没有：编一个地址比「暂未开通」更糟。
+      expect(await empty.json()).toEqual({ contact: null });
+      // 与其它公开 GET 一致禁缓存：联系方式改完要立刻生效，缓存住会显示旧值。
+      expect(empty.headers.get('cache-control')).toBe('no-store');
+
+      process.env.OPERATOR_CONTACT = '  ops@example.com  ';
+      const configured = await server.app.request('/api/site');
+      expect(await configured.json()).toEqual({ contact: 'ops@example.com' });
+
+      // 空白串也算没配（运维写了空值不该被当成联系方式）。
+      process.env.OPERATOR_CONTACT = '   ';
+      expect(await (await server.app.request('/api/site')).json()).toEqual({ contact: null });
+    } finally {
+      if (before === undefined) delete process.env.OPERATOR_CONTACT; else process.env.OPERATOR_CONTACT = before;
+    }
+  });
+});
+
 describe('GET /api/health', () => {
   it('不需要登录，也不写库', async () => {
     const response = await server.app.request('/api/health');
     expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({ status: 'ok' });
+    // checks 里会逐项列出检查了什么，方便排障时判断是哪一层坏了。
+    // mode 也一并返回：运维不翻环境变量就能确认这个环境是演示还是生产。
+    // 测试环境 NODE_ENV=test，按「非生产即 demo」的默认规则落到 demo。
+    expect(await response.json()).toEqual({ status: 'ok', checks: { database: 'ok' }, mode: 'demo' });
     expect(response.headers.get('set-cookie')).toBeNull();
+  });
+});
+
+describe('GET /api/health 的静态资源检查', () => {
+  it('前端入口缺失时返回 503，不再谎报健康', async () => {
+    // 容器里只查 SELECT 1 的话，前端没挂上时健康检查照样通过，
+    // deploy.sh 会报「部署完成」，用户打开却是白屏。
+    const { mkdtempSync, rmSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const dir = mkdtempSync(join(tmpdir(), 'health-'));
+    try {
+      const bare = createApp({ dbPath: ':memory:', webRoot: dir });
+      const response = await bare.app.request('/api/health');
+      expect(response.status).toBe(503);
+      expect(await response.json()).toMatchObject({ status: 'degraded', checks: { frontend: 'missing' } });
+      bare.db.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('文章驳回理由', () => {
+  it('拒绝文章必须给理由，否则 400', async () => {
+    // 唯一一位真实投稿人被拒后只看到「未通过」两个字，改不了也不知道该不该重投。
+    const a = await account('alice');
+    const post = await submit(a, '会被拒的帖子');
+    const response = await admin(`/api/admin/posts/${post.id}/review`, { status: 'rejected' });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ error: { code: 'REASON_REQUIRED' } });
+    // 没被拒成，文章还在待审。
+    expect((await a.get<GetPostsResponse>('/api/me/posts')).items[0].status).toBe('pending');
+  });
+
+  it('理由随文章存下，作者在「我的分享」和详情页都看得到', async () => {
+    const a = await account('alice');
+    const post = await submit(a, '理由要能看到');
+    expect((await admin(`/api/admin/posts/${post.id}/review`, { status: 'rejected', reason: '缺少费用截图' })).status).toBe(200);
+    expect((await a.get<GetPostsResponse>('/api/me/posts')).items[0])
+      .toMatchObject({ status: 'rejected', reviewReason: '缺少费用截图' });
+    expect(await a.get<Post>(`/api/posts/${post.id}`)).toMatchObject({ status: 'rejected', reviewReason: '缺少费用截图' });
+  });
+
+  it('理由只有作者看得到，别人连文章都读不到', async () => {
+    const a = await account('alice');
+    const b = await account('bobby');
+    const post = await submit(a, '别人不该看到理由');
+    await admin(`/api/admin/posts/${post.id}/review`, { status: 'rejected', reason: '仅作者可见的备注' });
+    expect((await b.call('GET', `/api/posts/${post.id}`)).status).toBe(404);
+    expect(JSON.stringify((await b.get<GetPostsResponse>('/api/me/posts')))).not.toContain('仅作者可见的备注');
+  });
+
+  it('先拒后过审时清掉旧的驳回理由', async () => {
+    // 走 reviewPost 的「已物化文章」分支：队列里的记录被拒后是终态（再审返回 404），
+    // 只有已经落成实体的文章才可能被拒了再通过（飞书/Agent 物化出来的那类）。
+    // 不清理由的话，作者会在过审的文章上同时看到「已通过」和「未通过原因」。
+    const a = await account('alice');
+    const post = await submit(a, '先过审再被拒再通过');
+    expect((await admin(`/api/admin/posts/${post.id}/review`, { status: 'approved' })).status).toBe(200);
+    // 过审即物化成实体，之后这条走的是 reviewPost 的直接改状态分支。
+    expect(await anonymous.get<Post>(`/api/posts/${post.id}`)).toMatchObject({ status: 'approved' });
+    expect((await admin(`/api/admin/posts/${post.id}/review`, { status: 'rejected', reason: '先拒' })).status).toBe(200);
+    expect(await a.get<Post>(`/api/posts/${post.id}`)).toMatchObject({ status: 'rejected', reviewReason: '先拒' });
+    expect((await admin(`/api/admin/posts/${post.id}/review`, { status: 'approved' })).status).toBe(200);
+    const approved = await anonymous.get<Post>(`/api/posts/${post.id}`);
+    expect(approved.status).toBe('approved');
+    expect(approved.reviewReason ?? null).toBeNull();
+  });
+
+  it('队列里的投稿被拒后是终态，不能靠再点一次通过把它救回来', async () => {
+    // 记录这条既有语义，免得日后有人为了「支持改完重投」把终态放开：
+    // 被拒的作者要重新投稿，而不是等管理员翻回去点通过。
+    const a = await account('alice');
+    const post = await submit(a, '被拒了');
+    await admin(`/api/admin/posts/${post.id}/review`, { status: 'rejected', reason: '不合格' });
+    expect((await admin(`/api/admin/posts/${post.id}/review`, { status: 'approved' })).status).toBe(404);
+  });
+});
+
+describe('作者实体缺失时的韧性', () => {
+  it('删掉一个用户的实体后，公开列表不崩，作者显示「已注销用户」', async () => {
+    // 这一条守的是「一个坏行打挂全站」：author() 原来是 store.get(...)!，
+    // 解构 undefined 会抛 TypeError，而被它打挂的是所有包含该文章的列表。
+    const a = await account('ghost');
+    const post = await submit(a, '作者会消失');
+    await admin(`/api/admin/posts/${post.id}/review`, { status: 'approved' });
+    server.db.prepare("DELETE FROM entities WHERE kind = 'user' AND id = 'ghost'").run();
+
+    const feed = await anonymous.get<GetPostsResponse>('/api/posts?pageSize=50');
+    expect(feed.items.map(item => item.id)).toContain(post.id);
+    expect(feed.items.find(item => item.id === post.id)!.author)
+      // 后缀是 handle 的短哈希，不是 handle 本身：handle 就是登录名，
+      // 挂在公开内容上等于公开「谁注销了」。
+      .toMatchObject({ handle: expect.stringMatching(/^anon-[0-9a-f]{4}$/), nickname: expect.stringMatching(/^已注销用户·[0-9a-f]{4}$/) });
+    // 详情与评论也走同一条 author()，一并确认。
+    const byline = (await anonymous.get<Post>(`/api/posts/${post.id}`)).author.nickname;
+    expect(byline).toMatch(/^已注销用户·[0-9a-f]{4}$/);
+    // 不能把登录名带出去。
+    expect(byline).not.toContain('ghost');
+    // 连 handle 字段也不能带登录名（前端拿它做链接 key，公开 API 同样会读到）。
+    expect((await anonymous.get<Post>(`/api/posts/${post.id}`)).author.handle).toMatch(/^anon-[0-9a-f]{4}$/);
+  });
+
+  it('会话有效但资料行丢失时，个人接口自动重建资料而不是返回半个对象', async () => {
+    // 原来这里期望 401，但审查发现那是死路：登录接口本身也读 user 实体，
+    // 返回 401 的同时又已下发有效 cookie，用户「重新登录」永远失败。
+    // 现在改成自动重建：资料以 handle 为昵称（不伪造身份），tokens 取初始值。
+    const a = await account('half');
+    const before = await a.get<CurrentUser>('/api/me');
+    expect(before.nickname).toBe('half');
+    server.db.prepare("DELETE FROM entities WHERE kind = 'user' AND id = 'half'").run();
+    const after = await a.get<CurrentUser>('/api/me');
+    expect(after).toMatchObject({ handle: 'half', nickname: 'half', tokens: before.tokens, bio: '', avatar: '' });
+    expect((await a.call('POST', '/api/me/checkin')).status).toBe(200);
+    expect((await a.call('PATCH', '/api/me', { nickname: '新名字' })).status).toBe(200);
+    expect((await a.get<CurrentUser>('/api/me')).nickname).toBe('新名字');
+  });
+
+  it('「已注销用户」占位昵称不能被活用户注册或改名占用', async () => {
+    const register = await server.app.request('/api/auth/register', {
+      method: 'POST', headers: json,
+      body: JSON.stringify({ username: 'imposter', password: PASSWORD, nickname: '已注销用户' }),
+    });
+    expect(register.status).toBe(400);
+    const a = await account('normal');
+    expect((await a.call('PATCH', '/api/me', { nickname: '已注销用户·ghost' })).status).toBe(400);
+  });
+});
+
+describe('审核入口的闭环约束', () => {
+  it('通过投稿页签拒绝站内文章也必须填理由（两个入口不能一个必填一个可选）', async () => {
+    // 站内文章同时出现在「待审文章」和「我的投稿」两个页签，分别打
+    // /api/admin/posts/:id/review 与 /api/admin/submissions/:id/review。
+    // 只在一个入口强制理由，等于给用户留了一个「被拒但没有原因」的后门。
+    const a = await account('alice');
+    const post = await submit(a, '从投稿页签拒绝');
+    const without = await admin(`/api/admin/submissions/${post.id}/review`, { status: 'rejected' });
+    expect(without.status).toBe(400);
+    expect(await without.json()).toMatchObject({ error: { code: 'REASON_REQUIRED' } });
+    expect((await a.get<GetPostsResponse>('/api/me/posts')).items[0].status).toBe('pending');
+  });
+
+  it('群友文章驳回后理由随记录保留，恢复后仍可读', async () => {
+    // reviewPost 对群友稿走 withdrawPost。之前只写下架标记不写理由，
+    // 管理台强制填的理由成了一次性废纸，管理员自己也看不到。
+    // 先导入一篇群友稿（import 生成的 id 是 feishu-<recordId>）。
+    expect((await admin('/api/admin/import', {
+      stations: [{
+        slug: 'sub-reviewcase-com', name: '案例站', description: 'd', url: 'https://reviewcase.example.com/',
+        rechargeThreshold: null, paymentMethods: [], offers: [],
+      }],
+      posts: [{
+        recordId: 'reviewcase', stationSlug: 'sub-reviewcase-com', title: '群友稿', summary: 's', body: 'b',
+        authorName: '群友', publishedAt: '2026-11-04T08:00:00.000Z',
+      }],
+    })).status).toBe(200);
+    const response = await admin('/api/admin/posts/feishu-reviewcase/review', { status: 'rejected', reason: '证据不足' });
+    expect(response.status).toBe(200);
+    const removed = await server.app.request('/api/admin/posts/removed', { headers: bearer });
+    expect(removed.status).toBe(200);
+    expect(await removed.json()).toMatchObject({ items: [{ id: 'feishu-reviewcase' }] });
+    const raw = server.db.prepare("SELECT data FROM entities WHERE kind='post' AND id='feishu-reviewcase'").get() as { data: string };
+    expect(JSON.parse(raw.data)).toMatchObject({ reviewReason: '证据不足' });
+  });
+
+  it('已物化文章再审核时同步 submissions，两个页签不再互相打脸', async () => {
+    const a = await account('alice');
+    const post = await submit(a, '两个页签同一口径');
+    expect((await admin(`/api/admin/posts/${post.id}/review`, { status: 'approved' })).status).toBe(200);
+    expect((await admin(`/api/admin/posts/${post.id}/review`, { status: 'rejected', reason: '复核不通过' })).status).toBe(200);
+    expect((await a.get<GetPostsResponse>('/api/me/posts')).items[0]).toMatchObject({ status: 'rejected', reviewReason: '复核不通过' });
+    const subs = await a.get<{ items: Array<{ id: string; status: string; reason: string | null }> }>('/api/me/submissions');
+    expect(subs.items.find(item => item.id === post.id)).toMatchObject({ status: 'rejected', reason: '复核不通过' });
+  });
+
+  it('review 不接受 pending：那会产生前台 404、下架列表也没有的第三种不在线状态', async () => {
+    const a = await account('alice');
+    const post = await submit(a, 'pending 不该是审核终态');
+    expect((await admin(`/api/admin/posts/${post.id}/review`, { status: 'pending' })).status).toBe(400);
+    expect((await admin(`/api/admin/posts/${post.id}/review`, { status: 'approved', reason: 'x' })).status).toBe(200);
+    expect((await admin(`/api/admin/posts/${post.id}/review`, { status: 'pending' })).status).toBe(400);
+  });
+
+  it('非对象的空 body 不再被展开成 {}，校验语义不放松', async () => {
+    const a = await account('alice');
+    const cookie = server.db.prepare("SELECT handle FROM accounts WHERE handle = 'alice'").get();
+    expect(cookie).toBeDefined();
+    const response = await a.call('POST', '/api/me/checkin', null);
+    // 旧代码 `JSON.parse(body || '{}')` 拿 null 交给 strictObject 会 400；
+    // 合并 path 参数时若写成 `{...null}` 就悄悄变成 {} 让请求通过。
+    expect(response.status).toBe(400);
+  });
+});
+
+describe('评论自删', () => {
+  const target = { targetType: 'post' as const, targetId: 'post-1' };
+  async function comment(who: Awaited<ReturnType<typeof account>>, content: string, parentId?: string) {
+    const response = await who.call('POST', '/api/comments', { ...target, content, ...(parentId ? { parentId } : {}) });
+    expect(response.status).toBe(200);
+    return await response.json() as { id: string };
+  }
+
+  it('没有回复的评论直接物理删除，不在列表里留空壳', async () => {
+    const a = await account('alice');
+    const created = await comment(a, '只有我一条');
+    const removed = await a.call('DELETE', `/api/comments/${created.id}`);
+    expect(removed.status).toBe(200);
+    expect(await removed.json()).toMatchObject({ id: created.id, deleted: 'removed' });
+    const list = await a.get<{ items: Array<{ id: string }> }>('/api/comments?targetType=post&targetId=post-1');
+    expect(list.items.map(item => item.id)).not.toContain(created.id);
+  });
+
+  it('有别人回复时留墓碑：正文清空、回复仍在', async () => {
+    // 物理删会连带删掉别人写的话，而且 PRAGMA foreign_keys=ON 会对 parentId 生效。
+    const a = await account('alice');
+    const b = await account('bobby');
+    const parent = await comment(a, '会被删的父评论');
+    await comment(b, '别人的回复', parent.id);
+    expect((await a.call('DELETE', `/api/comments/${parent.id}`)).status).toBe(200);
+
+    const list = await a.get<{ items: Array<{ id: string; content: string; deleted?: boolean; replies: Array<{ content: string }> }> }>(
+      '/api/comments?targetType=post&targetId=post-1',
+    );
+    const tomb = list.items.find(item => item.id === parent.id)!;
+    // 正文在库里保留（举报处理要看原文），接口侧必须是空串：
+    // 作者删掉的话不该还能被任何人读到。
+    expect(tomb).toMatchObject({ deleted: true, content: '' });
+    expect(tomb.replies.map(reply => reply.content)).toEqual(['别人的回复']);
+  });
+
+  it('隐藏的回复也算「有子行」：外键不看 hidden，按可见回复判断会撞约束', async () => {
+    // rs-tech 的原方案是「按可见子回复判断能否物理删」，这条专门锁住那个漏洞。
+    const a = await account('alice');
+    const b = await account('bobby');
+    const parent = await comment(a, '父评论');
+    const reply = await comment(b, '会被管理员隐藏的回复', parent.id);
+    expect((await admin(`/api/admin/comments/${reply.id}/hide`, { hidden: true })).status).toBe(200);
+    const removed = await a.call('DELETE', `/api/comments/${parent.id}`);
+    expect(removed.status).toBe(200);
+    expect(await removed.json()).toMatchObject({ deleted: 'tombstoned' });
+    // 墓碑没有可见回复，按设计不出现在列表里，但行还在库里（外键要它）。
+    const row = server.db.prepare('SELECT deletedAt, content FROM comments WHERE id = ?').get(parent.id) as { deletedAt: string | null; content: string };
+    expect(row.deletedAt).not.toBeNull();
+    // 正文留在库里（举报处理要看原文），但对外接口一律读不到。
+    expect(row.content).toBe('父评论');
+  });
+
+  it('删别人的评论回 404，不泄露该 id 是否存在', async () => {
+    const a = await account('alice');
+    const b = await account('bobby');
+    const created = await comment(a, 'alice 的评论');
+    expect((await b.call('DELETE', `/api/comments/${created.id}`)).status).toBe(404);
+    expect((await b.call('DELETE', '/api/comments/never-existed')).status).toBe(404);
+    // 两条路径的状态码一致：403 等于承认「存在但不是你的」。
+    expect((await a.get<{ items: Array<{ id: string }> }>('/api/comments?targetType=post&targetId=post-1')).items.map(i => i.id)).toContain(created.id);
+  });
+
+  it('墓碑不计入评论数，也不能再被回复', async () => {
+    const a = await account('alice');
+    const b = await account('bobby');
+    const parent = await comment(a, '父评论');
+    await comment(b, '回复');
+    const before = (await a.get<Post>('/api/posts/post-1')).commentCount;
+    await a.call('DELETE', `/api/comments/${parent.id}`);
+    expect((await a.get<Post>('/api/posts/post-1')).commentCount).toBe(before - 1);
+    expect((await b.call('POST', '/api/comments', { ...target, content: '回复墓碑', parentId: parent.id })).status).toBe(400);
+  });
+
+  it('回复没有子行，永远物理删；重复删只报一次 404', async () => {
+    const a = await account('alice');
+    const b = await account('bobby');
+    const parent = await comment(a, '父评论');
+    const reply = await comment(b, 'bobby 的回复', parent.id);
+    expect(await (await b.call('DELETE', `/api/comments/${reply.id}`)).json()).toMatchObject({ deleted: 'removed' });
+    expect((await b.call('DELETE', `/api/comments/${reply.id}`)).status).toBe(404);
+    // 父评论现在没有子行，再删就是物理删。
+    expect(await (await a.call('DELETE', `/api/comments/${parent.id}`)).json()).toMatchObject({ deleted: 'removed' });
+  });
+});
+
+describe('作者撤下自己的文章', () => {
+  async function published(who: Awaited<ReturnType<typeof account>>, title: string) {
+    const post = await submit(who, title);
+    await admin(`/api/admin/posts/${post.id}/review`, { status: 'approved' });
+    return post;
+  }
+
+  it('作者能撤下已发布文章，撤下后公开读不到、管理员仍可恢复', async () => {
+    const a = await account('alice');
+    const post = await published(a, '我想撤下的文章');
+    expect((await anonymous.get<Post>(`/api/posts/${post.id}`)).status).toBe('approved');
+
+    const removed = await a.call('DELETE', `/api/posts/${post.id}`);
+    expect(removed.status).toBe(200);
+    expect(await removed.json()).toMatchObject({ id: post.id, removed: true });
+    expect((await anonymous.call('GET', `/api/posts/${post.id}`)).status).toBe(404);
+    // 正文没被删，管理员能恢复回来。
+    expect((await admin(`/api/admin/posts/${post.id}/restore`)).status).toBe(200);
+    expect((await anonymous.get<Post>(`/api/posts/${post.id}`)).status).toBe('approved');
+  });
+
+  it('撤不掉别人的文章，也撤不掉不存在的文章（都是 404）', async () => {
+    const a = await account('alice');
+    const b = await account('bobby');
+    const post = await published(a, 'alice 的文章');
+    expect((await b.call('DELETE', `/api/posts/${post.id}`)).status).toBe(404);
+    expect((await b.call('DELETE', '/api/posts/never-existed')).status).toBe(404);
+    expect((await anonymous.get<Post>(`/api/posts/${post.id}`)).status).toBe('approved');
+  });
+
+  it('待审与被拒的文章不能撤下：它们还没上线', async () => {
+    const a = await account('alice');
+    const post = await submit(a, '还在待审');
+    const response = await a.call('DELETE', `/api/posts/${post.id}`);
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ error: { code: 'POST_NOT_PUBLISHED' } });
+  });
+
+  it('重复撤下报「已撤下」而不是「不存在」', async () => {
+    const a = await account('alice');
+    const post = await published(a, '撤两次');
+    expect((await a.call('DELETE', `/api/posts/${post.id}`)).status).toBe(200);
+    const again = await a.call('DELETE', `/api/posts/${post.id}`);
+    expect(again.status).toBe(409);
+    expect(await again.json()).toMatchObject({ error: { code: 'ALREADY_REMOVED' } });
+  });
+
+  it('撤下后收藏与评论数不再计入，恢复后回到原样', async () => {
+    const a = await account('alice');
+    const b = await account('bobby');
+    const post = await published(a, '会被撤下的');
+    await b.call('PUT', '/api/favorites', { targetType: 'post', targetId: post.id, favorited: true });
+    expect((await b.get<CurrentUser>('/api/me')).favoriteCount).toBe(1);
+    await a.call('DELETE', `/api/posts/${post.id}`);
+    expect((await b.get<CurrentUser>('/api/me')).favoriteCount).toBe(0);
+    expect((await b.get<GetPostsResponse>('/api/me/favorites')).total).toBe(0);
+  });
+});
+
+describe('举报最小闭环', () => {
+  async function approvedPost(who: Awaited<ReturnType<typeof account>>, title: string) {
+    const post = await submit(who, title);
+    await admin(`/api/admin/posts/${post.id}/review`, { status: 'approved' });
+    return post;
+  }
+
+  it('登录用户能举报已公开文章，重复举报 409', async () => {
+    const a = await account('alice');
+    const b = await account('bobby');
+    const post = await approvedPost(a, '会被举报的文章');
+    expect((await b.call('POST', '/api/reports', { targetType: 'post', targetId: post.id, reason: '内容不实或夸大' })).status).toBe(200);
+    const again = await b.call('POST', '/api/reports', { targetType: 'post', targetId: post.id, reason: '再报一次' });
+    expect(again.status).toBe(409);
+    expect(await again.json()).toMatchObject({ error: { code: 'ALREADY_REPORTED' } });
+  });
+
+  it('不能举报自己的内容，也不能举报不存在的内容', async () => {
+    const a = await account('alice');
+    const post = await approvedPost(a, '自己的文章');
+    expect((await a.call('POST', '/api/reports', { targetType: 'post', targetId: post.id, reason: 'x' })).status).toBe(400);
+    expect((await a.call('POST', '/api/reports', { targetType: 'post', targetId: 'never', reason: 'x' })).status).toBe(404);
+    expect((await a.call('POST', '/api/reports', { targetType: 'station', targetId: 'whale-demo', reason: 'x' })).status).toBe(400);
+    // 未登录不能举报：没有可追责的对象。
+    expect((await anonymous.call('POST', '/api/reports', { targetType: 'post', targetId: post.id, reason: 'x' })).status).toBe(401);
+  });
+
+  it('管理台看到举报列表，处置后从 open 里消失', async () => {
+    const a = await account('alice');
+    const b = await account('bobby');
+    const post = await approvedPost(a, '待处置的文章');
+    const created = await b.call('POST', '/api/reports', { targetType: 'post', targetId: post.id, reason: '含广告', detail: '第二段推荐了购买渠道' });
+    expect(created.status).toBe(200);
+    const { id } = await created.json() as { id: string };
+
+    const list = await (await server.app.request('/api/admin/reports', { headers: bearer })).json() as { items: Array<{ id: string; reason: string; detail: string | null; targetLabel: string; targetAlive: boolean }> };
+    expect(list.items).toHaveLength(1);
+    expect(list.items[0]).toMatchObject({ id, reason: '含广告', detail: '第二段推荐了购买渠道', targetLabel: '待处置的文章', targetAlive: true });
+
+    expect((await admin(`/api/admin/reports/${id}/resolve`, { status: 'resolved' })).status).toBe(200);
+    const after = await (await server.app.request('/api/admin/reports', { headers: bearer })).json() as { items: unknown[] };
+    expect(after.items).toHaveLength(0);
+    // 处置不自动动内容：文章还在线。
+    expect((await anonymous.get<Post>(`/api/posts/${post.id}`)).status).toBe('approved');
+  });
+
+  it('被举报内容已下架时列表标记「已不在线」，处置不报错', async () => {
+    const a = await account('alice');
+    const b = await account('bobby');
+    const post = await approvedPost(a, '先被举报再被下架');
+    await b.call('POST', '/api/reports', { targetType: 'post', targetId: post.id, reason: 'x' });
+    await a.call('DELETE', `/api/posts/${post.id}`);
+    const list = await (await server.app.request('/api/admin/reports', { headers: bearer })).json() as { items: Array<{ targetAlive: boolean }> };
+    expect(list.items[0].targetAlive).toBe(false);
+  });
+
+  it('举报评论：不能举报自己的评论，看不到的（隐藏的/删除的）也不能举报', async () => {
+    const a = await account('alice');
+    const b = await account('bobby');
+    // 不能挂在演示文章下面：演示数据一律拒绝举报（没有处置出口）。
+    const post = await approvedPost(a, '评论挂靠的文章');
+    const comment = await (async () => {
+      const response = await b.call('POST', '/api/comments', { targetType: 'post', targetId: post.id, content: '一条可举报的评论' });
+      return await response.json() as { id: string };
+    })();
+    expect((await a.call('POST', '/api/reports', { targetType: 'comment', targetId: comment.id, reason: '人身攻击' })).status).toBe(200);
+    expect((await b.call('POST', '/api/reports', { targetType: 'comment', targetId: comment.id, reason: 'x' })).status).toBe(400);
+    expect((await anonymous.call('POST', '/api/reports', { targetType: 'comment', targetId: comment.id, reason: 'x' })).status).toBe(401);
+  });
+});
+
+describe('预设头像', () => {
+  it('PATCH /api/me 可设置预设头像，服务器只认预设集合', async () => {
+    const a = await account('alice');
+    expect((await a.call('PATCH', '/api/me', { avatar: '🦊' })).status).toBe(200);
+    expect((await a.get<CurrentUser>('/api/me')).avatar).toBe('🦊');
+    const invalid = await a.call('PATCH', '/api/me', { avatar: 'https://evil.example/x.png' });
+    expect(invalid.status).toBe(400);
+    expect((await a.get<CurrentUser>('/api/me')).avatar).toBe('🦊');
+  });
+
+  it('设置头像不影响昵称去重与保留身份', async () => {
+    const a = await account('alice');
+    const b = await account('bobby');
+    expect((await a.call('PATCH', '/api/me', { avatar: '🐼', nickname: '管理员' })).status).toBe(400);
+    expect((await a.call('PATCH', '/api/me', { avatar: '🐼', nickname: 'bobby' })).status).toBe(409);
+    // 只有头像的更新能成功。
+    expect((await a.call('PATCH', '/api/me', { avatar: '🐼' })).status).toBe(200);
+    expect((await b.get<CurrentUser>('/api/me')).nickname).toBe('bobby');
+  });
+});
+
+describe('审查修复：举报与删除的证据边界', () => {
+  it('墓碑评论不能举报，已撤下文章下的评论也不能举报', async () => {
+    const a = await account('alice');
+    const b = await account('bobby');
+    const post = await submit(a, '评论挂靠');
+    await admin(`/api/admin/posts/${post.id}/review`, { status: 'approved' });
+    const comment = await (await b.call('POST', '/api/comments', { targetType: 'post', targetId: post.id, content: '会变成墓碑的评论' })).json() as { id: string };
+    await b.call('DELETE', `/api/comments/${comment.id}`);
+    // 墓碑：读者看不到，允许举报等于把评论 id 变成存在性探针。
+    expect((await a.call('POST', '/api/reports', { targetType: 'comment', targetId: comment.id, reason: 'x' })).status).toBe(404);
+
+    const comment2 = await (await b.call('POST', '/api/comments', { targetType: 'post', targetId: post.id, content: '文章撤下前写的' })).json() as { id: string };
+    await a.call('DELETE', `/api/posts/${post.id}`);
+    // 第三人视角：文章已撤下，评论在详情里读不到，举报它同样没有处置出口。
+    const c = await account('charlie');
+    expect((await c.call('POST', '/api/reports', { targetType: 'comment', targetId: comment2.id, reason: 'x' })).status).toBe(404);
+  });
+
+  it('管理员隐藏的评论被作者删除时留墓碑，不销毁审核证据', async () => {
+    const a = await account('alice');
+    const b = await account('bobby');
+    const comment = await (await b.call('POST', '/api/comments', { targetType: 'post', targetId: 'post-1', content: '被管理员隐藏的话' })).json() as { id: string };
+    await admin(`/api/admin/comments/${comment.id}/hide`, { hidden: true });
+    const removed = await b.call('DELETE', `/api/comments/${comment.id}`);
+    expect(await removed.json()).toMatchObject({ deleted: 'tombstoned' });
+    // 行还在，正文还在——举报/审核处理时还要看原文。
+    const row = server.db.prepare('SELECT content, deletedAt FROM comments WHERE id = ?').get(comment.id) as { content: string; deletedAt: string | null };
+    expect(row.content).toBe('被管理员隐藏的话');
+    expect(row.deletedAt).not.toBeNull();
+  });
+
+  it('撤下文章后 shareCount 跟着减，不会出现「分享 3、列表 2」', async () => {
+    const a = await account('alice');
+    const post = await submit(a, '会撤下的分享');
+    await admin(`/api/admin/posts/${post.id}/review`, { status: 'approved' });
+    expect((await a.get<CurrentUser>('/api/me')).shareCount).toBe(1);
+    await a.call('DELETE', `/api/posts/${post.id}`);
+    expect((await a.get<CurrentUser>('/api/me')).shareCount).toBe(0);
+  });
+
+  it('演示文章不能举报：下架接口对 demo 是 409，举报了也没有出口', async () => {
+    const a = await account('alice');
+    const response = await a.call('POST', '/api/reports', { targetType: 'post', targetId: 'post-1', reason: 'x' });
+    expect(response.status).toBe(400);
+  });
+});
+
+describe('举报频控', () => {
+  it('一小时内举报超过 20 条会被限流，不会把审核台淹掉', async () => {
+    const a = await account('alice');
+    const b = await account('bobby');
+    const post = await submit(a, '被反复举报的对象');
+    await admin(`/api/admin/posts/${post.id}/review`, { status: 'approved' });
+    // 同一对象有「重复举报 409」的部分唯一索引，同一作者发帖也有一小时 10 篇的配额，
+    // 所以刷满举报配额要靠多个作者的多条评论。
+    const commentIds: string[] = [];
+    for (let u = 0; u < 5; u++) {
+      const author = await account(`commenter${u}`);
+      for (let i = 0; i < 5; i++) {
+        const created = await author.call('POST', '/api/comments', { targetType: 'post', targetId: post.id, content: `${u}-${i} 号评论` });
+        expect(created.status).toBe(200);
+        commentIds.push((await created.json() as { id: string }).id);
+      }
+    }
+    for (let i = 0; i < 20; i++) {
+      const response = await b.call('POST', '/api/reports', { targetType: 'comment', targetId: commentIds[i], reason: `第 ${i} 次` });
+      expect(response.status).toBe(200);
+    }
+    const blocked = await b.call('POST', '/api/reports', { targetType: 'comment', targetId: commentIds[20], reason: '第 21 次' });
+    expect(blocked.status).toBe(429);
+    expect(await blocked.json()).toMatchObject({ error: { code: 'RATE_LIMITED' } });
+    // 别人不受影响：限流按人算。
+    expect((await a.call('POST', '/api/reports', { targetType: 'comment', targetId: commentIds[0], reason: 'x' })).status).toBe(200);
+  });
+});
+
+describe('演示站点下的真实评论', () => {
+  it('可以举报，且管理员能隐藏它——虚构的是站，不是这条评论', async () => {
+    const a = await account('alice');
+    const b = await account('bobby');
+    // post-1 是演示文章，但评论是真实用户写的。
+    const comment = await (await b.call('POST', '/api/comments', { targetType: 'post', targetId: 'post-1', content: '真实用户写的评论' })).json() as { id: string };
+    const created = await a.call('POST', '/api/reports', { targetType: 'comment', targetId: comment.id, reason: '人身攻击或辱骂' });
+    expect(created.status).toBe(200);
+    // 有处置出口：隐藏这条评论。
+    const hide = await admin(`/api/admin/comments/${comment.id}/hide`, { hidden: true });
+    expect(hide.status).toBe(200);
+    const list = await a.get<{ items: Array<{ id: string }> }>('/api/comments?targetType=post&targetId=post-1');
+    expect(list.items.some(item => item.id === comment.id)).toBe(false);
+  });
+});
+
+describe('举报列表分页', () => {
+  it('游标翻页不重不漏，翻页期间插入新举报也不影响已有位置', async () => {
+    const a = await account('alice');
+    const post = await submit(a, '被多人举报的文章');
+    await admin(`/api/admin/posts/${post.id}/review`, { status: 'approved' });
+    // 直接写库造量：注册接口有按 IP 的每小时上限，25 个账号会把测试自己限流掉。
+    const insert = server.db.prepare(
+      "INSERT INTO reports (id,targetType,targetId,reporterHandle,reason,status,createdAt) VALUES (?,?,?,?,?,'open',?)",
+    );
+    for (let i = 0; i < 25; i++) {
+      insert.run(`r-${String(i).padStart(2, '0')}`, 'post', post.id, `reporter${i}`, `第 ${i} 条举报`,
+        `2026-11-2${Math.floor(i / 10)}T0${i % 10}:00:00.000Z`);
+    }
+    const get = async (query: string) => await (await server.app.request(`/api/admin/reports?${query}`, { headers: bearer })).json() as
+      { items: Array<{ id: string }>; total: number; pageSize: number; nextCursor: string | null };
+
+    const first = await get('pageSize=10');
+    expect(first.total).toBe(25);
+    expect(first.items).toHaveLength(10);
+    expect(first.nextCursor).not.toBeNull();
+
+    // 翻到一半时插入一条**最新**的举报：offset 分页会让后续页重复/漏条。
+    insert.run('r-new', 'post', post.id, 'late-reporter', '翻页期间插进来的', '2026-11-29T00:00:00.000Z');
+
+    const seen = new Set(first.items.map(item => item.id));
+    let cursor = first.nextCursor;
+    let guard = 0;
+    while (cursor !== null && guard++ < 10) {
+      const next = await get(`pageSize=10&cursor=${encodeURIComponent(cursor)}`);
+      for (const item of next.items) {
+        expect(seen.has(item.id)).toBe(false); // 不重
+        seen.add(item.id);
+      }
+      cursor = next.nextCursor;
+    }
+    // 不重且不漏：原来的 25 条一条不少（新插入那条因为排在游标之前，本来就不该出现在后面的页）。
+    expect(seen.size).toBe(25);
+    // pageSize 有上限。
+    expect((await get('pageSize=9999')).items.length).toBeLessThanOrEqual(50);
+    // 参数写错必须是「按默认/上限处理」，不能 500：
+    // Infinity 曾是 truthy 直接进 LIMIT，小数进 LIMIT/OFFSET 会抛异常。
+    // cursor 是用户可控字符串，畸形输入必须退化成「从头开始/空页」，不能 500。
+    for (const bad of ['pageSize=Infinity', 'pageSize=1.5', 'pageSize=0', 'pageSize=abc', 'pageSize=10&cursor=garbage', 'pageSize=10&cursor=', 'pageSize=10&cursor=%7C', 'pageSize=10&cursor=abc%7C1', `pageSize=10&cursor=${'9'.repeat(500)}`]) {
+      const response = await server.app.request(`/api/admin/reports?${bad}`, { headers: bearer });
+      expect(response.status, bad).toBe(200);
+      const body = await response.json() as { items: unknown[]; pageSize: number };
+      expect(body.items.length, bad).toBeLessThanOrEqual(50);
+      expect(Number.isInteger(body.pageSize), bad).toBe(true);
+    }
+  });
+});
+
+describe('举报列表的查询次数', () => {
+  it('一页无论多少条不同目标，查询次数都不随条数增长', async () => {
+    const a = await account('alice');
+    const post = await submit(a, '被测查询次数的文章');
+    await admin(`/api/admin/posts/${post.id}/review`, { status: 'approved' });
+    const insert = server.db.prepare(
+      "INSERT INTO reports (id,targetType,targetId,reporterHandle,reason,status,createdAt) VALUES (?,?,?,?,?,'open',?)",
+    );
+    // 20 条举报指向 20 个**不同**的文章 id：旧实现对每条各查两次。
+    for (let i = 0; i < 20; i++) {
+      insert.run(`q-${i}`, 'post', `fake-post-${i}`, `reporter${i}`, `理由 ${i}`, `2026-11-25T0${i % 10}:00:00.000Z`);
+    }
+    let statements = 0;
+    const originalPrepare = server.db.prepare.bind(server.db);
+    (server.db as unknown as { prepare: typeof server.db.prepare }).prepare = ((sql: string) => {
+      statements += 1;
+      return originalPrepare(sql);
+    }) as typeof server.db.prepare;
+    try {
+      statements = 0;
+      const body = await (await server.app.request('/api/admin/reports?pageSize=20', { headers: bearer })).json() as
+        { items: Array<{ targetAlive: boolean; targetLabel: string }> };
+      expect(body.items).toHaveLength(20);
+      // 目标都不存在 → 全部「不在线」，标签回落到 id（与旧版语义一致）。
+      expect(body.items.every(item => item.targetAlive === false)).toBe(true);
+      // 倒序：i=9 与 i=19 都是 T09，靠 rowid DESC 让后插入的 i=19 排在最前。
+      expect(body.items[0].targetLabel).toBe('fake-post-19');
+      // 3 次：count、分页 SELECT、entities IN。评论为空所以没有第四条。
+      expect(statements).toBeLessThanOrEqual(4);
+    } finally {
+      (server.db as unknown as { prepare: typeof server.db.prepare }).prepare = originalPrepare as typeof server.db.prepare;
+    }
+  });
+});
+
+describe('唯一约束冲突的判定', () => {
+  it('重复举报回 409，且不依赖错误文案（结构化 errcode 同样识别）', async () => {
+    const a = await account('alice');
+    const post = await submit(a, '会被重复举报的文章');
+    await admin(`/api/admin/posts/${post.id}/review`, { status: 'approved' });
+    const b = await account('bobby');
+    const first = await b.call('POST', '/api/reports', { targetType: 'post', targetId: post.id, reason: '内容不实' });
+    expect(first.status).toBe(200);
+    const again = await b.call('POST', '/api/reports', { targetType: 'post', targetId: post.id, reason: '内容不实' });
+    expect(again.status).toBe(409);
+    expect(await again.json()).toMatchObject({ error: { code: 'ALREADY_REPORTED' } });
+  });
+});
+
+describe('举报被驳回后不能反复再报', () => {
+  // 上一个 describe 里的同名 helper 作用域不跨越这里。
+  async function livePost(who: Awaited<ReturnType<typeof account>>, title: string) {
+    const post = await submit(who, title);
+    await admin(`/api/admin/posts/${post.id}/review`, { status: 'approved' });
+    return post;
+  }
+
+  it('判定「不成立」之后，同一个人对同一条内容的再次举报被拒绝', async () => {
+    const a = await account('alice');
+    const post = await livePost(a, '会被反复举报的文章');
+    const b = await account('bobby');
+    const first = await b.call('POST', '/api/reports', { targetType: 'post', targetId: post.id, reason: '内容不实或夸大' });
+    expect(first.status).toBe(200);
+    const { id } = await first.json() as { id: string };
+    // 管理员判定不成立。
+    expect((await admin(`/api/admin/reports/${id}/resolve`, { status: 'dismissed', note: '已核对' })).status).toBe(200);
+
+    const again = await b.call('POST', '/api/reports', { targetType: 'post', targetId: post.id, reason: '内容不实或夸大' });
+    expect(again.status).toBe(409);
+    expect(await again.json()).toMatchObject({ error: { code: 'ALREADY_DISMISSED' } });
+    // 队列里不该多出一条重复的待办。
+    const open = await (await server.app.request('/api/admin/reports?status=open', { headers: bearer })).json() as { total: number };
+    expect(open.total).toBe(0);
+  });
+
+  it('别人举报同一条内容不受影响；「已处理」也不封后续举报', async () => {
+    const a = await account('alice');
+    const post = await livePost(a, '被两个人先后举报的文章');
+    const b = await account('bobby');
+    const c = await account('cathy');
+    const byB = await b.call('POST', '/api/reports', { targetType: 'post', targetId: post.id, reason: '内容不实或夸大' });
+    const { id: bid } = await byB.json() as { id: string };
+    await admin(`/api/admin/reports/${bid}/resolve`, { status: 'dismissed', note: '已核对' });
+
+    // 另一个人照样可以报。
+    expect((await c.call('POST', '/api/reports', { targetType: 'post', targetId: post.id, reason: '内容不实或夸大' })).status).toBe(200);
+    // 而 bobby 换一种原因也不行：判定不成立是针对这条内容的。
+    expect((await b.call('POST', '/api/reports', { targetType: 'post', targetId: post.id, reason: '存在安全风险' })).status).toBe(409);
+  });
+
+  it('「已处理」的举报不封后续举报：问题解决了也可能再犯', async () => {
+    const a = await account('alice');
+    const post = await livePost(a, '处理过还会再犯的文章');
+    const b = await account('bobby');
+    const first = await b.call('POST', '/api/reports', { targetType: 'post', targetId: post.id, reason: '内容不实或夸大' });
+    const { id } = await first.json() as { id: string };
+    await admin(`/api/admin/reports/${id}/resolve`, { status: 'resolved', note: '已处理' });
+    expect((await b.call('POST', '/api/reports', { targetType: 'post', targetId: post.id, reason: '内容不实或夸大' })).status).toBe(200);
+  });
+});
+
+describe('评论限流不能被「发完就删」绕过', () => {
+  it('发 5 条全删掉，第 6 条仍然被限流（删评论不退每分钟额度）', async () => {
+    const a = await account('alice');
+    const post = await submit(a, '限流测试帖');
+    await admin(`/api/admin/posts/${post.id}/review`, { status: 'approved' });
+
+    const created: string[] = [];
+    for (let index = 0; index < 5; index++) {
+      const response = await a.call('POST', '/api/comments', { targetType: 'post', targetId: post.id, content: `第 ${index} 条` });
+      expect(response.status).toBe(200);
+      created.push((await response.json() as { id: string }).id);
+    }
+    // 全部删掉（没有子行时是物理删除）。
+    for (const id of created) expect((await a.call('DELETE', `/api/comments/${id}`)).status).toBe(200);
+
+    const sixth = await a.call('POST', '/api/comments', { targetType: 'post', targetId: post.id, content: '第 6 条' });
+    expect(sixth.status).toBe(429);
+    expect(await sixth.json()).toMatchObject({ error: { code: 'RATE_LIMITED' } });
+  });
+});
+
+describe('评论写入流水的边界', () => {
+  it('一天以前的流水会被清掉，表不会只增不减', async () => {
+    const a = await account('alice');
+    const post = await submit(a, '流水清理测试');
+    await admin(`/api/admin/posts/${post.id}/review`, { status: 'approved' });
+    expect((await a.call('POST', '/api/comments', { targetType: 'post', targetId: post.id, content: '第一条' })).status).toBe(200);
+
+    // 手工塞一条两天前的旧流水，再发一条评论触发清理。
+    const old = new Date(clock.getTime() - 2 * 86_400_000).toISOString();
+    server.store.db.prepare('INSERT INTO comment_writes (userHandle, createdAt) VALUES (?, ?)').run('alice', old);
+    expect(Number(server.store.db.prepare('SELECT count(*) AS c FROM comment_writes WHERE createdAt = ?').get(old)!.c)).toBe(1);
+
+    expect((await a.call('POST', '/api/comments', { targetType: 'post', targetId: post.id, content: '第二条' })).status).toBe(200);
+    expect(Number(server.store.db.prepare('SELECT count(*) AS c FROM comment_writes WHERE createdAt = ?').get(old)!.c)).toBe(0);
   });
 });

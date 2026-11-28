@@ -4,7 +4,14 @@
   "private": true,
   "type": "module",
   "exports": {
-    ".": { "types": "./src/index.ts", "import": "./src/index.ts" }
+    ".": {
+      "types": "./src/index.ts",
+      "import": "./src/index.ts"
+    },
+    "./submission": {
+      "types": "./src/submission.ts",
+      "import": "./src/submission.ts"
+    }
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
@@ -15,5 +22,8 @@
     "@types/node": "^22.0.0",
     "typescript": "^5.9.3",
     "vitest": "^4.0.0"
+  },
+  "dependencies": {
+    "zod": "^4.1.0"
   }
 }

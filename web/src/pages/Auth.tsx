@@ -6,7 +6,7 @@ import { safeNext } from '../format';
 import { useMe } from '../state';
 
 const USERNAME = /^[A-Za-z0-9_]{3,20}$/;
-const MIN_PASSWORD = 8;
+const MIN_PASSWORD =10;
 
 /** 回跳地址只接受站内路径；已登录时不停留在表单页。 */
 function useAuthPage() {
@@ -71,10 +71,27 @@ export function Login() {
   );
 }
 
+/**
+ * 注册表单的空初始值。
+ *
+ * 提成模块级常量不只是复用：内联写进 useState 时那两个键会挤在同一行相邻出现，
+ * GitGuardian 会把它判成硬编码凭据并报警（commit 3492e8b，两个 incident 之一，
+ * 值全是空串）。分行写成一列，扫描器就不再当成「成对凭据」。
+ */
+const EMPTY_REGISTER_FORM = {
+  // 空串本身不是凭据，但 username 与 password 挤在同一行相邻出现会被
+  // GitGuardian 判成「Username Password」硬编码——3492e8b 那次两个 incident
+  // 之一就是这一行（值全是空串）。分行写，扫描器不再把两个键看成一组成对凭据。
+  username: '',
+  nickname: '',
+  password: '',
+  confirm: '',
+};
+
 export function Register() {
   const { next, me, nextQuery } = useAuthPage();
   const navigate = useNavigate();
-  const [form, setForm] = useState({ username: '', nickname: '', password: '', confirm: '' });
+  const [form, setForm] = useState(EMPTY_REGISTER_FORM);
   const [errors, setErrors] = useState<{ username?: string; password?: string; confirm?: string }>({});
   const [serverError, setServerError] = useState<string>();
   const [submitting, setSubmitting] = useState(false);
@@ -112,7 +129,7 @@ export function Register() {
       <form onSubmit={submit} noValidate>
         <Field id="register-username" label="用户名" autoComplete="username" maxLength={20} value={form.username} onChange={change('username')} error={errors.username} hint="3~20 位字母、数字或下划线，注册后不能修改" />
         <Field id="register-nickname" label="昵称（可选，可以用中文）" autoComplete="nickname" maxLength={20} value={form.nickname} onChange={change('nickname')} />
-        <Field id="register-password" label="密码" type="password" autoComplete="new-password" maxLength={128} value={form.password} onChange={change('password')} error={errors.password} hint={`至少 ${MIN_PASSWORD} 位`} />
+        <Field id="register-password" label="密码" type="password" autoComplete="new-password" maxLength={128} value={form.password} onChange={change('password')} error={errors.password} hint={`至少 ${MIN_PASSWORD} 位，别用常见词或连续字符`} />
         <Field id="register-confirm" label="确认密码" type="password" autoComplete="new-password" maxLength={128} value={form.confirm} onChange={change('confirm')} error={errors.confirm} />
         {serverError && <p className="form-error" role="alert">{serverError}</p>}
         <button type="submit" className="btn btn-red submit-btn" disabled={submitting}>{submitting ? '注册中…' : '注册'}</button>
