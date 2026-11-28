@@ -195,6 +195,20 @@ export interface GetRevisionResponse { revision: RevisionView | null }
 export interface WithdrawRevisionRequest { id: string }
 export interface WithdrawRevisionResponse { id: string; withdrawn: true }
 
+/**
+ * 注销账号。**软注销**：账号行保留（用户名永久占用）、个人资料与偏好清空、
+ * 内容保留但署名降级为「已注销用户·handle」。
+ *
+ * 不用 DELETE 方法：CSRF 闸门对无正文的 DELETE 不读 body，带不了二次口令。
+ * 二次确认要口令 + 确认短语两个，缺一个都不够——注销不可撤销（恢复只给管理员）。
+ */
+export interface DeleteAccountRequest {
+  password: string;
+  /** 必须是「注销」二字，防误触。 */
+  confirm: string;
+}
+export interface DeleteAccountResponse { ok: true; deletedAt: string }
+
 export interface DeletePostRequest { id: string }
 export interface DeletePostResponse { id: string; removed: true }
 
@@ -618,6 +632,7 @@ export interface ApiContracts {
   deleteFeedback: { request: DeleteFeedbackRequest; response: ApiResponse<{ id: string; deleted: true }> };
   getPost: { request: GetPostRequest; response: ApiResponse<GetPostResponse> };
   createPost: { request: CreatePostRequest; response: ApiResponse<CreatePostResponse> };
+  deleteAccount: { request: DeleteAccountRequest; response: ApiResponse<DeleteAccountResponse> };
   submitRevision: { request: SubmitRevisionRequest; response: ApiResponse<SubmitRevisionResponse> };
   getRevision: { request: GetRevisionRequest; response: ApiResponse<GetRevisionResponse> };
   withdrawRevision: { request: WithdrawRevisionRequest; response: ApiResponse<WithdrawRevisionResponse> };

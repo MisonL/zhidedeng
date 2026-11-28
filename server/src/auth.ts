@@ -226,7 +226,7 @@ export function createSession(store: Store, handle: string, now: Date) {
 export function sessionHandle(store: Store, cookieHeader: string | undefined, now: Date) {
   const token = cookieHeader?.match(COOKIE)?.[1];
   if (!token) return null;
-  const row = store.db.prepare('SELECT sessions.handle, sessions.expiresAt FROM sessions JOIN accounts ON accounts.handle = sessions.handle WHERE sessions.tokenHash = ? AND accounts.disabledAt IS NULL').get(tokenHash(token));
+  const row = store.db.prepare('SELECT sessions.handle, sessions.expiresAt FROM sessions JOIN accounts ON accounts.handle = sessions.handle WHERE sessions.tokenHash = ? AND accounts.disabledAt IS NULL AND accounts.deletedAt IS NULL').get(tokenHash(token));
   return row && (row.expiresAt as string) > now.toISOString() ? row.handle as string : null;
 }
 

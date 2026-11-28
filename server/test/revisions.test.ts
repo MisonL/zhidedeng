@@ -237,6 +237,79 @@ describe('编辑已发布文章', () => {
     expect(again.status).toBe(200);
   });
 
+  it('详情页只对作者挂 pendingRevision，读者拿不到', async () => {
+    const alice = await account('alice');
+    const bob = await account('bob');
+    const id = await published(alice);
+    await alice.call('PUT', `/api/posts/${id}/revision`, {
+      kind: 'community', title: '改', summary: 's', body: 'b', baseVersion: 1,
+    });
+    const mine = await (await alice.call('GET', `/api/posts/${id}`)).json() as { pendingRevision?: { id: string } | null };
+    expect(mine.pendingRevision?.id).toBeTruthy();
+    // 读者拿到这个字段会以为线上内容要变了，而他们看到的就是最终版本。
+    const other = await (await bob.call('GET', `/api/posts/${id}`)).json() as { pendingRevision?: unknown };
+    expect(other.pendingRevision ?? null).toBeNull();
+    const anon = await (await server.app.request(`/api/posts/${id}`)).json() as { pendingRevision?: unknown };
+    expect(anon.pendingRevision ?? null).toBeNull();
+  });
+
+  it('「分享 N」不把待审编辑算成一篇', async () => {
+    const alice = await account('alice');
+    const id = await published(alice);
+    const before = (await (await alice.call('GET', '/api/me')).json() as { shareCount: number }).shareCount;
+    await alice.call('PUT', `/api/posts/${id}/revision`, {
+      kind: 'community', title: '改', summary: 's', body: 'b', baseVersion: 1,
+    });
+    expect((await (await alice.call('GET', '/api/me')).json() as { shareCount: number }).shareCount).toBe(before);
+  });
+
+  it('审核通过之后再读修改，拿到的是 null 而不是一条 approved 行', async () => {
+    const alice = await account('alice');
+    const id = await published(alice);
+    const submitted = await alice.call('PUT', `/api/posts/${id}/revision`, {
+      kind: 'community', title: '改', summary: 's', body: 'b', baseVersion: 1,
+    });
+    const submissionId = (await submitted.json() as { submissionId: string }).submissionId;
+    await server.app.request(`/api/admin/posts/${submissionId}/review`, {
+      method: 'POST', headers: bearer, body: JSON.stringify({ status: 'approved' }),
+    });
+    const mine = await revisionOf(alice, id);
+    expect(mine.revision).toBeNull();
+  });
+
+  it('文章被管理员改判未通过时，待审修改一并作废', async () => {
+    const alice = await account('alice');
+    const id = await published(alice);
+    await alice.call('PUT', `/api/posts/${id}/revision`, {
+      kind: 'community', title: '改', summary: 's', body: 'b', baseVersion: 1,
+    });
+    await server.app.request(`/api/admin/posts/${id}/review`, {
+      method: 'POST', headers: bearer, body: JSON.stringify({ status: 'rejected', reason: '内容不合格' }),
+    });
+    const mine = await revisionOf(alice, id);
+    expect(mine.revision?.status).toBe('rejected');
+    expect(mine.revision?.reviewReason).toContain('作废');
+  });
+
+  it('审核台的「待审投稿」里不出现编辑稿（它在「待审文章」里带新版本标记）', async () => {
+    const alice = await account('alice');
+    const id = await published(alice);
+    const submitted = await alice.call('PUT', `/api/posts/${id}/revision`, {
+      kind: 'community', title: '改', summary: '初版摘要', body: '初版正文', baseVersion: 1,
+    });
+    const submissionId = (await submitted.json() as { submissionId: string }).submissionId;
+
+    const queue = await (await server.app.request('/api/admin/submissions?status=pending', { headers: bearer })).json() as
+      { items: Array<{ id: string }> };
+    expect(queue.items.map(item => item.id)).not.toContain(submissionId);
+
+    const posts = await (await server.app.request('/api/admin/posts?status=pending', { headers: bearer })).json() as
+      { items: Array<{ id: string; editOf?: string | null; changedFields?: string[] }> };
+    const edit = posts.items.find(item => item.id === submissionId)!;
+    expect(edit.editOf).toBe(id);
+    expect(edit.changedFields).toEqual(['title']);
+  });
+
   it('同一时刻的两次编辑不会把顺序写乱（版本号单调）', async () => {
     const alice = await account('alice');
     const id = await published(alice);

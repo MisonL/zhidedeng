@@ -393,6 +393,9 @@ export function listSubmissions(store: Store, input: {
   if (status) { filters.push('status = ?'); params.push(status); }
   if (kind) { filters.push('kind = ?'); params.push(kind); }
   if (batchId) { filters.push('batchId = ?'); params.push(batchId); }
+  // 编辑某篇文章的投稿不是「一条新投稿」：它由审核台的「待审文章」页签按
+  // 「新版本」展示，混进投稿列表会让同一条在两处各出现一次，还看不出区别。
+  filters.push('targetPostId IS NULL');
   const where = filters.length ? ` WHERE ${filters.join(' AND ')}` : '';
   // 两条语句要在同一个读快照里：否则中间插入一条，total 与 items 就对不上，
   // 管理端会显示「共 51 条」却只列出 50 条。
@@ -840,6 +843,9 @@ function materialize(store: Store, submission: SubmissionRecord, reviewedAt: str
         throw new ApiError(409, 'POST_REMOVED', '文章已下架或删除，修改无法生效');
       }
       const before = store.get('post', targetId)!;
+      // 存在还不够：管理员可能把它改判 rejected（正文已下架）。编辑稿审过来
+      // 不该复活一篇已经被判定不合格的文章。
+      if (before.status !== 'approved') throw new ApiError(409, 'POST_NOT_PUBLISHED', '文章已不在已发布状态，修改无法生效');
       store.put('post', targetId, {
         ...before,
         kind: payload.kind, title: payload.title, summary: payload.summary, body: payload.body,

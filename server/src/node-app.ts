@@ -4,7 +4,7 @@ import { dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildApp } from './app.ts';
 import { MIN_SYNC_TOKEN_LENGTH } from './catalog.ts';
-import { ensureAgentTokenColumns, ensureCommentColumns, ensureOfferColumns, ensurePostEventColumns, ensureReportColumns, ensureSubmissionColumns, SCHEMA, Store } from './database.ts';
+import { ensureAccountColumns, ensureAgentTokenColumns, ensureCommentColumns, ensureOfferColumns, ensurePostEventColumns, ensureReportColumns, ensureSubmissionColumns, SCHEMA, Store } from './database.ts';
 import type { SqlDatabase } from './database.ts';
 import { seed } from './seed.ts';
 import { mountWeb } from './static.ts';
@@ -43,6 +43,7 @@ export function openDatabase(path: string, options: { readOnly?: boolean } = {})
     ensureOfferColumns(openStore(db));
     ensureCommentColumns(openStore(db));
     ensureReportColumns(openStore(db));
+    ensureAccountColumns(openStore(db));
   } catch (error) {
     db.close();
     throw error;

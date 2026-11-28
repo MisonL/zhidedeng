@@ -5,11 +5,11 @@ import type {
   CreateFeedbackRequest, CreateReportRequest, CurrentUser, Favorite, FavoriteItem, GetCommentsRequest, GetModelsRequest, GetPostsRequest,
   GetRankingsRequest, GetRankingsResponse, GetStationsRequest, InteractionState, ModelDetail,
   Feedback, FeedbackVerdict, GetFeedbackRequest, PaginationQuery, Post, PublicProfile, PutFavoriteRequest, PutFavoriteResponse, PutVoteRequest, PutVoteResponse,
-  SearchResponse, Station, StationDetail, StationOffer, SubmissionStatus, SubmitRevisionRequest, Target, UpdateMeRequest,
+  DeleteAccountRequest, SearchResponse, Station, StationDetail, StationOffer, SubmissionStatus, SubmitRevisionRequest, Target, UpdateMeRequest,
   User, VendorWithModels, Vote,
 } from '@zhidedeng/shared';
 import { ApiError, isDatabaseBusyError, isUniqueConstraintError } from './errors.ts';
-import { INITIAL_TOKENS } from './auth.ts';
+import { INITIAL_TOKENS, verifyPassword } from './auth.ts';
 import { Store } from './database.ts';
 import type { PostRecord, StationRecord } from './database.ts';
 // 只借一个纯函数算 hostname，避免和 submissions.ts 之间形成运行时循环依赖：
@@ -511,7 +511,9 @@ export class Service {
     // 会出现「分享 3、列表 2 条」这种对不上的数字（专家榜同样只算在线的）。
     const materialized = Number(this.store.db.prepare(`SELECT count(*) AS count FROM entities WHERE ${POST_AUTHOR} AND removedAt IS NULL`).get(this.user)!.count);
     const queued = Number(this.store.db.prepare(
-      "SELECT count(*) AS count FROM submissions WHERE kind = 'post' AND channel = 'web' AND actorHandle = ? AND status = 'pending'",
+      // targetPostId IS NULL：编辑某篇文章不是「又多了一篇分享」，
+      // 不排除的话页头的「分享 N」会比下面的列表多 1。
+      "SELECT count(*) AS count FROM submissions WHERE kind = 'post' AND channel = 'web' AND actorHandle = ? AND targetPostId IS NULL AND status = 'pending'",
     ).get(this.user)!.count);
     return materialized + queued;
   }
@@ -1135,7 +1137,19 @@ export class Service {
   getPost(id: string): Post {
     const post = this.readablePost(id);
     if (!post) throw new ApiError(404, 'NOT_FOUND', '文章不存在');
-    return this.post(post, undefined, true);
+    // 待审修改只告诉作者本人。读者拿到这个字段会以为线上内容要变了，
+    // 而实际上他们看到的就是最终版本——那是一句误导。
+    const pending = post.status === 'approved' && post.authorHandle === this.handle
+      ? this.store.db.prepare(
+        "SELECT id, createdAt FROM submissions WHERE targetPostId = ? AND status = 'pending' LIMIT 1",
+      ).get(post.id) as { id: string; createdAt: string } | undefined
+      : undefined;
+    // 只有作者本人会拿到这个键（值为 null 表示「没有待审修改」）。读者拿到的
+    // 对象里根本没有它——多一个恒为 null 的字段只会让 API 形状无谓地漂移。
+    const authored = post.status === 'approved' && post.authorHandle === this.handle;
+    return this.post(authored
+      ? { ...post, pendingRevision: pending ? { id: pending.id, submittedAt: pending.createdAt } : null }
+      : post, undefined, true);
   }
 
   // 这里原先有个 createPost()，直接 store.put 一篇 pending 文章，绕过投稿队列。
@@ -1298,9 +1312,12 @@ export class Service {
     const id = crypto.randomUUID();
     const now = this.now().toISOString();
     try {
+      // targetVersion 在**举报发生时**记一次：这是举报人看到的、管理员将要审的
+      // 那一版。处置时再取最新版本是错的——管理员看 v3 时 v4 已上线，记成 v4
+      // 会让「v4 再出现同样的问题」被永久拦住，而他从没看过 v4。
       this.store.db.prepare(
-        'INSERT INTO reports (id,targetType,targetId,reporterHandle,reason,detail,status,createdAt) VALUES (?,?,?,?,?,?,?,?)',
-      ).run(id, targetType, input.targetId, this.user, reason.slice(0, 200), input.detail?.trim().slice(0, 500) ?? null, 'open', now);
+        'INSERT INTO reports (id,targetType,targetId,reporterHandle,reason,detail,status,createdAt,targetVersion) VALUES (?,?,?,?,?,?,?,?,?)',
+      ).run(id, targetType, input.targetId, this.user, reason.slice(0, 200), input.detail?.trim().slice(0, 500) ?? null, 'open', now, currentVersion);
     } catch (error) {
       // 部分唯一索引挡住重复举报。回 409 而不是静默成功：用户应该知道
       // 「已经报过了」，而不是以为又报了一次、等着第二个处理结果。
@@ -1311,6 +1328,52 @@ export class Service {
       throw error;
     }
     return { id, status: 'open' as const };
+  }
+
+  /**
+   * 注销账号（软注销）。
+   *
+   * 为什么不是硬删：`comments.parentId` 有外键、`sessions.handle` 也引用了
+   * accounts；别人的收藏、举报只存 targetId，删作者等于造一堆孤儿行。而
+   * 「不再存在于站内」由匿名化满足——user 实体行删掉之后，`author()` 会把署名
+   * 降级成「已注销用户·handle」，作者主页 404，`AuthorName` 不出链接。
+   *
+   * 用户名**永久占用**：所有引用都是裸 handle 字符串（post.authorHandle、
+   * votes.userHandle、reports.reporterHandle…），没有一处能区分同一 handle 的
+   * 上一任与下一任。释放即串号：新用户会继承旧用户的文章署名与历史。
+   *
+   * 一个事务做完，因为半注销比不注销更糟——登不上、内容还在、凭证还有效。
+   */
+  async deleteAccount(input: DeleteAccountRequest) {
+    if (input.confirm.trim() !== '注销') throw new ApiError(400, 'CONFIRM_MISMATCH', '请输入「注销」两个字确认');
+    const account = this.store.db.prepare('SELECT passwordHash, deletedAt FROM accounts WHERE handle = ?').get(this.user) as
+      { passwordHash: string; deletedAt: string | null } | undefined;
+    if (!account) throw new ApiError(401, 'UNAUTHENTICATED', '请先登录');
+    if (!(await verifyPassword(input.password, account.passwordHash))) {
+      throw new ApiError(400, 'WRONG_PASSWORD', '密码不正确');
+    }
+    const at = this.now().toISOString();
+    this.store.transaction(() => {
+      // 1) 墓碑与凭证：立刻失效，不留 30 天的会话空窗。
+      this.store.db.prepare('UPDATE accounts SET deletedAt = ? WHERE handle = ?').run(at, this.user);
+      this.store.db.prepare('DELETE FROM sessions WHERE handle = ?').run(this.user);
+      this.store.db.prepare('UPDATE agent_tokens SET revokedAt = ? WHERE handle = ? AND revokedAt IS NULL').run(at, this.user);
+      // 2) 个人资料：删掉 user 实体行，署名在读取时降级为「已注销用户·handle」。
+      //    顺序很关键——requireUser() 会在 user 行缺失时**自动重建**，
+      //    所以必须先把 deletedAt 写下去（上面第 1 步），它才不会把资料写回来。
+      this.store.db.prepare("DELETE FROM entities WHERE kind = 'user' AND id = ?").run(this.user);
+      // 3) 纯属本人偏好的数据：删掉。留着它们仍会给站点加权/占配额。
+      for (const table of ['votes', 'favorites', 'checkins', 'comment_writes']) {
+        this.store.db.prepare(`DELETE FROM ${table} WHERE ${table === 'favorites' ? 'userHandle' : 'userHandle'} = ?`).run(this.user);
+      }
+      // 4) 队列里没人认领的稿子：落终态，别占着待审配额等人审。
+      this.store.db.prepare(
+        "UPDATE submissions SET status = 'rejected', reason = ?, reviewedAt = ? WHERE actorHandle = ? AND status = 'pending'",
+      ).run('提交者已注销账号', at, this.user);
+      // 5) 保留：文章、评论（楼层与外键）、一句话反馈（配额按含墓碑行数算）、
+      //    举报与处置记录（审计要人可读）、post_events 流水（只增不改）。
+    });
+    return { ok: true as const, deletedAt: at };
   }
 
   /**
@@ -1354,7 +1417,17 @@ export class Service {
         kind: 'post', channel: 'web', originKey, payload, actorHandle: this.user,
         targetPostId: input.id, baseVersion: input.baseVersion,
         ip: 'session', now: this.now(),
-      }, { pendingOnly: true, globalPendingBreaker: false });
+      }, {
+        pendingOnly: true, globalPendingBreaker: false,
+        // 在入队那个 BEGIN IMMEDIATE 里再查一遍文章：外面查到「在线」之后，
+        // 文章可能正好被作者撤下/管理员下架。不复查就会插进一条永不生效的
+        // pending 编辑——占着配额，作者还要等一个不会来的审核结果。
+        beforeInsert: () => {
+          if (!this.store.get('post', input.id)) {
+            throw new ApiError(409, 'POST_REMOVED', '这篇文章刚刚被撤下或下架，修改无法提交');
+          }
+        },
+      });
       const { submission } = result;
       return {
         postId: input.id, submissionId: submission.id,
@@ -1377,6 +1450,7 @@ export class Service {
     const row = this.store.db.prepare(
       `SELECT id, status, payload, createdAt, reason FROM submissions
         WHERE targetPostId = ? AND channel = 'web' AND actorHandle = ?
+          AND status IN ('pending','rejected')
         ORDER BY CASE status WHEN 'pending' THEN 0 ELSE 1 END, createdAt DESC, rowid DESC LIMIT 1`,
     ).get(id, this.user) as
       { id: string; status: string; payload: string; createdAt: string; reason: string | null } | undefined;

@@ -125,6 +125,35 @@ describe('offers 计价口径迁移', () => {
     expect(() => openDatabase(path).close()).not.toThrow();
   });
 
+  it('老库的 submissions/reports/accounts 各自补上新列，不能落到错误的表', () => {
+    // 这条用例存在的直接原因：ensureReportColumns 曾漏传表名，ensureColumn 的
+    // 默认表是 submissions，于是 ALTER 落到了投稿表上。新库因为 SCHEMA 里
+    // 已经带了 reports.targetVersion，测试全绿；老库一跑举报就 500
+    // （no such column: targetVersion）。所以必须**真的构造一个缺列的老库**。
+    const path = join(mkdtempSync(join(tmpdir(), 'zdd-cols-')), 'old.db');
+    const legacy = new DatabaseSync(path);
+    legacy.exec(`
+      CREATE TABLE submissions (id TEXT PRIMARY KEY, kind TEXT NOT NULL, channel TEXT NOT NULL,
+        originKey TEXT NOT NULL, payload TEXT NOT NULL, payloadHash TEXT NOT NULL, actorHandle TEXT,
+        ip TEXT NOT NULL, status TEXT NOT NULL, reason TEXT, reviewedAt TEXT, createdAt TEXT NOT NULL);
+      CREATE TABLE reports (id TEXT PRIMARY KEY, targetType TEXT NOT NULL, targetId TEXT NOT NULL,
+        reporterHandle TEXT NOT NULL, reason TEXT NOT NULL, detail TEXT, status TEXT NOT NULL,
+        createdAt TEXT NOT NULL, handledAt TEXT, note TEXT);
+      CREATE TABLE accounts (handle TEXT PRIMARY KEY, usernameKey TEXT NOT NULL UNIQUE,
+        passwordHash TEXT NOT NULL, createdAt TEXT NOT NULL, disabledAt TEXT);
+    `);
+    legacy.close();
+
+    const db = openDatabase(path);
+    expect(db.prepare('PRAGMA table_info(submissions)').all().map(row => row.name)).toEqual(
+      expect.arrayContaining(['targetPostId', 'baseVersion']),
+    );
+    // 关键：targetVersion 必须在 reports 上，而不是被误加到 submissions 上。
+    expect(db.prepare('PRAGMA table_info(reports)').all().map(row => row.name)).toContain('targetVersion');
+    expect(db.prepare('PRAGMA table_info(accounts)').all().map(row => row.name)).toContain('deletedAt');
+    db.close();
+  });
+
   it('旧库没有 removedAt时也能启动：补列必须发生在建索引之前', () => {
     // SCHEMA 里有 `CREATE INDEX ... ON entities(kind, removedAt)`。原来的顺序是
     // 先 exec(SCHEMA)再 ALTER，旧库（origin/main的 entities只有 kind/id/data）

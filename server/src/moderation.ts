@@ -77,6 +77,10 @@ export function reviewPost(store: Store, now: () => Date, id: string, status: Po
   const sync = store.db.prepare(
     "UPDATE submissions SET status = ?, reason = ?, reviewedAt = ? WHERE id = ? AND kind = 'post' AND channel = 'web' AND status IN ('approved','rejected')",
   ).run(status, status === 'rejected' ? (reason ?? null) : null, now().toISOString(), id) as { changes?: number };
+  // web 渠道的文章被改判 rejected 时，与它有关的待审修改一并作废：
+  // 文章已经不在线，那条修改审也审不过去（物化会 409 POST_NOT_PUBLISHED），
+  // 留着只会占配额、让作者空等。
+  if (status === 'rejected') rejectPendingEdits(store, id, now().toISOString(), '文章被改判未通过，这次修改作废');
   // 返回值里多带一个 synced 仅供测试与调用方确认两边已对齐；
   // API 契约仍是 {id,status}，app.ts 会原样返回它（多余字段无害）。
   return { id, status, synced: Number(sync.changes ?? 0) > 0 };
@@ -153,6 +157,54 @@ export function recordPostEvent(
 }
 
 /** 禁用后所有会话立即失效，公开内容保留；恢复后要重新登录。 */
+/**
+ * 管理员查看已注销账号。
+ *
+ * 只读、只列墓碑行。不做「代用户注销」——那需要一个能代持的凭据，而站点不收
+ * 邮箱，没有可替代的确认方式。恢复是唯一的管理动作，见 restoreAccount。
+ */
+export function listDeletedAccounts(store: Store) {
+  const rows = store.db.prepare(
+    'SELECT handle, createdAt, deletedAt FROM accounts WHERE deletedAt IS NOT NULL ORDER BY deletedAt DESC',
+  ).all() as Array<{ handle: string; createdAt: string; deletedAt: string }>;
+  return {
+    items: rows.map(row => ({
+      handle: row.handle, createdAt: row.createdAt, deletedAt: row.deletedAt,
+      // 文章数用 entities 按作者统计：内容是被保留的，管理员要能判断「这个人走了
+      // 之后站里还剩什么」。
+      postCount: Number(store.db.prepare(
+        `SELECT count(*) AS count FROM entities WHERE kind = 'post' AND json_extract(data,'$.authorHandle') = ? AND removedAt IS NULL`,
+      ).get(row.handle)!.count),
+    })),
+  };
+}
+
+/**
+ * 管理员恢复一个已注销的账号。
+ *
+ * 只清 deletedAt 并重建 user 行（昵称回落为 handle）：投票、收藏、签到在注销时
+ * 已经删掉，找不回来；文章与评论一直在，恢复后署名会变回正常昵称。
+ * 不还原旧昵称——它已经从库里删了，凭空造一个只会让人以为「什么都没发生」。
+ */
+export function restoreAccount(store: Store, handle: string, now: Date): { handle: string; restored: true } {
+  const account = store.db.prepare('SELECT handle, deletedAt FROM accounts WHERE usernameKey = ?').get(handle.toLowerCase()) as
+    { handle: string; deletedAt: string | null } | undefined;
+  if (!account) throw new ApiError(404, 'NOT_FOUND', '账号不存在');
+  if (account.deletedAt === null) throw new ApiError(409, 'ALREADY_ACTIVE', '这个账号没有注销，不需要恢复');
+  store.transaction(() => {
+    store.db.prepare('UPDATE accounts SET deletedAt = NULL WHERE handle = ?').run(account.handle);
+    // user 实体行在注销时删掉了，恢复时必须重建，否则 /api/me 会走 requireUser 的
+    // 自动重建分支（昵称=handle、tokens 初始值），看起来像「凭空多了一笔 Token」。
+    if (!store.get('user', account.handle)) {
+      store.put('user', account.handle, {
+        handle: account.handle, nickname: account.handle, avatar: '', bio: '', tokens: 0,
+      });
+    }
+  });
+  void now;
+  return { handle: account.handle, restored: true };
+}
+
 export function setAccountDisabled(store: Store, handle: string, disabled: boolean, now: Date): AdminDisableUserResponse {
   const account = store.db.prepare('SELECT handle FROM accounts WHERE usernameKey = ?').get(handle.toLowerCase());
   if (!account) throw new ApiError(404, 'NOT_FOUND', '账号不存在');
@@ -315,10 +367,12 @@ export function resolveReport(store: Store, now: () => Date, id: string, status:
   if (row.status !== 'open') throw new ApiError(409, 'ALREADY_HANDLED', '这条举报已经处理过了');
   // 处置时把目标内容的版本号一起记下。只有文章有版本；站点/评论不可编辑，
   // 记 NULL 即可（`createReport` 对 NULL 维持「一律拦」的老行为）。
-  const version = row.targetType === 'post'
-    ? (store.get('post', row.targetId)?.contentVersion ?? 1)
-    : null;
-  store.db.prepare('UPDATE reports SET status = ?, handledAt = ?, note = ?, targetVersion = ? WHERE id = ?')
-    .run(status, now().toISOString(), note?.trim().slice(0, 500) ?? null, version, id);
+  //
+  // 这里**不**用处置时刻的最新版本：管理员可能是半小时前打开页面看的 v3，
+  // 期间 v4 已经上线，等他点「驳回举报」时记成 v4——之后 v4 再出现同样的问题
+  // 就被永久拦住，而管理员从没看过 v4。真正要看的是「举报发生时那一版」，
+  // 也就是写进这条举报的 targetVersion（见 createReport 的 INSERT）。
+  store.db.prepare('UPDATE reports SET status = ?, handledAt = ?, note = ? WHERE id = ?')
+    .run(status, now().toISOString(), note?.trim().slice(0, 500) ?? null, id);
   return { id, status };
 }

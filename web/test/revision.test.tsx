@@ -1,85 +1,94 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { MemoryRouter, Route, Routes } from 'react-router';
-import { describe, expect, it, vi } from 'vitest';
+import { fireEvent, screen, waitFor } from '@testing-library/react';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { callsTo, renderApp, stubApi } from './helpers';
+import { makePost } from './fixtures';
 
-// 编辑页的关键行为：被拒时预填「被拒那一版」而不是线上版。
-const getPost = vi.fn();
-const getRevision = vi.fn();
-vi.mock('../src/api', () => ({
-  api: {
-    getPost: (...args: unknown[]) => getPost(...args),
-    getRevision: (...args: unknown[]) => getRevision(...args),
-    submitRevision: vi.fn(),
-    withdrawRevision: vi.fn(),
-  },
-}));
-vi.mock('../src/state', () => ({
-  useMe: () => ({ data: { handle: 'alice', nickname: 'alice', avatar: null, bio: '', tokens: 0, shareCount: 1, upCount: 0, joinedAt: null }, refreshMe: vi.fn(), setMe: vi.fn() }),
-  useCatalog: () => ({ data: { stations: [], vendors: [] } }),
-  useToast: () => vi.fn(),
-}));
-vi.mock('../src/hooks', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../src/hooks')>();
-  return actual;
+// 不用 vi.mock：这个仓库的 vitest 跑在 --no-isolate 下，模块 mock 会跨文件泄漏，
+// 别处的 useCatalog 会被换成本文件里的空实现。统一走 stubApi 打桩 fetch。
+
+const live = makePost('p1', {
+  kind: 'community', title: '线上标题', summary: '线上摘要', body: '线上正文',
+  author: { handle: 'demo-pedal', nickname: '虚构踏板', avatar: '' }, source: 'user',
+  contentVersion: 2, revisedAt: null,
 });
 
-import PostEdit from '../src/pages/PostEdit';
-
-const live = {
-  id: 'p1', kind: 'community', title: '线上标题', summary: '线上摘要', body: '线上正文',
-  author: { handle: 'alice', nickname: 'alice', avatar: null }, stationSlug: null, modelSlug: null,
-  cover: null, publishedAt: '2026-11-01T00:00:00.000Z', source: 'user', status: 'approved',
-  votes: 0, currentUserVote: null, favorited: false, favoriteCount: 0, commentCount: 0,
-  contentVersion: 2, revisedAt: null,
-};
-
-function renderEdit() {
-  return render(
-    <MemoryRouter initialEntries={['/posts/p1/edit']}>
-      <Routes>
-        <Route path="/posts/:id/edit" element={<PostEdit />} />
-      </Routes>
-    </MemoryRouter>,
-  );
-}
-
-describe('编辑文章页', () => {
-  it('被拒时预填被拒那一版，不是线上版', async () => {
-    getPost.mockResolvedValue(live);
-    getRevision.mockResolvedValue({
-      revision: {
-        submissionId: 's1', status: 'rejected', reviewReason: '正文里写了绝对价格',
-        submittedAt: '2026-11-02T00:00:00.000Z',
-        payload: { kind: 'community', title: '被拒的标题', summary: '被拒摘要', body: '被拒正文', stationSlug: null, modelSlug: null },
-      },
+describe('编辑已发布文章页', () => {
+  let fetchMock: ReturnType<typeof stubApi>;
+  beforeEach(() => {
+    fetchMock = stubApi({
+      'GET /api/posts/p1': live,
+      'GET /api/posts/p1/revision': { revision: null },
     });
-    renderEdit();
-    await waitFor(() => expect(screen.getByLabelText('标题')).toHaveValue('被拒的标题'));
-    expect(screen.getByLabelText('摘要')).toHaveValue('被拒摘要');
-    // 线上版的内容一个都不该出现在表单里。
-    expect(screen.getByLabelText(/^正文/)).not.toHaveValue('线上正文');
-    expect(screen.getByText(/正文里写了绝对价格/)).toBeTruthy();
   });
 
+  const edit = async () => {
+    renderApp('/posts/p1/edit');
+    await waitFor(() => expect(screen.getByLabelText('标题')).toBeTruthy());
+  };
+
   it('没有修改时预填线上版，并显示当前版本号', async () => {
-    getPost.mockResolvedValue(live);
-    getRevision.mockResolvedValue({ revision: null });
-    renderEdit();
+    await edit();
     await waitFor(() => expect(screen.getByLabelText('标题')).toHaveValue('线上标题'));
     expect(screen.getByText(/当前版本第 2 版/)).toBeTruthy();
   });
 
-  it('有待审修改时禁用提交按钮并给出撤回入口', async () => {
-    getPost.mockResolvedValue(live);
-    getRevision.mockResolvedValue({
-      revision: {
-        submissionId: 's2', status: 'pending', reviewReason: null, submittedAt: '2026-11-03T00:00:00.000Z',
-        payload: { kind: 'community', title: '待审标题', summary: 's', body: 'b', stationSlug: null, modelSlug: null },
+  it('被拒时预填被拒那一版，不是线上版', async () => {
+    fetchMock = stubApi({
+      'GET /api/posts/p1': live,
+      'GET /api/posts/p1/revision': {
+        revision: {
+          submissionId: 's1', status: 'rejected', reviewReason: '正文里写了绝对价格',
+          submittedAt: '2026-11-02T00:00:00.000Z',
+          payload: { kind: 'community', title: '被拒的标题', summary: '被拒摘要', body: '被拒正文', stationSlug: null, modelSlug: null },
+        },
       },
     });
-    renderEdit();
+    await edit();
+    await waitFor(() => expect(screen.getByLabelText('标题')).toHaveValue('被拒的标题'));
+    expect(screen.getByLabelText('摘要')).toHaveValue('被拒摘要');
+    // 线上版的内容一个都不该出现在表单里——预填线上版等于让作者白改一遍。
+    expect(screen.getByLabelText(/^正文/)).not.toHaveValue('线上正文');
+    expect(screen.getByText(/正文里写了绝对价格/)).toBeTruthy();
+  });
+
+  it('待审修改还在时禁用提交并给撤回入口', async () => {
+    fetchMock = stubApi({
+      'GET /api/posts/p1': live,
+      'GET /api/posts/p1/revision': {
+        revision: {
+          submissionId: 's2', status: 'pending', reviewReason: null, submittedAt: '2026-11-03T00:00:00.000Z',
+          payload: { kind: 'community', title: '待审标题', summary: 's', body: 'b', stationSlug: null, modelSlug: null },
+        },
+      },
+    });
+    await edit();
     await waitFor(() => expect(screen.getByText(/已有一版修改在审核中/)).toBeTruthy());
     expect(screen.getByRole('button', { name: '有一版在审核中' })).toBeDisabled();
     expect(screen.getByRole('button', { name: '撤回修改' })).toBeTruthy();
+  });
+
+  it('提交时带上打开编辑器看到的版本号，成功后回到文章页', async () => {
+    fetchMock = stubApi({
+      'GET /api/posts/p1': live,
+      'GET /api/posts/p1/revision': { revision: null },
+      'PUT /api/posts/p1/revision': { postId: 'p1', submissionId: 's9', status: 'pending', submittedAt: '2026-11-09T00:00:00.000Z' },
+    });
+    await edit();
+    fireEvent.change(screen.getByLabelText('标题'), { target: { value: '改过的标题' } });
+    fireEvent.click(screen.getByRole('button', { name: '提交修改' }));
+
+    await waitFor(() => expect(callsTo(fetchMock, 'PUT', '/api/posts/p1/revision')).toHaveLength(1));
+    // baseVersion 必须是详情页读到的 2，不是硬编码的 1：它决定服务端要不要拒
+    // 「你基于旧版本写的」。
+    expect(callsTo(fetchMock, 'PUT', '/api/posts/p1/revision')[0].body).toMatchObject({
+      id: 'p1', title: '改过的标题', baseVersion: 2,
+    });
+  });
+
+  it('别人的文章不给编辑入口', async () => {
+    // 作者是别人（不是当前登录的 demo-pedal）。
+    fetchMock = stubApi({ 'GET /api/posts/p1': makePost('p1', { source: 'user', author: { handle: 'someone-else', nickname: '别人', avatar: '' } }), 'GET /api/posts/p1/revision': { revision: null } });
+    renderApp('/posts/p1/edit');
+    await waitFor(() => expect(screen.getByText('只能编辑自己的文章')).toBeTruthy());
   });
 });

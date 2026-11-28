@@ -238,6 +238,7 @@ export function deleteModel(store: Store, slug: string): AdminDeleteModelRespons
     // 待审投稿也算引用：站点投稿在入队时就校验过模型，删掉模型之后它再也没法
     // 通过审核，会变成一条永远拒绝的记录——而管理员并不知道自己刚删的模型
     // 还在队列里等着。
+    // 编辑稿也算引用：它同样会在审核时去查这个模型，删了模型就过不去。
     const pending = store.db.prepare(`SELECT COUNT(*) AS count FROM submissions WHERE status = 'pending'
       AND (json_extract(payload,'$.modelSlug') = ? OR EXISTS (SELECT 1 FROM json_each(json_extract(payload,'$.offers')) WHERE json_extract(value,'$.modelSlug') = ?))`)
       .get(slug, slug)!;

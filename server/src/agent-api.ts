@@ -154,7 +154,11 @@ export class AgentApi {
    * 熔断那边已经按同样的口径拆开了，这里必须跟着，否则两边说的不是一回事。
    */
   private pendingCount(handle?: string): number {
-    const where = handle === undefined ? " AND channel IN ('agent','web')" : ' AND actorHandle = ?';
+    // targetPostId IS NULL：编辑不算新投稿。不排除的话，作者改一次文章就凭空
+    // 占掉一格自己的待审额度（还有全站熔断的名额），而他并没有多投一条东西。
+    const where = handle === undefined
+      ? " AND channel IN ('agent','web') AND targetPostId IS NULL"
+      : ' AND actorHandle = ? AND targetPostId IS NULL';
     return Number(this.store.db.prepare(`SELECT count(*) AS count FROM submissions WHERE status = 'pending'${where}`)
       .get(...(handle === undefined ? [] : [handle]))!.count);
   }

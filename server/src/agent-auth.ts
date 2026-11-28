@@ -14,7 +14,7 @@ export function agentTokenHash(header: string | undefined): string {
 export function activeAgentHandle(store: Store, tokenHash: string): string {
   const row = store.db.prepare(`SELECT agent_tokens.handle FROM agent_tokens
     JOIN accounts ON accounts.handle = agent_tokens.handle
-    WHERE agent_tokens.tokenHash = ? AND agent_tokens.revokedAt IS NULL AND accounts.disabledAt IS NULL`).get(tokenHash);
+    WHERE agent_tokens.tokenHash = ? AND agent_tokens.revokedAt IS NULL AND accounts.disabledAt IS NULL AND accounts.deletedAt IS NULL`).get(tokenHash);
   if (!row) throw unauthenticated();
   return row.handle as string;
 }

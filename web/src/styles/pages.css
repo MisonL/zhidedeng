@@ -237,3 +237,8 @@ textarea { display: block; resize: vertical; line-height: 1.6; }
   .me-stats > div { flex: 1; padding-inline: 4px; }
   input:not([type='radio'], [type='search']), textarea, select { font-size: 16px; }
 }
+
+/* 危险区域：视觉上要与上面的设置区分开，否则「注销」会混在保存按钮旁边被误点。 */
+.danger-zone { margin-top: 40px; padding: 18px 20px; border: 1px solid var(--line); border-radius: 10px; background: #fff9f9; }
+.danger-zone h2 { margin: 0 0 8px; font-size: 15px; }
+.danger-zone .hint { margin: 0 0 14px; line-height: 1.7; }

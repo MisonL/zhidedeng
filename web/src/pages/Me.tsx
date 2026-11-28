@@ -12,7 +12,7 @@ import { Avatar, AvatarPresetGlyph } from '../components/visuals';
 import { AVATAR_PRESET_NAMES, AVATAR_PRESETS } from '@zhidedeng/shared';
 import { formatDate, loginPath } from '../format';
 import { usePaged } from '../hooks';
-import { useHere, useMe } from '../state';
+import { useHere, useMe, useToast } from '../state';
 import AgentTokens from './AgentTokens';
 
 const TABS = [
@@ -273,6 +273,66 @@ function Settings({ user }: { user: CurrentUser }) {
   );
 }
 
+/**
+ * 危险区域：注销账号。
+ *
+ * 两道具名：口令 + 「注销」二字。不要一键确认——这是站内唯一不可自己撤销的
+ * 操作（恢复只给管理员），误点的代价是账号永久占用、署名变成占位名。
+ * 也不做「冷静期」：站点不收邮箱，没有可触达的通道；唯一可行的形态是「保留
+ * 登录 N 天可撤销」，那又与会话必须立刻失效直接冲突。
+ */
+function DangerZone() {
+  const [open, setOpen] = useState(false);
+  const [password, setPassword] = useState('');
+  const [confirm, setConfirm] = useState('');
+  const [error, setError] = useState<string>();
+  const [busy, setBusy] = useState(false);
+
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    setBusy(true);
+    setError(undefined);
+    try {
+      await api.deleteAccount({ password, confirm });
+      // 不要再打 /api/me（会话已失效，只会 401 并弹一条错误提示）。
+      // 整页跳回首页：内存里的登录态随这次跳转一起重建。
+      window.location.assign('/');
+    } catch (cause) {
+      setError((cause as Error).message);
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section className="danger-zone">
+      <h2 className="field-label">注销账号</h2>
+      <p className="hint">
+        注销后：立刻退出登录，Agent 凭证作废，投票与收藏清空，未审核的投稿作废。
+        你的文章和评论会保留，但署名变成「已注销用户」。
+        <strong>用户名会永久占用，不能再注册回来</strong>；恢复只能联系管理员。
+        如果只是想从此退出，直接退出登录就够了，不必注销。
+      </p>
+      {!open
+        ? <button type="button" className="btn btn-small btn-red" onClick={() => setOpen(true)}>我要注销账号</button>
+        : (
+          <form onSubmit={submit} noValidate>
+            <div className="field">
+              <label className="field-label" htmlFor="delete-password">你的密码</label>
+              <input id="delete-password" type="password" autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} />
+            </div>
+            <div className="field">
+              <label className="field-label" htmlFor="delete-confirm">输入「注销」两个字确认</label>
+              <input id="delete-confirm" value={confirm} onChange={(event) => setConfirm(event.target.value)} />
+            </div>
+            {error && <p className="form-error" role="alert">{error}</p>}
+            <button type="submit" className="btn btn-small btn-red" disabled={busy}>{busy ? '注销中…' : '确认注销'}</button>{' '}
+            <button type="button" className="btn btn-small btn-ghost" onClick={() => setOpen(false)} disabled={busy}>取消</button>
+          </form>
+        )}
+    </section>
+  );
+}
+
 const MIN_PASSWORD = 10;
 
 function ChangePassword() {
@@ -356,7 +416,7 @@ export default function Me() {
             {tab === 'posts' && <MyPosts />}
             {tab === 'submissions' && <MySubmissions />}
             {tab === 'notifications' && <MyNotifications />}
-            {tab === 'settings' && <><Settings user={user} /><ChangePassword /><AgentTokens key={user.handle} /></>}
+            {tab === 'settings' && <><Settings user={user} /><ChangePassword /><AgentTokens key={user.handle} /><DangerZone /></>}
             {tab !== 'settings' && <p className="hint me-tip">想分享新的体验？<Link to="/submit">去投稿</Link></p>}
           </>
         ))}

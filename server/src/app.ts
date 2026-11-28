@@ -18,7 +18,7 @@ import type { Store } from './database.ts';
 import { Service, isReservedNickname, normalizeNickname } from './service.ts';
 import { ApiError, isDatabaseBusyError } from './errors.ts';
 import { createInviteCode, listInviteCodes, revokeInviteCode } from './invite-codes.ts';
-import { listPosts, listReports, resolveReport, restorePost, reviewPost, setAccountDisabled, setCommentHidden, withdrawPost } from './moderation.ts';
+import { listDeletedAccounts, listPosts, listReports, resolveReport, restoreAccount, restorePost, reviewPost, setAccountDisabled, setCommentHidden, withdrawPost } from './moderation.ts';
 import { autoApproveEnabled, enqueueBatch, enqueueSubmission, listSubmissions, reviewSubmission, setAutoApprove, submissionBatchReviewSchema, submissionBatchSchema, submissionQuerySchema, submissionReviewSchema, submissionState } from './submissions.ts';
 
 /**
@@ -78,6 +78,9 @@ const AGENT_TOKEN_PER_IP = 30;
 // 签到一天只能成功一次，5 次/小时够覆盖手滑和网络重试，脚本刷不起来。
 const CHECKIN_WINDOW_MS = 60 * 60_000;
 const CHECKIN_PER_USER = 5;
+// 注销要做一次 scrypt 校验（几十毫秒）。不限流可以拿它当 CPU 放大器，
+// 而成功一次就少一个账号，本来也不该被连点。3 次/小时够正常人试错。
+const DELETE_ACCOUNT_PER_IP = 3;
 
 //投票与收藏按用户滑窗限流：主键去重挡不住「反复切换值」的刷量写事务，
 //每次调用都全表扫描互动数据，不设闸会被低成本压库。
@@ -265,6 +268,9 @@ export function buildApp(store: Store, now: () => Date, options: AppOptions = {}
   const agentApi = new AgentApi(store);
   // 签到是唯一「不限频 + 有写入 + 有奖励」的接口，之前完全没有闸门。
   const checkInByUser = new AttemptLimiter(CHECKIN_PER_USER, CHECKIN_WINDOW_MS, store, 'checkin-user');
+  // 按 IP 而不是按账号：注销成功之后就没有账号可记了，按账号的桶会跟着消失，
+  // 于是可以注册一批账号刷同一个 IP。
+  const deleteAccountByIp = new AttemptLimiter(DELETE_ACCOUNT_PER_IP, CHECKIN_WINDOW_MS, store, 'delete-account-ip');
  const voteByUser = new AttemptLimiter(VOTE_PER_USER, VOTE_WINDOW_MS, store, 'vote-user');
 
   const app = new Hono<{ Bindings: Bindings }>();
@@ -559,6 +565,12 @@ function orderByMaterializeDependency(store: Store, ids: string[]): string[] {
     }
     return c.json(reviewPost(store, now, c.req.param('id'), input.status, input.reason));
   });
+  // 已注销账号：只读列表 + 恢复。管理员不能代用户注销（没有可代持的凭据）。
+  app.get('/api/admin/accounts/deleted', c => c.json(listDeletedAccounts(store)));
+  app.post('/api/admin/accounts/:handle/restore', async c => {
+    const { handle } = z.strictObject({ handle: z.string().trim().min(1).max(200) }).parse(c.req.param());
+    return c.json(restoreAccount(store, handle, now()));
+  });
   app.post('/api/admin/users/:handle/disable', async c => {
     const { disabled } = z.strictObject({ disabled: z.boolean() }).parse(await c.req.json());
     return c.json(setAccountDisabled(store, c.req.param('handle'), disabled, now()));
@@ -568,7 +580,14 @@ function orderByMaterializeDependency(store: Store, ids: string[]): string[] {
     return c.json(setCommentHidden(store, c.req.param('id'), hidden));
   });
 
-  function route<K extends ApiRouteName>(name: K, schema: z.ZodType<ApiContracts[K]['request']>, handler: (service: Service, input: ApiContracts[K]['request'], ip: string) => ApiContracts[K]['response']) {
+  function route<K extends ApiRouteName>(
+    name: K,
+    schema: z.ZodType<ApiContracts[K]['request']>,
+    handler: (service: Service, input: ApiContracts[K]['request'], ip: string) => ApiContracts[K]['response'] | Promise<ApiContracts[K]['response']>,
+    // 少数路由要在成功响应上附带一个 Set-Cookie（注销要清会话）。handler 拿不到
+    // `c`，所以用一个显式选项表达，而不是回头去改 handler 签名。
+    options: { clearSessionCookie?: boolean } = {},
+  ) {
     const { method, path } = API_ROUTES[name];
     app.on(method, path, async c => {
       const handle = sessionHandle(store, c.req.header('cookie'), now());
@@ -597,8 +616,12 @@ function orderByMaterializeDependency(store: Store, ids: string[]): string[] {
           : parsedBody);
  //公开读接口的响应体含登录态（currentUserVote/favorited），是按 Cookie变体的：
  //不下 no-store的话，前面一旦加 CDN/代理缓存，A用户的投票状态会被发给 B用户。
- c.header('cache-control', 'no-store');
-      return c.json(handler(new Service(store, now, handle), schema.parse(raw), clientIp(c, trustedProxies)));
+      c.header('cache-control', 'no-store');
+      // await 兼容同步与异步 handler：注销要校验口令（scrypt 是异步的），
+      // 其余路由仍然同步返回对象，行为不变。
+      const response = await handler(new Service(store, now, handle), schema.parse(raw), clientIp(c, trustedProxies));
+      if (options.clearSessionCookie) c.header('set-cookie', clearedSessionCookie(cookieSecure()));
+      return c.json(response);
     });
   }
 
@@ -708,7 +731,7 @@ function orderByMaterializeDependency(store: Store, ids: string[]): string[] {
       loginByTarget.clear(pair);
       loginByIp.release(ip, loginIpHandle);
     };
-    const account = store.db.prepare('SELECT handle, passwordHash, disabledAt FROM accounts WHERE usernameKey = ?').get(usernameKey);
+    const account = store.db.prepare('SELECT handle, passwordHash, disabledAt, deletedAt FROM accounts WHERE usernameKey = ?').get(usernameKey);
     let valid: boolean;
     try {
       valid = account ? await verifyPassword(input.password, account.passwordHash as string) : (await burnPasswordCheck(input.password), false);
@@ -716,8 +739,11 @@ function orderByMaterializeDependency(store: Store, ids: string[]): string[] {
       refund();
       throw error;
     }
-    // 被禁用的账号和密码错误返回同样的错误。
-    if (!account || !valid || account.disabledAt !== null) throw new ApiError(401, 'INVALID_CREDENTIALS', '用户名或密码错误');
+    // 被禁用、已注销的账号和密码错误返回同样的错误：注销后不该还能通过登录
+    // 响应里的差异确认「这个用户名确实存在过」。
+    if (!account || !valid || account.disabledAt !== null || account.deletedAt !== null) {
+      throw new ApiError(401, 'INVALID_CREDENTIALS', '用户名或密码错误');
+    }
     refundOnSuccess();
     const handle = account.handle as string;
     c.header('set-cookie', sessionCookie(createSession(store, handle, now()), cookieSecure()));
@@ -826,6 +852,14 @@ function orderByMaterializeDependency(store: Store, ids: string[]): string[] {
     checkInByUser.record(key, now().getTime());
     return service.checkIn();
   });
+  // 注销账号。口令校验一次要跑 scrypt（几十毫秒），不限流的话可以拿来当
+  // CPU 放大器；而且注销每成功一次就少一个账号，本来也不该被连点。
+  route('deleteAccount', z.strictObject({ password: z.string().min(8).max(128), confirm: z.string().max(20) }), async (service, input, ip) => {
+    const wait = deleteAccountByIp.retryAfter(ip, now().getTime());
+    if (wait > 0) throw new ApiError(429, 'RATE_LIMITED', '操作太频繁了，请稍后再试', { retryAfter: wait });
+    deleteAccountByIp.record(ip, now().getTime());
+    return service.deleteAccount(input);
+  }, { clearSessionCookie: true });
   route('getMyFavorites', z.strictObject(pagination), (service, input) => service.getMyFavorites(input));
   route('getMyPosts', z.strictObject(pagination), (service, input) => service.getMyPosts(input));
   route('getVendors', z.strictObject(pagination), (service, input) => service.getVendors(input));
@@ -849,8 +883,10 @@ function orderByMaterializeDependency(store: Store, ids: string[]): string[] {
     id: identifier,
     kind: z.enum(['deal', 'review', 'community', 'guide']),
     title: z.string().trim().min(1).max(200),
-    summary: z.string().trim().min(1).max(300),
-    body: z.string().min(1).max(20_000),
+    // 与 createPost 对齐：编辑入口不能比投稿入口更窄。否则一篇历史长文
+    // 改一个字都会 400，等于「能创建不能维护」。
+    summary: z.string().trim().min(1).max(1000),
+    body: z.string().min(1).max(100_000),
     stationSlug: z.string().trim().max(200).nullish(),
     modelSlug: z.string().trim().max(200).nullish(),
     baseVersion: z.number().int().min(0),

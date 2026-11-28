@@ -121,7 +121,12 @@ export const SCHEMA = `
   );
   CREATE TABLE IF NOT EXISTS accounts (
     handle TEXT PRIMARY KEY, usernameKey TEXT NOT NULL UNIQUE, passwordHash TEXT NOT NULL, createdAt TEXT NOT NULL,
-    disabledAt TEXT
+    disabledAt TEXT,
+    -- 账号注销时间。与 disabledAt 分开：禁用是管理员动作、可恢复成正常账号；
+    -- 注销是用户自己的决定，恢复是管理员补救。两者在界面上是完全不同的状态。
+    -- 行本身保留：usernameKey 的 UNIQUE 让这个用户名永久被占用，避免同名接管
+    -- 旧内容（引用全是裸 handle 字符串，没有一处能区分上一任和下一任）。
+    deletedAt TEXT
   );
   CREATE TABLE IF NOT EXISTS sessions (
     tokenHash TEXT PRIMARY KEY, handle TEXT NOT NULL REFERENCES accounts(handle), expiresAt TEXT NOT NULL
@@ -391,9 +396,23 @@ export function ensurePostEventColumns(store: Store) {
  * 和 ensureSubmissionColumns 分开：那张表管投稿，这张管举报，将来谁要给举报
  * 加列改这里就够了，不用翻投稿的迁移。
  */
+/**
+ * 老库补 accounts.deletedAt。
+ *
+ * 和别的 ensure 同理：`CREATE TABLE IF NOT EXISTS` 对已存在的表不生效，
+ * 老库里没有这一列，所有带它的查询都会 `no such column`。
+ */
+export function ensureAccountColumns(store: Store) {
+  store.transaction(() => {
+    ensureColumn(store.db, 'deletedAt', 'TEXT', 'accounts');
+  });
+}
+
 export function ensureReportColumns(store: Store) {
   store.transaction(() => {
-    ensureColumn(store.db, 'targetVersion', 'INTEGER');
+    // 表名必须显式传：ensureColumn 的默认表是 submissions，漏了就 ALTER 到投稿表上，
+    // 老库的 reports 永远没有这一列——而新库因为 SCHEMA 里已经带了，测不出来。
+    ensureColumn(store.db, 'targetVersion', 'INTEGER', 'reports');
   });
 }
 

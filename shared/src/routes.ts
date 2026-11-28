@@ -33,6 +33,8 @@ export const API_ROUTES = {
   getFeedback: { method: 'GET', path: '/api/feedback' },
   deleteFeedback: { method: 'DELETE', path: '/api/feedback/:id' },
   createPost: { method: 'POST', path: '/api/posts' },
+  // 注销账号。POST 而不是 DELETE：DELETE 走不通带正文的 CSRF 校验。
+  deleteAccount: { method: 'POST', path: '/api/me/delete' },
   // 编辑已发布文章：PUT 提交修改（进审核队列），GET 读待审/被拒那一版，
   // DELETE 撤回修改。三个都挂在同一篇文章的 revision 子资源上。
   submitRevision: { method: 'PUT', path: '/api/posts/:id/revision' },
