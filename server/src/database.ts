@@ -65,7 +65,10 @@ export const SCHEMA = `
     status TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open','resolved','dismissed')),
     createdAt TEXT NOT NULL,
     handledAt TEXT,
-    note TEXT
+    note TEXT,
+    -- 处置时目标内容的版本快照，只有 post 目标有值。
+    -- 用途：判断「判不成立之后内容有没有改过」——改过了才允许重新举报。
+    targetVersion INTEGER
   );
   -- 同一个人对同一个对象只能有一条未处理举报。用部分唯一索引而不是先查后插：
   -- 并发下「都查到没有」然后各插一条，靠应用层查重挡不住。
@@ -205,12 +208,22 @@ export const SCHEMA = `
     status TEXT NOT NULL CHECK(status IN ('pending','approved','rejected','superseded')),
     reason TEXT,
     reviewedAt TEXT,
-    createdAt TEXT NOT NULL
+    createdAt TEXT NOT NULL,
+    -- 下面两列只对「编辑已发布文章」的投稿有值，NULL 表示普通投稿。
+    -- 编辑复用同一个队列：审核入口、驳回理由、幂等、通知全都现成，
+    -- 再造一张 post_revisions 表等于把同一套状态机写两遍。
+    targetPostId TEXT,
+    baseVersion INTEGER
   );
   CREATE INDEX IF NOT EXISTS submissions_status ON submissions(status, kind, createdAt);
   CREATE INDEX IF NOT EXISTS submissions_origin ON submissions(kind, originKey, status);
   CREATE INDEX IF NOT EXISTS submissions_actor ON submissions(actorHandle, createdAt);
   CREATE INDEX IF NOT EXISTS submissions_dedupe ON submissions(kind, originKey, action, batchId, payloadHash, status, createdAt);
+  -- 同一篇文章同时只能有一版待审修改。用部分唯一索引而不是先查后插：
+  -- 两个标签页同时提交时，「都查到没有」然后各插一条，应用层挡不住。
+  CREATE UNIQUE INDEX IF NOT EXISTS submissions_pending_edit
+    ON submissions(targetPostId) WHERE status = 'pending' AND targetPostId IS NOT NULL;
+  CREATE INDEX IF NOT EXISTS submissions_edit_target ON submissions(targetPostId, status, reviewedAt DESC);
   -- 管理端的运行时开关，管理员随时改，所以存库不存启动配置。
   CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
@@ -372,11 +385,25 @@ export function ensurePostEventColumns(store: Store) {
   });
 }
 
+/**
+ * 老库补 reports.targetVersion。
+ *
+ * 和 ensureSubmissionColumns 分开：那张表管投稿，这张管举报，将来谁要给举报
+ * 加列改这里就够了，不用翻投稿的迁移。
+ */
+export function ensureReportColumns(store: Store) {
+  store.transaction(() => {
+    ensureColumn(store.db, 'targetVersion', 'INTEGER');
+  });
+}
+
 export function ensureSubmissionColumns(store: Store) {
   store.transaction(() => {
     ensureColumn(store.db, 'batchId', 'TEXT');
     ensureColumn(store.db, 'action', "TEXT NOT NULL DEFAULT 'upsert' CHECK(action IN ('upsert','remove'))");
     ensureColumn(store.db, 'autoApproved', 'INTEGER NOT NULL DEFAULT 0 CHECK(autoApproved IN (0,1))');
+    ensureColumn(store.db, 'targetPostId', 'TEXT');
+    ensureColumn(store.db, 'baseVersion', 'INTEGER');
     store.db.prepare('CREATE INDEX IF NOT EXISTS submissions_batch ON submissions(batchId, status)').run();
     store.db.prepare('CREATE INDEX IF NOT EXISTS submissions_dedupe ON submissions(kind, originKey, action, batchId, payloadHash, status, createdAt)').run();
   });

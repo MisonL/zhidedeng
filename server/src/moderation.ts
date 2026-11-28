@@ -18,8 +18,24 @@ export function listPosts(store: Store, status: PostStatus) {
     "SELECT * FROM submissions WHERE kind = 'post' AND channel = 'web' AND status = ? AND NOT EXISTS (SELECT 1 FROM entities WHERE kind = 'post' AND entities.id = submissions.id) ORDER BY createdAt",
   ).all(status).map(row => {
     const payload = JSON.parse(row.payload as string) as { kind: string; title: string; summary: string; body: string; stationSlug: string | null; modelSlug: string | null };
-    return { id: row.id as string, ...payload, authorHandle: row.actorHandle as string | null, publishedAt: row.createdAt as string, status };
-  });
+    const targetPostId = (row.targetPostId as string | null) ?? null;
+    if (!targetPostId) {
+      return { id: row.id as string, ...payload, authorHandle: row.actorHandle as string | null, publishedAt: row.createdAt as string, status, editOf: null, targetTitle: null, changedFields: [] as string[] };
+    }
+    // 编辑某篇文章的投稿：审核员要一眼看出「这是某篇的新版本」，而不是以为
+    // 又冒出一篇新文章。顺便把哪几个字段变了算出来——不做字符级 diff，
+    // 「标题/正文变了」这种粒度足够审核员决定要不要细看。
+    const live = store.get('post', targetPostId);
+    const changedFields = live === undefined ? [] : (['title', 'summary', 'body', 'stationSlug', 'modelSlug'] as const)
+      .filter(field => (live[field] ?? null) !== (payload[field] ?? null));
+    return {
+      id: row.id as string, ...payload, authorHandle: row.actorHandle as string | null,
+      publishedAt: row.createdAt as string, status,
+      editOf: targetPostId, targetTitle: live?.title ?? null, changedFields,
+    };
+  }).filter(item => item.editOf === null || status === 'pending');
+  // 已审核过的编辑不是「一篇文章」，不该出现在文章列表里；只有待审的才需要
+  // 审核员看见（上面 filter 只放行 pending 的编辑行）。
   return { items: [...items, ...queued].sort((a, b) => comparePublishedAt(a.publishedAt, b.publishedAt)) };
 }
 
@@ -77,6 +93,19 @@ export function reviewPost(store: Store, now: () => Date, id: string, status: Po
  * 下架请求。实测：撤销后重同步，文章原样在线。所以管理员必须有一个直接的
  * 下架入口；materialize 那边也加了守卫，防止下一次同步把它复活。
  */
+/**
+ * 作废某篇文章待审的修改。
+ *
+ * 文章下线后，那条「修改审核中」就永远审不过了（物化时会 409）。留着它有三个
+ * 坏处：作者在编辑器里看到「审核中」等一个不会来的结果、占着该作者的待审配额、
+ * 管理员审核台里挂一条点了必然失败的条目。所以下架时一并落终态，理由写清楚。
+ */
+export function rejectPendingEdits(store: Store, postId: string, reviewedAt: string, reason: string): void {
+  store.db.prepare(
+    "UPDATE submissions SET status = 'rejected', reason = ?, reviewedAt = ? WHERE targetPostId = ? AND status = 'pending'",
+  ).run(reason.slice(0, 1000), reviewedAt, postId);
+}
+
 export function withdrawPost(store: Store, id: string, removedAt: string): { id: string; removed: true } {
   // 用 getWithRemoved：已经下架的也要认出来，报「已下架」而不是「不存在」。
   // 用 get 的话重复点一次会得到 404，管理员会以为这篇没了。
@@ -90,6 +119,8 @@ export function withdrawPost(store: Store, id: string, removedAt: string): { id:
   store.transaction(() => {
     if (!store.markRemoved('post', id, removedAt)) throw new ApiError(409, 'ALREADY_REMOVED', '该文章已下架，不需要重复操作');
     recordPostEvent(store, id, post.authorHandle, 'removed', removedAt, null, post.title);
+    // 待审的修改一并作废：文章都不在线了，那条修改审也审不过去。
+    rejectPendingEdits(store, id, removedAt, '文章已下架，这次修改作废');
   });
   return { id, removed: true };
 }
@@ -278,10 +309,16 @@ function parseCursor(cursor?: string | null): { createdAt: string; rowid: number
  * 等于把删帖权交给任何点按钮的人。
  */
 export function resolveReport(store: Store, now: () => Date, id: string, status: 'resolved' | 'dismissed', note?: string) {
-  const row = store.db.prepare('SELECT status FROM reports WHERE id = ?').get(id) as { status: string } | undefined;
+  const row = store.db.prepare('SELECT status, targetType, targetId FROM reports WHERE id = ?').get(id) as
+    { status: string; targetType: string; targetId: string } | undefined;
   if (!row) throw new ApiError(404, 'NOT_FOUND', '举报不存在');
   if (row.status !== 'open') throw new ApiError(409, 'ALREADY_HANDLED', '这条举报已经处理过了');
-  store.db.prepare('UPDATE reports SET status = ?, handledAt = ?, note = ? WHERE id = ?')
-    .run(status, now().toISOString(), note?.trim().slice(0, 500) ?? null, id);
+  // 处置时把目标内容的版本号一起记下。只有文章有版本；站点/评论不可编辑，
+  // 记 NULL 即可（`createReport` 对 NULL 维持「一律拦」的老行为）。
+  const version = row.targetType === 'post'
+    ? (store.get('post', row.targetId)?.contentVersion ?? 1)
+    : null;
+  store.db.prepare('UPDATE reports SET status = ?, handledAt = ?, note = ?, targetVersion = ? WHERE id = ?')
+    .run(status, now().toISOString(), note?.trim().slice(0, 500) ?? null, version, id);
   return { id, status };
 }

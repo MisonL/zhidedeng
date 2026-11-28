@@ -38,6 +38,10 @@ const webPostSchema = z.strictObject({
 });
 const submissionFields = {
   kind: submissionKind,
+  // 编辑已发布文章时指向目标文章；普通投稿为 null。
+  targetPostId: text(200).nullish(),
+  // 作者开始编辑时看到的版本号，用于发现「审核期间又上线了新版」。
+  baseVersion: z.number().int().min(0).nullish(),
   originKey: z.string().min(1).max(253),
   payload: z.unknown(),
   actorHandle: text(200).nullish(),
@@ -78,6 +82,8 @@ function submissionRecord(row: SqlRow): SubmissionRecord {
     batchId: row.batchId as string | null, action: row.action as SubmissionRecord['action'],
     actorHandle: row.actorHandle as string | null, status: row.status as SubmissionStatus,
     reason: row.reason as string | null, createdAt: row.createdAt as string, reviewedAt: row.reviewedAt as string | null,
+    // 老库补列后这两项是 NULL，正是「普通投稿」该有的值。
+    targetPostId: (row.targetPostId as string | null) ?? null, baseVersion: (row.baseVersion as number | null) ?? null,
   };
 }
 
@@ -163,6 +169,8 @@ export function enqueueSubmission(store: Store, input: {
   action?: SubmissionRecord['action'];
   payload: unknown;
   actorHandle?: string | null;
+  targetPostId?: string | null;
+  baseVersion?: number | null;
   ip: string;
   now: Date;
 }, options: {
@@ -296,6 +304,7 @@ export function enqueueSubmission(store: Store, input: {
     const submission: SubmissionRecord = {
       id: randomUUID(), kind: validated.kind, channel: validated.channel, originKey,
       batchId: validated.batchId ?? null, action: validated.action,
+      targetPostId: validated.targetPostId ?? null, baseVersion: validated.baseVersion ?? null,
       payload: parsedPayload, actorHandle: validated.actorHandle ?? null,
       status: auto ? 'approved' : 'pending', reason: auto ? AUTO_APPROVE_REASON : null,
       reviewedAt: auto ? reviewedAt : null, createdAt: reviewedAt,
@@ -312,9 +321,10 @@ export function enqueueSubmission(store: Store, input: {
       submission.reason = skipReason;
       submission.reviewedAt = reviewedAt;
     }
-    store.db.prepare('INSERT INTO submissions (id, kind, channel, originKey, batchId, action, autoApproved, payload, payloadHash, actorHandle, ip, status, reason, reviewedAt, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+    store.db.prepare('INSERT INTO submissions (id, kind, channel, originKey, batchId, action, autoApproved, payload, payloadHash, actorHandle, ip, status, reason, reviewedAt, createdAt, targetPostId, baseVersion) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
       .run(submission.id, submission.kind, submission.channel, submission.originKey, submission.batchId, submission.action, auto ? 1 : 0, serialized, payloadHash,
-        submission.actorHandle, validated.ip, submission.status, submission.reason, submission.reviewedAt, submission.createdAt);
+        submission.actorHandle, validated.ip, submission.status, submission.reason, submission.reviewedAt, submission.createdAt,
+        submission.targetPostId ?? null, submission.baseVersion ?? null);
     // 只有真的上线的才替代别人：命中「此前已下架」而记成 rejected 的那条没有产生新版本，
     // 它去替代 pending 等于把别的待审投稿凭空清成 superseded。
     if (auto && submission.status === 'approved') supersedePending(store, submission, reviewedAt);
@@ -750,6 +760,8 @@ export function submissionState(store: Store): AdminSubmissionStateResponse {
  * 因为查不到行时 removedAt 返回 null，看起来像「没撤下」。
  */
 export function materializedPostId(store: Store, submission: SubmissionRecord): string {
+  // 编辑投稿物化的就是它要改的那篇文章本身，不是一条新实体。
+  if (submission.targetPostId) return submission.targetPostId;
   if (submission.channel === 'web') return submission.id;
   const legacyId = `feishu-${submission.originKey}`;
   if (submission.channel === 'feishu' && store.getWithRemoved('post', legacyId)?.source === 'submission') return legacyId;
@@ -815,6 +827,28 @@ function materialize(store: Store, submission: SubmissionRecord, reviewedAt: str
     for (const [slug, label] of [[payload.stationSlug, '关联中转站'], [payload.modelSlug, '关联模型']] as const) {
       if (!slug) continue;
       if (!store.get(label === '关联中转站' ? 'station' : 'model', slug)) throw new ApiError(400, 'INVALID_INPUT', `${label} ${slug} 不存在`);
+    }
+    // 编辑已发布文章：把新内容覆盖到**同一行**实体上，id / 作者 / 来源 /
+    // publishedAt 全部沿用。版本号 +1，revisedAt 记这次审核通过的时间。
+    // 切换与「投稿置 approved」在外层同一个事务里完成，读者只会看到切换前
+    // 或切换后的整行，不会读到一半新一半旧。
+    if (submission.targetPostId) {
+      const targetId = submission.targetPostId;
+      if (store.get('post', targetId) === undefined) {
+        // 编辑期间被作者撤下或管理员下架。这不随时间自愈，落终态并说明原因，
+        // 否则会一直占着待审配额，也会让作者对着「审核中」等一个不会来的结果。
+        throw new ApiError(409, 'POST_REMOVED', '文章已下架或删除，修改无法生效');
+      }
+      const before = store.get('post', targetId)!;
+      store.put('post', targetId, {
+        ...before,
+        kind: payload.kind, title: payload.title, summary: payload.summary, body: payload.body,
+        stationSlug: payload.stationSlug ?? null, modelSlug: payload.modelSlug ?? null,
+        // publishedAt 不动：改一篇老文不该让它重新上榜、跳进 RSS 最新、把 sitemap
+        // 的 lastmod 往后推。想表达「更新过」用 revisedAt。
+        contentVersion: (before.contentVersion ?? 1) + 1, revisedAt: reviewedAt,
+      });
+      return;
     }
     store.put('post', submission.id, {
       id: submission.id, kind: payload.kind, title: payload.title, summary: payload.summary, body: payload.body,

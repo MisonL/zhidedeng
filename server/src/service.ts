@@ -5,7 +5,7 @@ import type {
   CreateFeedbackRequest, CreateReportRequest, CurrentUser, Favorite, FavoriteItem, GetCommentsRequest, GetModelsRequest, GetPostsRequest,
   GetRankingsRequest, GetRankingsResponse, GetStationsRequest, InteractionState, ModelDetail,
   Feedback, FeedbackVerdict, GetFeedbackRequest, PaginationQuery, Post, PublicProfile, PutFavoriteRequest, PutFavoriteResponse, PutVoteRequest, PutVoteResponse,
-  SearchResponse, Station, StationDetail, StationOffer, SubmissionStatus, Target, UpdateMeRequest,
+  SearchResponse, Station, StationDetail, StationOffer, SubmissionStatus, SubmitRevisionRequest, Target, UpdateMeRequest,
   User, VendorWithModels, Vote,
 } from '@zhidedeng/shared';
 import { ApiError, isDatabaseBusyError, isUniqueConstraintError } from './errors.ts';
@@ -14,8 +14,8 @@ import { Store } from './database.ts';
 import type { PostRecord, StationRecord } from './database.ts';
 // 只借一个纯函数算 hostname，避免和 submissions.ts 之间形成运行时循环依赖：
 // submissions.ts 不 import service.ts，这个方向是单向的。
-import { findStation, hostnameOf, materializedPostId } from './submissions.ts';
-import { recordPostEvent } from './moderation.ts';
+import { enqueueSubmission, findStation, hostnameOf, materializedPostId } from './submissions.ts';
+import { recordPostEvent, rejectPendingEdits } from './moderation.ts';
 
 const dayMs = 86400000;
 const shanghaiDate = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit' });
@@ -408,8 +408,11 @@ export class Service {
     const post = this.store.get('post', id);
     if (post) return post.status === 'approved' || post.authorHandle === this.handle ? post : undefined;
     // 站内投稿现在先进队列，物化前只在 submissions 里。作者要能看到自己的待审稿。
+    // targetPostId IS NULL：编辑某篇文章的投稿不是「一篇新文章」，它的 id 只是
+    // 一条队列记录。不排除的话，作者用投稿 id 能读到「一篇」标题是修改稿的文章，
+    // 而同一篇内容其实还挂在原来的文章下——同一份内容两个 id。
     const row = this.store.db.prepare(
-      "SELECT * FROM submissions WHERE id = ? AND kind = 'post' AND channel = 'web' AND status IN ('pending','rejected') AND actorHandle = ?",
+      "SELECT * FROM submissions WHERE id = ? AND kind = 'post' AND channel = 'web' AND status IN ('pending','rejected') AND targetPostId IS NULL AND actorHandle = ?",
     ).get(id, this.handle ?? '');
     return row ? this.queuedPost(row) : undefined;
   }
@@ -635,7 +638,7 @@ export class Service {
   getMySubmissions(query: PaginationQuery) {
     const rows = this.store.db.prepare(
       `SELECT id, kind, channel, originKey, status, reason, payload, createdAt, reviewedAt
-       FROM submissions WHERE channel = 'web' AND actorHandle = ?
+       FROM submissions WHERE channel = 'web' AND actorHandle = ? AND targetPostId IS NULL
        ORDER BY createdAt DESC, rowid DESC`,
     ).all(this.user) as unknown as {
       id: string; kind: 'station' | 'model' | 'post'; channel: string; originKey: string;
@@ -683,26 +686,34 @@ export class Service {
     // 混进来会让作者以为自己的稿子被拒了。也不限定 channel：本人用 Agent 凭证
     // 提交的稿子同样记在 actorHandle 上，只看 web 会把那条通道的结果藏起来。
     const submissions = this.store.db.prepare(
-      `SELECT id, kind, channel, originKey, status, reason, payload, reviewedAt FROM submissions
+      `SELECT id, kind, channel, originKey, status, reason, payload, reviewedAt, targetPostId FROM submissions
        WHERE actorHandle = ? AND status IN ('approved','rejected') AND reviewedAt IS NOT NULL
        ORDER BY reviewedAt DESC`,
     ).all(this.user) as Array<{
       id: string; kind: 'station' | 'model' | 'post'; channel: string; originKey: string;
       status: SubmissionStatus; reason: string | null; payload: string; reviewedAt: string;
+      targetPostId: string | null;
     }>;
     for (const row of submissions) {
       const payload = JSON.parse(row.payload) as { title?: string; name?: string; slug?: string; url?: string };
       const target = payload.title ?? payload.name ?? payload.slug ?? row.id;
       const approved = row.status === 'approved';
+      // 编辑已发布文章的结果单独一种文案：说成「你投稿的文章已通过」会让作者
+      // 以为又多了一篇，而实际上改动的是原来那篇。
+      const isEdit = row.targetPostId !== null;
       const kindLabel = row.kind === 'post' ? '文章' : row.kind === 'station' ? '站点' : '模型';
+      const title = isEdit
+        ? (approved ? `你的文章修改「${target}」已上线` : `你的文章修改「${target}」未通过`)
+        : (approved ? `你投稿的${kindLabel}「${target}」已通过` : `你投稿的${kindLabel}「${target}」未通过`);
       items.push({
         id: `submission:${row.id}`,
         kind: 'submission',
-        title: approved ? `你投稿的${kindLabel}「${target}」已通过` : `你投稿的${kindLabel}「${target}」未通过`,
+        title,
         // 通过时没有「理由」可言；驳回时理由必须带出来，否则作者不知道改哪儿。
         detail: approved ? null : row.reason ?? null,
         // 通过不代表现在还在线：文章可能随后被下架/撤下，模型可能被删。
         // 生成链接前确认目标真的可访问，否则通知里是个 404。
+        // 编辑的链接永远指回原来那篇文章（不是那条队列记录）。
         href: approved ? this.liveSubmissionHref(row, payload) : null,
         at: row.reviewedAt,
       });
@@ -802,7 +813,7 @@ export class Service {
 
   /** 投稿通过后的落地链接，同样要求目标此刻在线。 */
   private liveSubmissionHref(
-    row: { id: string; kind: 'station' | 'model' | 'post'; channel: string; originKey: string },
+    row: { id: string; kind: 'station' | 'model' | 'post'; channel: string; originKey: string; targetPostId?: string | null },
     payload: { slug?: string; url?: string },
   ): string | null {
     const kind = row.kind;
@@ -827,7 +838,7 @@ export class Service {
    * 自己再写一遍等于留一份会静默分叉的副本——抄错时查不到行，链接就成了 404。
    */
   private materializedSlug(
-    row: { id: string; kind: string; status: string; channel?: string; originKey?: string },
+    row: { id: string; kind: string; status: string; channel?: string; originKey?: string; targetPostId?: string | null },
     payload: { slug?: string; url?: string },
   ): string | null {
     if (row.status !== 'approved') return null;
@@ -837,6 +848,8 @@ export class Service {
       if (!row.channel || !row.originKey) return null;
       const id = materializedPostId(this.store, {
         id: row.id, kind: 'post', channel: row.channel as never, originKey: row.originKey,
+        // 编辑投稿物化的是被改的那篇文章，不是这条队列记录本身。
+        targetPostId: row.targetPostId ?? null,
       } as never);
       return this.store.get('post', id) ? id : null;
     }
@@ -859,11 +872,22 @@ export class Service {
     // 加上还在队列里的待审稿：站内发帖已走统一队列，
     // 不列出来作者会以为投稿丢了。
     // 待审与被拒的都列出来：被拒也是作者的记录，他要能看到状态和原因。
+    // 编辑投稿（targetPostId 非空）不是一篇文章，不能混进这个列表：
+    // 否则改一次多一条「文章」，标题还和原文一样。
     const pending = this.store.db.prepare(
-      "SELECT * FROM submissions WHERE kind = 'post' AND channel = 'web' AND actorHandle = ? AND status IN ('pending','rejected')",
+      "SELECT * FROM submissions WHERE kind = 'post' AND channel = 'web' AND actorHandle = ? AND targetPostId IS NULL AND status IN ('pending','rejected')",
     ).all(this.user).map(row => this.queuedPost(row));
+    // 待审的修改单独挂到对应文章上：作者要能看到「我的修改在审核」，
+    // 但文章本身仍然只有一条。
+    const revisions = new Map<string, { id: string; submittedAt: string }>();
+    for (const row of this.store.db.prepare(
+      "SELECT id, targetPostId, createdAt FROM submissions WHERE targetPostId IS NOT NULL AND status = 'pending' AND actorHandle = ?",
+    ).all(this.user) as Array<{ id: string; targetPostId: string; createdAt: string }>) {
+      revisions.set(row.targetPostId, { id: row.id, submittedAt: row.createdAt });
+    }
     const posts = [...approved, ...pending]
-      .sort((a, b) => comparePublishedAt(b.publishedAt, a.publishedAt)).map(p => this.post(p));
+      .sort((a, b) => comparePublishedAt(b.publishedAt, a.publishedAt))
+      .map(p => this.post({ ...p, pendingRevision: revisions.get(p.id) ?? null }));
     return paginate(posts, query);
   }
 
@@ -1253,14 +1277,23 @@ export class Service {
     //
     // 部分唯一索引只管 status='open'，所以处置完之后可以立刻再报一次——同一个人
     // 对同一条内容可以无限次刷，每次都给管理台加一条一模一样的待办。
-    // 而「不成立」意味着管理员已经看过、认定没问题；本站内容目前**不可编辑**
-    // （文章编辑还没做），所以重复举报不可能带来新信息。
+    // 而「不成立」意味着管理员已经看过、认定没问题——**除非内容之后被改过**。
     //
-    // 注意：将来支持文章编辑后，这里必须再加一条「目标在这次处置之后没被改过」
-    // 的判断，否则改了内容就不许再报，等于把回归问题锁死。
+    // 文章现在可以编辑了，所以这里必须带版本判断：管理员在 v3 上判定没问题，
+    // 作者改成 v4 之后又出现了同样的问题，再拦着不让举报等于把回归锁死。
+    // 用版本号而不是时间戳：同毫秒处置+改稿会漏判；「改回原文」在语义上也不该算
+    // 新的改动，版本号能表达得更准。
+    //
+    // 判据：同一个人对同一目标、判定不成立、且**处置时记下的版本 >= 当前版本**
+    // 才算「已经看过这一版」。`targetVersion IS NULL` 是迁移前的老行与
+    // 站点/评论目标（它们不可编辑），维持原来的「一律拦」。
+    const currentVersion = targetType === 'post' ? (this.store.get('post', input.targetId)?.contentVersion ?? 1) : null;
     const dismissed = this.store.db.prepare(
-      "SELECT id FROM reports WHERE targetType = ? AND targetId = ? AND reporterHandle = ? AND status = 'dismissed' LIMIT 1",
-    ).get(targetType, input.targetId, this.user);
+      `SELECT id FROM reports
+        WHERE targetType = ? AND targetId = ? AND reporterHandle = ? AND status = 'dismissed'
+          AND (targetVersion IS NULL OR ? IS NULL OR targetVersion >= ?)
+        LIMIT 1`,
+    ).get(targetType, input.targetId, this.user, currentVersion, currentVersion);
     if (dismissed) throw new ApiError(409, 'ALREADY_DISMISSED', '你举报过这条内容，管理员已判定不成立；如果情况有变，请站内联系管理员');
     const id = crypto.randomUUID();
     const now = this.now().toISOString();
@@ -1278,6 +1311,100 @@ export class Service {
       throw error;
     }
     return { id, status: 'open' as const };
+  }
+
+  /**
+   * 提交一次「修改已发布文章」。
+   *
+   * 关键决定：**旧版本继续在线**。改动进同一个审核队列（复用 submissions 的
+   * 幂等、驳回理由、通知），实体在审核通过前一个字节都不动——所以「读者看到的
+   * 还是旧版」和「驳回时回滚」都是零成本结论，不需要额外的回滚逻辑。
+   *
+   * `baseVersion` 是作者开始编辑时看到的版本：审核期间又上线了一版（另一个标签
+   * 页、或者作者自己先前那次通过），这条修改就不是基于最新内容写的，必须让作者
+   * 重新改，否则会把中间那次改动覆盖掉。
+   */
+  submitRevision(input: SubmitRevisionRequest) {
+    const post = this.store.get('post', input.id);
+    if (!post) throw new ApiError(404, 'NOT_FOUND', '文章不存在');
+    // 不是自己的文章一律 404，理由同 withdrawOwnPost：403 等于承认存在。
+    if (post.authorHandle !== this.user) throw new ApiError(404, 'NOT_FOUND', '文章不存在');
+    if (post.source === 'demo') throw new ApiError(409, 'POST_SOURCE_CONFLICT', '演示数据不能编辑');
+    if (post.status !== 'approved') throw new ApiError(409, 'POST_NOT_PUBLISHED', '只有已通过审核的文章才能编辑');
+    const currentVersion = post.contentVersion ?? 1;
+    if (input.baseVersion !== currentVersion) {
+      throw new ApiError(409, 'STALE_REVISION', `这篇文章已经更新到第 ${currentVersion} 版，请刷新后基于最新版本修改`);
+    }
+    for (const [slug, label, kind] of [
+      [input.stationSlug, '关联中转站', 'station'], [input.modelSlug, '关联模型', 'model'],
+    ] as const) {
+      if (slug && !this.store.get(kind, slug)) throw new ApiError(400, 'INVALID_INPUT', `${label} ${slug} 不存在`);
+    }
+    // 编辑计入与投稿同一套额度：否则编辑就成了绕过 10 篇/小时和待审上限的通道。
+    this.assertCanSubmitPost();
+    const payload = {
+      kind: input.kind, title: input.title, summary: input.summary, body: input.body,
+      stationSlug: input.stationSlug ?? null, modelSlug: input.modelSlug ?? null,
+    };
+    // originKey 按目标文章定：同一篇文章的多次修改在幂等判定里属于「同一个来源」。
+    // 内容不同则 payloadHash 不同，不会互相顶掉。
+    const originKey = `web:${this.user}:edit:${input.id}`;
+    try {
+      const result = enqueueSubmission(this.store, {
+        kind: 'post', channel: 'web', originKey, payload, actorHandle: this.user,
+        targetPostId: input.id, baseVersion: input.baseVersion,
+        ip: 'session', now: this.now(),
+      }, { pendingOnly: true, globalPendingBreaker: false });
+      const { submission } = result;
+      return {
+        postId: input.id, submissionId: submission.id,
+        status: 'pending' as const, submittedAt: submission.createdAt,
+      };
+    } catch (error) {
+      if (isDatabaseBusyError(error)) throw error;
+      // submissions_pending_edit 挡住「同一篇同时两版待审」。
+      if (isUniqueConstraintError(error)) {
+        throw new ApiError(409, 'REVISION_PENDING', '这篇已经有一版修改在审核了，等审核结果出来再提交');
+      }
+      throw error;
+    }
+  }
+
+  /** 读自己那一版待审/最近被拒的修改，用于编辑器回填（被拒时预填被拒那版）。 */
+  getRevision(id: string) {
+    const post = this.store.getWithRemoved('post', id);
+    if (!post || post.authorHandle !== this.user) throw new ApiError(404, 'NOT_FOUND', '文章不存在');
+    const row = this.store.db.prepare(
+      `SELECT id, status, payload, createdAt, reason FROM submissions
+        WHERE targetPostId = ? AND channel = 'web' AND actorHandle = ?
+        ORDER BY CASE status WHEN 'pending' THEN 0 ELSE 1 END, createdAt DESC, rowid DESC LIMIT 1`,
+    ).get(id, this.user) as
+      { id: string; status: string; payload: string; createdAt: string; reason: string | null } | undefined;
+    if (!row) return { revision: null };
+    const payload = JSON.parse(row.payload) as Record<string, unknown>;
+    return {
+      revision: {
+        submissionId: row.id,
+        status: row.status as 'pending' | 'rejected',
+        payload: {
+          kind: payload.kind as never, title: payload.title as string, summary: payload.summary as string,
+          body: payload.body as string,
+          stationSlug: (payload.stationSlug as string | null) ?? null, modelSlug: (payload.modelSlug as string | null) ?? null,
+        },
+        submittedAt: row.createdAt, reviewReason: row.reason,
+      },
+    };
+  }
+
+  /** 撤回自己待审的修改。硬删那一行：它只是一条队列记录，作者反悔就不该留痕。 */
+  withdrawRevision(id: string) {
+    const post = this.store.getWithRemoved('post', id);
+    if (!post || post.authorHandle !== this.user) throw new ApiError(404, 'NOT_FOUND', '文章不存在');
+    const result = this.store.db.prepare(
+      "DELETE FROM submissions WHERE targetPostId = ? AND channel = 'web' AND actorHandle = ? AND status = 'pending'",
+    ).run(id, this.user) as unknown as { changes: number };
+    if (Number(result.changes) === 0) throw new ApiError(404, 'NOT_FOUND', '没有待审的修改');
+    return { id, withdrawn: true as const };
   }
 
   /**
@@ -1318,6 +1445,8 @@ export class Service {
       }
       // 作者自己撤下也记流水，否则「我的文章被下架」的通知在自撤时缺失。
       recordPostEvent(this.store, id, post.authorHandle, 'removed', at, null, post.title);
+      // 待审的修改一并作废，理由同 moderation.ts 的 withdrawPost。
+      rejectPendingEdits(this.store, id, at, '文章已撤下，这次修改作废');
     });
     return { id, removed: true as const };
   }

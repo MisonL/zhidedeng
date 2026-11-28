@@ -843,6 +843,20 @@ function orderByMaterializeDependency(store: Store, ids: string[]): string[] {
   route('getFeedback', z.strictObject({ stationSlug: identifier, ...pagination }), (service, input) => service.getFeedback(input));
   route('deleteFeedback', z.strictObject({ id: identifier }), (service, input) => service.deleteFeedback(input.id));
   route('getPost', z.strictObject({ id: identifier }), (service, input) => service.getPost(input.id));
+  // 编辑已发布文章。三个动词挂在同一篇的 revision 子资源上：
+  // PUT 提交修改（进审核队列，线上仍是旧版）、GET 读自己那一版、DELETE 撤回。
+  route('submitRevision', z.strictObject({
+    id: identifier,
+    kind: z.enum(['deal', 'review', 'community', 'guide']),
+    title: z.string().trim().min(1).max(200),
+    summary: z.string().trim().min(1).max(300),
+    body: z.string().min(1).max(20_000),
+    stationSlug: z.string().trim().max(200).nullish(),
+    modelSlug: z.string().trim().max(200).nullish(),
+    baseVersion: z.number().int().min(0),
+  }), (service, input) => service.submitRevision(input));
+  route('getRevision', z.strictObject({ id: identifier }), (service, input) => service.getRevision(input.id));
+  route('withdrawRevision', z.strictObject({ id: identifier }), (service, input) => service.withdrawRevision(input.id));
   route('createPost', z.strictObject({ kind, title: z.string().trim().min(1).max(200), summary: z.string().trim().min(1).max(1000), body: z.string().min(1).max(100_000).refine(body => body.trim().length > 0), stationSlug: identifier.optional(), modelSlug: identifier.optional() }), (service, input, ip) => {
     // 站内发帖也进统一队列：飞书和 Agent 都走 submission，只有站内另写 entities，
     // 管理员就得在两个地方看待审。内容来源标成「用户投稿」。

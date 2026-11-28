@@ -11,6 +11,7 @@ import Me from './pages/Me';
 import { ModelDetailPage, Models } from './pages/Models';
 import NotFound from './pages/NotFound';
 import PostDetail from './pages/PostDetail';
+import PostEdit from './pages/PostEdit';
 import Rank from './pages/Rank';
 import Search from './pages/Search';
 import Author from './pages/Author';
@@ -29,6 +30,8 @@ export default function App() {
         <Route path="community" element={<FeedPage title="社区" kind="community" />} />
         <Route path="reviews" element={<FeedPage title="评测" kind="review" />} />
         <Route path="posts/:id" element={<PostDetail />} />
+        {/* 编辑已发布文章：改动进审核队列，线上仍是旧版。 */}
+        <Route path="posts/:id/edit" element={<PostEdit />} />
         <Route path="stations" element={<Stations />} />
         <Route path="compare" element={<Compare />} />
         <Route path="u/:handle" element={<Author />} />

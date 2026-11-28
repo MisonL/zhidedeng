@@ -97,6 +97,8 @@ textarea { display: block; resize: vertical; line-height: 1.6; }
 .article-meta a:hover { background: var(--red-soft); }
 .article-summary { margin-top: 18px; padding: 12px 16px; border-left: 3px solid var(--red); border-radius: 0 8px 8px 0; background: var(--surface-warm); color: var(--text-2); line-height: 1.75; }
 .article-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 28px; padding-top: 16px; border-top: 1px solid var(--line); }
+/* 「更新于」贴在操作行末尾：读者要能看出这篇被改过，又不该抢正文的注意力。 */
+.article-revised { margin-left: auto; font-size: 12px; color: var(--muted); }
 .article-plain { margin-top: 20px; font-size: 16px; line-height: 1.85; white-space: pre-wrap; overflow-wrap: anywhere; }
 .markdown { margin-top: 20px; font-size: 16px; line-height: 1.85; }
 .markdown > * + * { margin-top: 0.9em; }

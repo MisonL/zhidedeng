@@ -1,6 +1,6 @@
 import { API_ROUTES } from '@zhidedeng/shared';
 import type {
-  ApiContracts, ApiErrorResponse, ApiRouteName, ChangePasswordRequest, CreateAgentTokenRequest, CreateCommentRequest, CreatePostRequest, CreateReportRequest,
+  ApiContracts, ApiErrorResponse, ApiRouteName, ChangePasswordRequest, CreateAgentTokenRequest, CreateCommentRequest, CreatePostRequest, CreateReportRequest, SubmitRevisionRequest,
   GetModelsRequest, GetPostsRequest, GetRankingsRequest, GetStationsRequest, LoginRequest, PaginationQuery,
   PutFavoriteRequest, PutVoteRequest, RegisterRequest, SuggestModelRequest, Target, SuggestStationRequest, UpdateMeRequest
 } from '@zhidedeng/shared';
@@ -87,6 +87,9 @@ export const api = {
   getFeedback: (query: { stationSlug: string; page?: number; pageSize?: number }, signal?: AbortSignal) => call('getFeedback', { query, signal }),
   deleteFeedback: (id: string) => call('deleteFeedback', { path: { id } }),
   createPost: (body: CreatePostRequest) => call('createPost', { body }),
+  submitRevision: (id: string, body: Omit<SubmitRevisionRequest, 'id'>) => call('submitRevision', { path: { id }, body: { ...body, id } }),
+  getRevision: (id: string, signal?: AbortSignal) => call('getRevision', { path: { id }, signal }),
+  withdrawRevision: (id: string) => call('withdrawRevision', { path: { id } }),
   suggestModel: (body: SuggestModelRequest) => call('suggestModel', { body }),
   suggestStation: (body: SuggestStationRequest) => call('suggestStation', { body }),
   getMySubmissions: (query: PaginationQuery, signal?: AbortSignal) => call('getMySubmissions', { query, signal }),

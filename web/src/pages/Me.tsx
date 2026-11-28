@@ -187,6 +187,10 @@ function MyPosts() {
                   ? <p className="hint">已撤下。需要恢复请站内联系管理员。</p>
                   : (
                     <p className="hint">
+                      {/* 编辑入口放在这里：作者发现写错时，「我的分享」是他第一个到的地方。 */}
+                      <Link className="text-btn" to={`/posts/${post.id}/edit`}>
+                        {post.pendingRevision ? '修改审核中' : '编辑'}
+                      </Link>
                       <ConfirmButton
                         label="撤下这篇文章" tone="red" busy={busy === post.id}
                         description="撤下后其他人立刻看不到，正文仍保留，可请管理员恢复。确定撤下？"

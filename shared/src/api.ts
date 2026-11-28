@@ -33,6 +33,10 @@ export interface SubmissionRecord {
   reason: string | null;
   createdAt: string;
   reviewedAt: string | null;
+  /** 编辑已发布文章时指向目标文章；普通投稿为 null。 */
+  targetPostId?: string | null;
+  /** 提交修改时作者看到的版本号，用于发现「审核期间又上线了新版」。 */
+  baseVersion?: number | null;
 }
 
 // POST /api/admin/submissions/batch。管理接口，不进公开契约。
@@ -154,6 +158,42 @@ export interface CreateReportResponse {
   id: string;
   status: ReportStatus;
 }
+
+/**
+ * 编辑已发布文章。**旧版本继续在线**，改动进审核队列；通过才切换。
+ *
+ * `baseVersion` 是作者打开编辑器时看到的 contentVersion：审核期间别人（或自己
+ * 在另一个标签页）又提交并上线了一版时，这条修改就不再是最新的，必须让作者
+ * 重新基于新版改，否则会把别人的改动覆盖掉。
+ */
+export interface SubmitRevisionRequest {
+  id: string;
+  kind: PostKind;
+  title: string;
+  summary: string;
+  body: string;
+  stationSlug?: string | null;
+  modelSlug?: string | null;
+  baseVersion: number;
+}
+export interface SubmitRevisionResponse {
+  postId: string;
+  submissionId: string;
+  status: 'pending';
+  submittedAt: string;
+}
+/** 作者读自己那一版待审/被拒的修改，用来回填编辑器。 */
+export interface GetRevisionRequest { id: string }
+export interface RevisionView {
+  submissionId: string;
+  status: 'pending' | 'rejected';
+  payload: { kind: PostKind; title: string; summary: string; body: string; stationSlug: string | null; modelSlug: string | null };
+  submittedAt: string;
+  reviewReason: string | null;
+}
+export interface GetRevisionResponse { revision: RevisionView | null }
+export interface WithdrawRevisionRequest { id: string }
+export interface WithdrawRevisionResponse { id: string; withdrawn: true }
 
 export interface DeletePostRequest { id: string }
 export interface DeletePostResponse { id: string; removed: true }
@@ -578,6 +618,9 @@ export interface ApiContracts {
   deleteFeedback: { request: DeleteFeedbackRequest; response: ApiResponse<{ id: string; deleted: true }> };
   getPost: { request: GetPostRequest; response: ApiResponse<GetPostResponse> };
   createPost: { request: CreatePostRequest; response: ApiResponse<CreatePostResponse> };
+  submitRevision: { request: SubmitRevisionRequest; response: ApiResponse<SubmitRevisionResponse> };
+  getRevision: { request: GetRevisionRequest; response: ApiResponse<GetRevisionResponse> };
+  withdrawRevision: { request: WithdrawRevisionRequest; response: ApiResponse<WithdrawRevisionResponse> };
   putVote: { request: PutVoteRequest; response: ApiResponse<PutVoteResponse> };
   putFavorite: { request: PutFavoriteRequest; response: ApiResponse<PutFavoriteResponse> };
   getComments: { request: GetCommentsRequest; response: ApiResponse<GetCommentsResponse> };

@@ -78,6 +78,12 @@ export interface AdminPostRow {
   modelSlug: string | null;
   publishedAt: string;
   status: Post['status'];
+  /** 非空表示这一条是「某篇文章的新版本」，不是一篇新文章。 */
+  editOf?: string | null;
+  /** 被修改的那篇文章当前的标题，给审核员认人用。 */
+  targetTitle?: string | null;
+  /** 相对线上版本变了哪几个字段（标题/摘要/正文/关联项）。 */
+  changedFields?: string[];
 }
 
 export interface AdminReport {

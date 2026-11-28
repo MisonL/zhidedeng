@@ -69,6 +69,9 @@ function impact(submission: SubmissionRecord, current: Station | undefined): str
 
 type Tab = 'submissions' | 'posts' | 'published' | 'removed' | 'removedPosts' | 'reports';
 
+/** 编辑稿「改动了什么」的中文名，只给审核员一个大概，不需要精确到字符。 */
+const FIELD_LABEL: Record<string, string> = { title: '标题', summary: '摘要', body: '正文', stationSlug: '关联站点', modelSlug: '关联模型' };
+
 export default function Admin() {
   const [token, setToken] = useState(adminToken.get());
   /**
@@ -632,10 +635,19 @@ export default function Admin() {
                 <li key={post.id}>
                   <div className="tags">
                     <span className="tag">{KIND_LABEL[post.kind] ?? post.kind}</span>
+                    {/* 编辑稿必须一眼认出来：否则审核员以为社区又冒出一篇新文章，
+                        按「新投稿」的标准审，而它其实只是在改一篇已经上线的。 */}
+                    {post.editOf && <span className="tag tag-warn">新版本</span>}
                     <span className="tag">{post.authorHandle ?? '匿名'}</span>
                     <span className="hint">{displayTime(post.publishedAt)}</span>
                   </div>
                   <p>{post.title}</p>
+                  {post.editOf && (
+                    <p className="hint">
+                      修改自：{post.targetTitle ?? post.editOf}
+                      {post.changedFields && post.changedFields.length > 0 && `（改动了${post.changedFields.map(field => FIELD_LABEL[field] ?? field).join('、')}）`}
+                    </p>
+                  )}
                   <p className="hint">{post.summary}</p>
                   {rejectingPost === post.id && (
                     <div className="field">

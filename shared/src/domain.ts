@@ -167,6 +167,20 @@ export interface Post extends InteractionState {
   // pending/rejected 只有作者本人读得到。
   status: PostStatus;
   /**
+   * 内容版本号：每次「编辑并通过审核」+1。缺省按 1 读（老文章没有这个字段）。
+   *
+   * 用途是判断「举报被判不成立之后，内容有没有变过」——用时间戳比会有同毫秒
+   * 漏判，而且「改回原文」在语义上也不该算改动，版本号能表达得更准。
+   */
+  contentVersion?: number;
+  /** 最后一次编辑通过审核的时间；从未编辑过为 null。 */
+  revisedAt?: ISODateTime | null;
+  /**
+   * 作者有一版修改正在排队（只有作者本人读得到）。
+   * 线上内容此刻仍是旧版——读者无感，作者需要看到「我的修改在审核」。
+   */
+  pendingRevision?: { id: string; submittedAt: string } | null;
+  /**
    * 审核理由（驳回原因），仅对作者本人可见。
    *
    * 之前这个字段不存在：作者在「我的分享」里看得到 status=rejected，

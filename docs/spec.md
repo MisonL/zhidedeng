@@ -201,6 +201,7 @@ channel 是队列的来源渠道，source 是物化内容的展示来源，二�
 - `POST /me/checkin`（当天重复调用返回 409 ALREADY_CHECKED_IN）；`GET /me` 含 tokens、checkedInToday、streak、favoriteCount、shareCount
 - `GET /me/favorites`、`GET /me/posts`
 - `GET /me/submissions` —— 「我的投稿」：文章、模型、站点三类统一返回，带状态与驳回理由；已通过的给出可点的详情链接。此前补录模型和推荐站点这两条通道的审核结果，提交人完全看不到
+- `PUT /posts/:id/revision`、`GET /posts/:id/revision`、`DELETE /posts/:id/revision` —— 编辑已发布文章：**改动重新进审核队列，旧版本继续在线**（读者无感，驳回时线上原样保留，作者被拒后预填「被拒那一版」而不是线上版）。`baseVersion` 是打开编辑器时的 `contentVersion`，审核期间又上线了一版就返回 409 STALE_REVISION，避免覆盖掉中间那次改动；同一篇同时只允许一版待审（部分唯一索引，第二版 409 REVISION_PENDING）；文章下架时待审修改自动作废。`publishedAt` 不随编辑变动（否则改一篇老文会让它重新上榜、跳进 RSS 最新、把 sitemap 的 lastmod 往后推），想表达「更新过」看 `revisedAt`。举报的「判不成立后不许再报」改成按版本判断：处置时记 `reports.targetVersion`，内容没改仍拦，改过一版就允许再报
 - `GET /me/notifications` —— 「我的通知」，**拉模型**：只汇总本人相关的三类事件（投稿审核结果、举报处置结果、我的文章被下架/恢复），不推送、不报未读数（没有推送通道时，红点要么永远不消失要么永远滞后）。全部从既有表派生，只有「文章恢复」额外记一份 `post_events` 流水——`entities.removedAt` 只存当前状态，恢复会把它清空，历史没别处可存。下架通知不带链接（详情页已 404），恢复后才给
 - `GET /vendors`（含 models 摘要）
 - `GET /models?vendor=&q=`、`GET /models/:slug`（含 offers：各站倍率，先按计价口径分组、组内按倍率升序；每条带 `basis` 与可为 null 的 `quotedAt`）

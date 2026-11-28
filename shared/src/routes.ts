@@ -33,6 +33,11 @@ export const API_ROUTES = {
   getFeedback: { method: 'GET', path: '/api/feedback' },
   deleteFeedback: { method: 'DELETE', path: '/api/feedback/:id' },
   createPost: { method: 'POST', path: '/api/posts' },
+  // 编辑已发布文章：PUT 提交修改（进审核队列），GET 读待审/被拒那一版，
+  // DELETE 撤回修改。三个都挂在同一篇文章的 revision 子资源上。
+  submitRevision: { method: 'PUT', path: '/api/posts/:id/revision' },
+  getRevision: { method: 'GET', path: '/api/posts/:id/revision' },
+  withdrawRevision: { method: 'DELETE', path: '/api/posts/:id/revision' },
   deletePost: { method: 'DELETE', path: '/api/posts/:id' },
   createReport: { method: 'POST', path: '/api/reports' },
   putVote: { method: 'PUT', path: '/api/votes' },
