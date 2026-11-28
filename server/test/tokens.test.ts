@@ -325,6 +325,19 @@ describe('Token 账本', () => {
     void clock;
   });
 
+  it('作者注销后不再接受送花（花了 Token 也没人收到）', async () => {
+    const alice = await account('alice');
+    const bob = await account('bob');
+    const id = await publishedPost(bob, '作者会注销的文章');
+    await bob.call('POST', '/api/me/delete', { password: PASSWORD, confirm: '注销' });
+    const blocked = await alice.redeem('flower', id);
+    expect(blocked.status).toBe(409);
+    expect(await blocked.json()).toMatchObject({ error: { code: 'AUTHOR_GONE' } });
+    // 没扣钱、没下单。
+    expect((await shop(alice)).balance).toBe(120);
+    expect(server.db.prepare("SELECT count(*) AS c FROM redemptions WHERE itemKey = 'flower'").get()).toEqual({ c: 0 });
+  });
+
   it('每天收花上限按**作者**算：换文章也绕不开', async () => {
     const alice = await account('alice');
     const bob = await account('bob');

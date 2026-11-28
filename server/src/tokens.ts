@@ -275,6 +275,11 @@ export function redeem(store: Store, handle: string, input: {
       const post = store.get('post', input.targetId);
       if (!post || post.status !== 'approved') throw new ApiError(404, 'NOT_FOUND', '文章不存在或还没上线');
       if (post.authorHandle === handle) throw new ApiError(409, 'SELF_TIP', '不能给自己的文章送花');
+      // 作者已经注销：花送出去没人收得到（通知走「给作者看」的那条路，作者
+      // 登不进来），等于白花 5 个 Token。直接说清楚，别让用户自己猜。
+      if (!store.get('user', post.authorHandle)) {
+        throw new ApiError(409, 'AUTHOR_GONE', '这篇文章的作者已经注销了，送花没人能收到');
+      }
       // 一篇一人一朵：不让同一个人把一篇文章刷成一排花。
       const already = store.db.prepare(
         "SELECT 1 FROM redemptions WHERE handle = ? AND itemKey = 'flower' AND targetId = ?",
