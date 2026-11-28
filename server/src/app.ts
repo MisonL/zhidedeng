@@ -465,8 +465,26 @@ export function buildApp(store: Store, now: () => Date, options: AppOptions = {}
     return c.json({ slug, restored: true });
   });
   app.get('/api/admin/stations/removed', c => {
-    const rows = store.db.prepare("SELECT id, removedAt FROM entities WHERE kind = 'station' AND removedAt IS NOT NULL ORDER BY removedAt DESC").all();
-    return c.json({ items: rows.map(row => ({ slug: row.id as string, removedAt: row.removedAt as string })) });
+    const rows = store.db.prepare(
+      "SELECT id, removedAt, data FROM entities WHERE kind = 'station' AND removedAt IS NOT NULL ORDER BY removedAt DESC",
+    ).all() as Array<{ id: string; removedAt: string; data: string }>;
+    // 和「已下架文章」同一个理由：只给 slug 认不出是哪个站，误下架后只能赌。
+    // hasRevert 让「退回上次投稿前」只在真有快照时出现，避免点下去才发现没得退。
+    const withSnapshot = new Set(
+      (store.db.prepare(
+        "SELECT DISTINCT targetStationSlug FROM submissions WHERE status = 'approved' AND previousPayload IS NOT NULL AND targetStationSlug IS NOT NULL",
+      ).all() as Array<{ targetStationSlug: string }>).map(row => row.targetStationSlug),
+    );
+    return c.json({
+      items: rows.map(row => {
+        const station = JSON.parse(row.data) as { name?: string; url?: string | null };
+        return {
+          slug: row.id as string, removedAt: row.removedAt as string,
+          name: station.name ?? row.id, url: station.url ?? null,
+          hasRevert: withSnapshot.has(row.id as string),
+        };
+      }),
+    });
   });
   app.post('/api/admin/submissions/:id/review', async c => {
     const decision = submissionReviewSchema.parse(await c.req.json());

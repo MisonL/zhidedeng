@@ -173,6 +173,26 @@ describe('审核物化', () => {
     expect(again.status).toBe(409);
   });
 
+  it('同一站连续两次投稿：退回一次只回到上一版，不会一次退回最初', async () => {
+    store.put('station', 'sub-api-example-com', existingStation('submission'));
+    server.db.prepare('INSERT INTO offers (stationSlug, modelSlug, rate) VALUES (?, ?, ?)').run('sub-api-example-com', 'o3', 0.7);
+    const first = queue({ payload: { ...stationPayload, name: '第二版', offers: [{ modelSlug: 'o3', rate: 0.8 }] } }).submission;
+    approve(first.id);
+    const second = queue({ payload: { ...stationPayload, name: '第三版', offers: [{ modelSlug: 'o3', rate: 0.9 }] } }).submission;
+    approve(second.id);
+    expect(store.get('station', 'sub-api-example-com')?.name).toBe('第三版');
+
+    expect((await server.app.request('/api/admin/stations/sub-api-example-com/revert', { method: 'POST', headers: admin })).status).toBe(200);
+    // 只能回到「第二版」：快照是每次投稿各自存的一份，按时间取最近的那份。
+    expect(store.get('station', 'sub-api-example-com')?.name).toBe('第二版');
+    expect(offers()).toEqual([{ modelSlug: 'o3', rate: 0.8 }]);
+
+    expect((await server.app.request('/api/admin/stations/sub-api-example-com/revert', { method: 'POST', headers: admin })).status).toBe(200);
+    // 再退一次才回到最初那一版。
+    expect(store.get('station', 'sub-api-example-com')?.name).toBe('旧站点');
+    expect(offers()).toEqual([{ modelSlug: 'o3', rate: 0.7 }]);
+  });
+
   it('首次上线的新站没有旧版可退：明确 409 而不是假装成功', async () => {
     const submission = queue().submission;
     approve(submission.id);

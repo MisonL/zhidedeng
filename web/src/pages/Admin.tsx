@@ -1030,8 +1030,10 @@ export default function Admin() {
             <ul className="card-list">
               {removedStations.map(station => (
                 <li key={station.slug}>
-                  <p>{station.slug}</p>
-                  <p className="hint">下架于 {displayTime(station.removedAt)}</p>
+                  <p>{station.name}</p>
+                  <p className="hint">
+                    {station.url ?? station.slug}　下架于 {displayTime(station.removedAt)}
+                  </p>
                   <div className="tags">
                     <button
                       className="btn btn-small btn-red" disabled={busy}
@@ -1040,13 +1042,16 @@ export default function Admin() {
                       恢复
                     </button>
                     {/* 站点投稿是整包替换：误批之后内容与报价都被覆盖了，「恢复」
-                        只能恢复下架状态，恢复不了上一版内容。这里给撤回上一版投稿。 */}
-                    <ConfirmButton
-                      label="退回上次投稿前" tone="red" busy={busy}
-                      description={`把「${station.slug}」的内容与报价整体退回上一次投稿之前？现在展示的投稿内容会被替换。`}
-                      confirmLabel="确认退回"
-                      onConfirm={async () => { await act(() => admin.revertStation(station.slug), '已退回上次投稿前'); }}
-                    />
+                        只能恢复下架状态，恢复不了上一版内容。这里给撤回上一版投稿；
+                        没有快照的站（例如目录导入写进来的）不显示按钮。 */}
+                    {station.hasRevert && (
+                      <ConfirmButton
+                        label="退回上次投稿前" tone="red" busy={busy}
+                        description={`把「${station.name}」的内容与报价整体退回上一次投稿之前？现在展示的投稿内容会被替换。`}
+                        confirmLabel="确认退回"
+                        onConfirm={async () => { await act(() => admin.revertStation(station.slug), '已退回上次投稿前'); }}
+                      />
+                    )}
                   </div>
                 </li>
               ))}

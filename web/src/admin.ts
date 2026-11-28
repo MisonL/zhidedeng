@@ -127,6 +127,11 @@ export interface BatchReviewResult {
 export interface RemovedStation {
   slug: string;
   removedAt: string;
+  /** 站名：只给 slug 的话，误下架后认不出是哪个站。 */
+  name: string;
+  url: string | null;
+  /** 是否有可退回的上一版投稿快照（没有就别显示按钮，免得点下去 409）。 */
+  hasRevert: boolean;
 }
 /** 已下架的文章。和站点不同，文章没有 slug，用 id 指代。 */
 export interface RemovedPost {
