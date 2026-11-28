@@ -331,6 +331,9 @@ export function buildApp(store: Store, now: () => Date, options: AppOptions = {}
   // 没配就返回 null——前端据此说「暂未开通公开客服」，绝不编一个地址。
   app.get('/api/site', c => {
     const contact = (process.env.OPERATOR_CONTACT ?? '').trim();
+    // 与其它公开 GET 一致禁缓存：联系方式是运维配置项，改完应当立刻生效，
+    // 缓存住反而会让「已更新」和「页面还显示旧的」打架。
+    c.header('cache-control', 'no-store');
     return c.json({ contact: contact === '' ? null : contact });
   });
 

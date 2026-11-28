@@ -80,6 +80,16 @@ describe('报价倍率展示与榜单门槛', () => {
     expect(ranking.items.find(item => item.model.slug === model)).toMatchObject({ stationCount: 0, lowestRate: null });
   });
 
+  it('真实站实体被物理删除、报价行残留时，仍不把演示价当市场行情', async () => {
+    // 外键只在应用层维护，孤儿报价是可能的。JOIN 探测会漏掉它，
+    // 然后误判成「从没有过真实报价」而把演示价放回榜单。
+    const orphan = 'sub-orphan-real';
+    insertOffer(orphan, modelSlugs()[0], 0.85);
+    const ranking = await getRankings();
+    if (ranking.tab !== 'model') throw new Error('排行榜类型错误');
+    expect(ranking.items.find(item => item.model.slug === modelSlugs()[0])).toMatchObject({ stationCount: 0, lowestRate: null });
+  });
+
   it('单个 0.05 报价不能压过三个 0.6 报价的模型', async () => {
     const stations = stationSlugs();
     const [maliciousModel, regularModel] = modelSlugs();

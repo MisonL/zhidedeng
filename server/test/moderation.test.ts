@@ -310,6 +310,8 @@ describe('GET /api/site', () => {
       expect(empty.status).toBe(200);
       // 没配就说没有：编一个地址比「暂未开通」更糟。
       expect(await empty.json()).toEqual({ contact: null });
+      // 与其它公开 GET 一致禁缓存：联系方式改完要立刻生效，缓存住会显示旧值。
+      expect(empty.headers.get('cache-control')).toBe('no-store');
 
       process.env.OPERATOR_CONTACT = '  ops@example.com  ';
       const configured = await server.app.request('/api/site');

@@ -47,6 +47,10 @@ services:
       # 容器里请求自身的 origin 是 0.0.0.0 或服务名，写进 sitemap 就是死链，
       # 所以公网部署必须显式配成 https://你的域名。
       PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:-}
+      # 「商务合作」页展示的对外联系方式（邮箱或表单链接），也是撤稿/账号恢复
+      # 这类申诉的落点。不配时接口返回 null、页面如实写「暂未开通」——但已注销的
+      # 账号登不进来，没有这个通道就没法申诉，生产建议一定配上。
+      OPERATOR_CONTACT: ${OPERATOR_CONTACT:-}
     volumes:
       - zhidedeng-data:/data
     #日志默认 json-file且无上限：跑久了会把磁盘写满，而且没人会注意到。
