@@ -118,6 +118,32 @@ describe('登录与登出', () => {
     expect((await a.call('GET', '/api/me')).status).toBe(200);
   });
 
+  it('验密之后、签发之前凭据被改/账号被禁：这次登录作废（复核的就是验密时那一份哈希）', async () => {
+    const { confirmLoginCredentials, hashPassword } = await import('../src/auth.ts');
+    await browser().register('alice');
+    const row = server.db.prepare("SELECT handle, passwordHash FROM accounts WHERE usernameKey = 'alice'").get() as
+      { handle: string; passwordHash: string };
+    // 验密时读到的就是这一份；此刻还能签发。
+    expect(confirmLoginCredentials(server.store, 'alice', row.passwordHash)).toBe('alice');
+
+    // ① 这期间密码被重置：旧哈希不再有效。
+    const rotated = await hashPassword('another-long-password');
+    server.db.prepare('UPDATE accounts SET passwordHash = ? WHERE handle = ?').run(rotated, 'alice');
+    expect(confirmLoginCredentials(server.store, 'alice', row.passwordHash)).toBeNull();
+    expect(confirmLoginCredentials(server.store, 'alice', rotated)).toBe('alice');
+
+    // ② 期间被禁用/注销：即便哈希没变也不能签发。
+    server.db.prepare("UPDATE accounts SET disabledAt = ? WHERE handle = 'alice'").run(clock.toISOString());
+    expect(confirmLoginCredentials(server.store, 'alice', rotated)).toBeNull();
+    server.db.prepare("UPDATE accounts SET disabledAt = NULL, deletedAt = ? WHERE handle = 'alice'").run(clock.toISOString());
+    expect(confirmLoginCredentials(server.store, 'alice', rotated)).toBeNull();
+
+    // ③ 账号行被删掉（注销流程里 sessions 先清、accounts 后删）：同样是 null。
+    server.db.prepare("DELETE FROM sessions WHERE handle = 'alice'").run();
+    server.db.prepare("DELETE FROM accounts WHERE handle = 'alice'").run();
+    expect(confirmLoginCredentials(server.store, 'alice', rotated)).toBeNull();
+  });
+
   it('错误密码和不存在的用户名错误完全相同，不下发 cookie', async () => {
     await browser().register('alice');
     const wrong = await browser().login('alice', 'wrong-password');

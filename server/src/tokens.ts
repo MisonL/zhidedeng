@@ -367,7 +367,12 @@ export function redeem(store: Store, handle: string, input: {
       handle, delta: -item.cost, reason: 'redeem',
       // 带上目标**标题**而不是 id：流水是用户唯一能自己核对「这笔钱花在哪」的
       // 地方，一串 uuid 在页面上没法认；标题是当时那篇的，之后改名也能对上。
-      memo: `${item.name}（${item.cost} Token）${targetTitle ? `· 《${targetTitle}》` : ''}`.slice(0, 200),
+      // 送花带文章标题（一串 uuid 认不出），补签带日期（不然不知道补的哪天），
+      // 其余项不带目标。流水是用户唯一能自己对账的地方。
+      memo: `${item.name}（${item.cost} Token）${
+        item.key === 'flower' && targetTitle ? `· 《${targetTitle}》`
+          : item.key === 'makeup' && targetId ? `· ${targetId}` : ''
+      }`.slice(0, 200),
       at,
     });
     // 导出：响应里给完整内容（只此一次），库里只有摘要（见上）。
@@ -430,12 +435,14 @@ export function entitlementsOf(store: Store, handle: string): string[] {
  * 幂等：只在该 handle 完全没有流水时补，所以可以每次启动都跑。
  */
 export function seedTokenLedger(store: Store, now: Date): { seeded: number; reconciled: number } {
-  const users = store.db.prepare(
-    "SELECT data FROM entities WHERE kind = 'user' AND removedAt IS NULL",
-  ).all() as Array<{ data: string }>;
   let seeded = 0;
   let reconciled = 0;
   store.transaction(() => {
+    // 用户列表在事务里读：多进程同时启动时，事务外的快照可能已经过期，
+    // 拿它写回整行会覆盖别的进程刚改的昵称/简介。
+    const users = store.db.prepare(
+      "SELECT data FROM entities WHERE kind = 'user' AND removedAt IS NULL",
+    ).all() as Array<{ data: string }>;
     for (const row of users) {
       const user = JSON.parse(row.data) as { handle?: string; tokens?: number };
       const handle = user.handle;
@@ -443,12 +450,19 @@ export function seedTokenLedger(store: Store, now: Date): { seeded: number; reco
       if (!handle || !Number.isInteger(tokens)) continue;
       const existing = store.db.prepare('SELECT 1 FROM token_ledger WHERE handle = ? LIMIT 1').get(handle);
       if (existing) {
-        // 账本已经有了，就对一次账：缓存以账本为准。
+        // 账本已经有了，就对一次账：以账本为准。
         // 这不是假想场景——回滚到旧版本时余额只写 user.tokens、不写账本，
         // 再升回新版就会出现「缓存 131 / 账本 120」这种分裂，两个页面各显示一个数。
+        //
+        // 差额**必须落一条流水**，不能只改缓存：流水是用户唯一能自己对账的地方，
+        // 静默把余额改小等于让「账面少了几块钱」这件事无迹可查。写 admin_grant /
+        // admin_deduct 并注明来源，至少让人看得出这是启动对账而不是消费。
         const balance = balanceOf(store, handle);
         if (balance !== tokens) {
-          store.put('user', handle, { ...user, handle, tokens: balance } as never);
+          appendLedger(store, {
+            handle, delta: tokens - balance, reason: tokens > balance ? 'admin_grant' : 'admin_deduct',
+            memo: '启动对账：余额缓存与流水不一致，以流水为准', onceKey: null, at: now.toISOString(),
+          });
           reconciled += 1;
         }
         continue;

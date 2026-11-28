@@ -338,6 +338,18 @@ describe('Token 账本', () => {
     expect(redeeem?.memo).not.toContain(id);
   });
 
+  it('补签流水写的是补的那一天，不是一串内部 id', async () => {
+    const alice = await account('alice');
+    // 补签要求「前天签过」，漏的是昨天。直接写 checkins 造出这个形状。
+    server.db.prepare('INSERT INTO checkins (userHandle, date, tokensAwarded, streak) VALUES (?,?,?,?)')
+      .run('alice', '2026-11-13', 10, 3);
+    expect((await alice.redeem('makeup', '2026-11-14')).status).toBe(200);
+    const ledger = await (await alice.call('GET', '/api/me/tokens/ledger?pageSize=10')).json() as
+      { items: Array<{ memo: string | null }> };
+    // 补签的目标是一天；只写「补签卡（30 Token）」的话，用户看不出补的是哪天。
+    expect(ledger.items.find(item => item.memo?.includes('补签'))?.memo).toContain('2026-11-14');
+  });
+
   it('作者注销后不再接受送花（花了 Token 也没人收到）', async () => {
     const alice = await account('alice');
     const bob = await account('bob');
@@ -531,6 +543,31 @@ describe('Token 账本', () => {
     // 已经有流水的账号（注册用户）不会被重复补。
     await account('alice');
     expect(seedTokenLedger(server.store, clock).seeded).toBe(0);
+  });
+
+  it('缓存与账本不一致时把差额补进流水：用户看到的余额不会被静默改小', async () => {
+    await account('alice');
+    const { balanceOf, seedTokenLedger } = await import('../src/tokens.ts');
+    const user = server.store.get('user', 'alice')!;
+    const ledger = balanceOf(server.store, 'alice');
+
+    // 回滚到旧版本期间余额只写进 user.tokens、不写账本：两个方向都要能对账。
+    // ① 缓存比账本多（旧版本发过奖励）：补一条入账，用户的余额不被抹掉。
+    server.store.put('user', 'alice', { ...user, tokens: ledger + 37 });
+    expect(seedTokenLedger(server.store, clock).reconciled).toBe(1);
+    expect(balanceOf(server.store, 'alice')).toBe(ledger + 37);
+    const granted = server.db.prepare('SELECT delta, balanceAfter, reason, memo FROM token_ledger WHERE handle = ? ORDER BY rowid DESC LIMIT 1').get('alice') as { delta: number; balanceAfter: number; reason: string; memo: string };
+    expect(granted).toMatchObject({ delta: 37, balanceAfter: ledger + 37, reason: 'admin_grant' });
+    expect(granted.memo).toContain('启动对账');
+
+    // ② 缓存比账本少（旧版本扣过费）：差额记一笔扣回，而不是留着对不上。
+    server.store.put('user', 'alice', { ...user, tokens: ledger - 12 });
+    expect(seedTokenLedger(server.store, clock).reconciled).toBe(1);
+    const deducted = server.db.prepare('SELECT delta, reason FROM token_ledger WHERE handle = ? ORDER BY rowid DESC LIMIT 1').get('alice') as { delta: number; reason: string };
+    expect(deducted).toMatchObject({ delta: -49, reason: 'admin_deduct' });
+    expect(balanceOf(server.store, 'alice')).toBe(ledger - 12);
+    // 流水是唯一可对账的地方：静默改缓存等于让差额无迹可查。
+    expect(server.store.get('user', 'alice')?.tokens).toBe(ledger - 12);
   });
 
   it('收花上限不跨作者串账：另一位作者照常能收到', async () => {

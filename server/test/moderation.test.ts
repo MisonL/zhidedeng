@@ -301,6 +301,29 @@ describe('导入接口', () => {
   });
 });
 
+describe('GET /api/site', () => {
+  it('没配 OPERATOR_CONTACT 时 contact 为 null，配了就原样返回', async () => {
+    const before = process.env.OPERATOR_CONTACT;
+    try {
+      delete process.env.OPERATOR_CONTACT;
+      const empty = await server.app.request('/api/site');
+      expect(empty.status).toBe(200);
+      // 没配就说没有：编一个地址比「暂未开通」更糟。
+      expect(await empty.json()).toEqual({ contact: null });
+
+      process.env.OPERATOR_CONTACT = '  ops@example.com  ';
+      const configured = await server.app.request('/api/site');
+      expect(await configured.json()).toEqual({ contact: 'ops@example.com' });
+
+      // 空白串也算没配（运维写了空值不该被当成联系方式）。
+      process.env.OPERATOR_CONTACT = '   ';
+      expect(await (await server.app.request('/api/site')).json()).toEqual({ contact: null });
+    } finally {
+      if (before === undefined) delete process.env.OPERATOR_CONTACT; else process.env.OPERATOR_CONTACT = before;
+    }
+  });
+});
+
 describe('GET /api/health', () => {
   it('不需要登录，也不写库', async () => {
     const response = await server.app.request('/api/health');

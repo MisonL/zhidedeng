@@ -158,13 +158,14 @@ sudo systemctl start zhidedeng-docker-backup.service #立刻验证一次
  ```sh
  # 备份文件由宿主机 root 写入、属主是 root；容器里以 uid 1000 运行时**读不到**。
  # 先在宿主机用 root 校验、复制到一个属主正确的临时位置，再让容器里的 node 取用。
- sudo sh -c 'sqlite3 /var/backups/zhidedeng/app-<时间戳>.db "PRAGMA integrity_check;" && install -o 1000 -g 1000 -m 0644 /var/backups/zhidedeng/app-<时间戳>.db /var/backups/zhidedeng/restore.db'
+ sudo sh -c 'sqlite3 /var/backups/zhidedeng/app-<时间戳>.db "PRAGMA integrity_check;" && install -o 1000 -g 1000 -m 0600 /var/backups/zhidedeng/app-<时间戳>.db /var/backups/zhidedeng/restore.db'
  docker run --rm --user 1000:1000 \
    -v zhidedeng_zhidedeng-data:/data \
    -v /var/backups/zhidedeng:/bak:ro \
    node:22-slim sh -c 'mv /data/zhidedeng.db /data/zhidedeng.db.bak-<时间戳> && cp /bak/restore.db /data/zhidedeng.db && rm -f /data/zhidedeng.db-wal /data/zhidedeng.db-shm'
  ```
  卷名以 `docker volume ls` 的实际输出为准。若已用 root 跑过，补一句 `chown 1000:1000 /data/zhidedeng.db` 也行。
+ **恢复后把临时副本删掉**：`sudo rm -f /var/backups/zhidedeng/restore.db`。备份里含密码哈希与会话摘要，`restore.db` 是整库副本，留在盘上等于多一份没人管的敏感数据（备份清理脚本只匹配 `app-*.db`，不会替你收走它）。
 4. `docker start zhidedeng`，`curl -s http://<服务器地址>:<映射端口>/api/health` 应返回 database ok，再抽查前台站点数。
  **别用 `127.0.0.1:8787`**：容器部署是端口映射（compose 的宿主端口 8788，绑定地址由 `BIND_ADDR` 决定，默认 `127.0.0.1`；生产实测绑的是局域网地址 `172.16.81.4`），宿主 `127.0.0.1:8787` 并没有监听，照抄会误判成恢复失败。端口以 `docker inspect` 的 `PortBindings` 为准。
 5. 版本方向：旧备份加当前代码可以直接启动（启动迁移自动补列），这是**推荐方向**。
@@ -374,6 +375,9 @@ journalctl -u zhidedeng-sync.service -n 100        # 看最近一次跑了什么
 - 代码侧对 `X-Forwarded-For` 逐段做 IP 校验，非法段直接丢弃，避免限流键变成任意字符串。但这挡不住「伪造一个合法 IP」——那只能靠上面这条部署约定。
 - 生产环境要设 `TLS_ENABLED=1`，此时会话 cookie 一律带 `Secure`。这个开关就是运维在断言「本站对外是 HTTPS」，所以它不看请求头、也不依赖 `TRUSTED_PROXIES`——早先三者耦合，导致开了 TLS 但漏配反代时 Secure 被静默丢掉，HTTPS 站点上的会话 cookie 会随任意明文请求发出去。
   反过来的误配（声明了 TLS 实际却在 http 上访问）会让浏览器丢弃 cookie，表现为登录成功却立刻变回未登录，启动日志会对此告警。纯本机 http 试用保持 `TLS_ENABLED=0`。
+- `OPERATOR_CONTACT` 是 `/business` 页展示的对外联系方式（邮箱或表单链接），也是「联系管理员恢复」这类提示的落点。
+  不配时接口返回 `contact: null`，页面如实写「暂未开通公开客服邮箱」——**不要写一个没人看的地址**。
+  已注销账号登不进来，所以这个通道是这部分用户唯一的申诉入口，部署时建议配上。
 - Docker 镜像是单进程、单库的部署形态。要横向扩到多容器，SQLite 与 `rate_limits` 都不再适用，需要换共享存储。
 - 真实站没有可用率，默认排序排在演示站之后；前端站点目录只取 50 个，超过后部分文章卡片缺站名。按得分、可用率或倍率排序时，缺失值一律排在最后；同分（同可用率、同倍率）的站点按 slug 定序，保证是严格全序——否则同值站在翻页之间会来回换位，第 1 页能重复出现第 2 页的条目。
 - **批量审核会阻塞事件循环**：500 条 `batch-review` 约 8 秒，期间 `/api/health` 也要排队（单进程 + 同步 SQLite 的固有特性）。已把「每条都全表扫站点找 hostname」换成带版本失效的索引缓存（12.3s→8.1s），要再降需要拆进程或换异步驱动，与当前规模不匹配。

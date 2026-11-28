@@ -87,6 +87,7 @@ const GROUPS: { title: string; routes: Partial<Record<ApiRouteName, { summary: s
       getBanners: { summary: '首页 Banner' },
       search: { summary: '跨模型、中转站、文章搜索，每组最多 10 条', params: 'query: q' },
       getHotSearches: { summary: '热门搜索词' },
+      getSite: { summary: '站点公开信息（当前对外联系方式，未配置为 null）' },
     },
   },
   {

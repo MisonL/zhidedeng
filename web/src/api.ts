@@ -138,4 +138,5 @@ export const api = {
   getBanners: (signal?: AbortSignal) => call('getBanners', { signal }),
   search: (q: string, signal?: AbortSignal) => call('search', { query: { q }, signal }),
   getHotSearches: (signal?: AbortSignal) => call('getHotSearches', { signal }),
+  getSite: (signal?: AbortSignal) => call('getSite', { signal }),
 };

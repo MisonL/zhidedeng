@@ -123,7 +123,7 @@ export function StationDetailPage() {
               {/* 没有报价的站很常见（推荐站点时报价本来就允许留空）。原来这里
                   渲染一张只有表头的空表，读者会以为表格没加载出来。 */}
               {station.offers.length === 0 ? (
-                <p className="state">这个站还没有报价。可以让提交者补充，或在「一句话反馈」里告诉我们。</p>
+                <p className="state">这个站还没有可展示的报价。可以让提交者补充，或在「一句话反馈」里告诉我们。</p>
               ) : (
               <div className="table-scroll">
                 <table className="data-table data-table-compact">

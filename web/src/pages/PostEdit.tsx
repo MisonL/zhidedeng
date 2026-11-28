@@ -3,7 +3,7 @@ import type { FormEvent } from 'react';
 import { Link, useNavigate, useParams } from 'react-router';
 import type { PostKind } from '@zhidedeng/shared';
 import { api } from '../api';
-import { displayTime } from '../format';
+import { displayTime, formatDate } from '../format';
 import AsyncView, { Empty } from '../components/AsyncView';
 import ConfirmButton from '../components/ConfirmButton';
 import PostFields, { EMPTY_POST_FORM } from '../components/PostFields';
@@ -176,7 +176,7 @@ export default function PostEdit() {
                 </button>
                 <p className="hint">
                   <Link to={`/posts/${id}`}>回到文章</Link>。当前版本第 {current.contentVersion ?? 1} 版
-                  {current.revisedAt ? `，上次更新 ${new Date(current.revisedAt).toLocaleDateString('zh-CN')}` : ''}。
+                  {current.revisedAt ? `，上次更新 ${formatDate(current.revisedAt)}` : ''}。
                 </p>
               </form>
             </>

@@ -317,7 +317,7 @@ export default function Admin() {
   async function approveAll(only?: 'remove' | 'upsert') {
     // only 把「下架站点」和「新增/更新」分开批：下架请求通过之后站点就从线上
     // 消失，和「放一条投稿出去」是完全两种后果，混在一个「全部通过」里
-    // 一点就是不可逆的删除。不给 only 时保持全量行为（确认文案会写明含多少条下架）。
+    // 一点就是不可逆的删除。两个按钮各传一个值，没有「全量」入口了。
     //
     // 站点/模型必须排在文章前面：文章物化时要靠 hostname 反查站点 slug，
     // 站点还没通过的话 stationSlug 会落成 null。服务端只在单次请求内排序，

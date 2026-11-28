@@ -9,7 +9,7 @@ import { z, ZodError } from 'zod';
 import { API_ROUTES, MAX_RATE, MIN_RATE, PROFILE_LIMITS } from '@zhidedeng/shared';
 import type { ApiContracts, ApiRouteName, ChangePasswordRequest, LoginRequest, RegisterRequest } from '@zhidedeng/shared';
 import { modelSchema, rateBasis } from '@zhidedeng/shared/submission';
-import { AttemptLimiter, burnPasswordCheck, clearedSessionCookie, createSession, deleteOtherSessions, deleteSession, hashPassword, INITIAL_TOKENS, isWeakPassword, RESERVED_HANDLES, sessionCookie, sessionHandle, USERNAME, verifyPassword } from './auth.ts';
+import { AttemptLimiter, burnPasswordCheck, clearedSessionCookie, confirmLoginCredentials, createSession, deleteOtherSessions, deleteSession, hashPassword, INITIAL_TOKENS, isWeakPassword, RESERVED_HANDLES, sessionCookie, sessionHandle, USERNAME, verifyPassword } from './auth.ts';
 import { agentTokenSchema, createAgentToken, listAgentTokens, revokeAgentToken } from './agent-tokens.ts';
 import { agentHandle, agentTokenHash } from './agent-auth.ts';
 import { AgentApi } from './agent-api.ts';
@@ -325,6 +325,13 @@ export function buildApp(store: Store, now: () => Date, options: AppOptions = {}
     const hasBody = method !== 'DELETE' && Boolean(await c.req.text().catch(() => ''));
     if (hasBody) throw new ApiError(415, 'UNSUPPORTED_MEDIA_TYPE', '写接口要求 Content-Type: application/json');
     await next();
+  });
+
+  // 站点级公开信息。目前只有联系方式：运维用 OPERATOR_CONTACT 配（邮箱或表单链接），
+  // 没配就返回 null——前端据此说「暂未开通公开客服」，绝不编一个地址。
+  app.get('/api/site', c => {
+    const contact = (process.env.OPERATOR_CONTACT ?? '').trim();
+    return c.json({ contact: contact === '' ? null : contact });
   });
 
   app.get('/api/health', c => {
@@ -815,13 +822,9 @@ function orderByMaterializeDependency(store: Store, ids: string[]): string[] {
     let token: string;
     try {
       ({ handle, token } = store.transaction(() => {
-        const fresh = store.db.prepare('SELECT passwordHash, disabledAt, deletedAt FROM accounts WHERE usernameKey = ?').get(usernameKey) as
-          { passwordHash: string; disabledAt: string | null; deletedAt: string | null } | undefined;
-        if (!fresh || fresh.passwordHash !== account.passwordHash
-          || fresh.disabledAt !== null || fresh.deletedAt !== null) {
-          throw new ApiError(401, 'INVALID_CREDENTIALS', '用户名或密码错误');
-        }
-        return { handle: account.handle as string, token: createSession(store, account.handle as string, now()) };
+        const confirmed = confirmLoginCredentials(store, usernameKey, account.passwordHash as string);
+        if (!confirmed) throw new ApiError(401, 'INVALID_CREDENTIALS', '用户名或密码错误');
+        return { handle: confirmed, token: createSession(store, confirmed, now()) };
       }));
     } catch (error) {
       refund();

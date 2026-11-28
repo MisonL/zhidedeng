@@ -97,7 +97,7 @@ channel 是队列的来源渠道，source 是物化内容的展示来源，二�
 
 ### `/admin` 审核台
 
-待审投稿、待审文章、已上线文章、已下架站点、已下架文章五个页签（顺序与页面按钮一致），支持逐条通过/拒绝、全部通过、逐篇下架与恢复。撤回入口只在「已上线文章」里——待审的还没物化，实体不存在，在那里下架必然 404，而作者会以为稿子没了。
+待审投稿、待审文章、已上线文章、已下架站点、已下架文章五个页签（顺序与页面按钮一致），支持逐条通过/拒绝、全部通过、逐篇下架与恢复。**「全部通过」按 action 拆成两个按钮**：「全部通过（N 条新增/更新）」与「批准下架（M 条）」——下架一旦通过站点就从线上消失，和放一条投稿出去后果完全不同，混在同一个按钮里一次误点就是不可逆的删除。待审文章卡片可展开正文（与「待审投稿」口径一致）；举报页签对评论类举报可直接「隐藏评论」，不必为了一个问题评论下架整篇文章。撤回入口只在「已上线文章」里——待审的还没物化，实体不存在，在那里下架必然 404，而作者会以为稿子没了。
 用**管理密钥**进入（`Authorization: Bearer`），不是登录会话——管理接口本来就不在公开契约里。
 
 密钥只写 `sessionStorage`：关掉标签页即失效，不像 `localStorage` 会在公共机器上长期留存。
@@ -165,9 +165,10 @@ channel 是队列的来源渠道，source 是物化内容的展示来源，二�
 | POST | /api/admin/posts/:id/review | 调整文章审核状态；群友来源传 rejected 等于下架它（不再返回 409 MANAGED_BY_SOURCE） |
 | POST | /api/admin/posts/:id/withdraw | 下架一篇已发布文章（软删除），前台立刻不可见；演示数据 409 |
 | POST | /api/admin/posts/:id/restore | 恢复已下架文章，只清软删除标记 |
-| GET | /api/admin/posts/removed | 已下架文章列表，含下架时间 |
+| GET | /api/admin/posts/removed | 已下架文章列表，含下架时间、标题与作者（只给 id 的话误下架后认不出该恢复哪篇） |
 | POST | /api/admin/stations/:slug/restore | 恢复已下架的站点，只清软删除标记 |
-| GET | /api/admin/stations/removed | 已下架站点列表，含下架时间 |
+| POST | /api/admin/stations/:slug/revert | 把站点内容与报价整体退回上一次投稿上线之前。站点投稿是整包替换（描述覆盖 + 报价全删重建），没有这条路就等于误批一次删掉报价历史；快照存 `submissions.previousPayload`（配 `targetStationSlug` 精确定位），用掉即清空，**只改 data 不动 removedAt**（否则「退回」会顺带把下架的站重新上线） |
+| GET | /api/admin/stations/removed | 已下架站点列表，含站名、url、下架时间与 hasRevert |
 | POST | /api/admin/accounts/reset-password | username + newPassword；同时清掉该账号全部会话与 Agent 凭证 |
 | POST / GET | /api/admin/invite-codes | 创建邀请码（note?、maxUses?、expiresAt?）/ 列出元数据，明文只在创建响应里出现一次 |
 | POST | /api/admin/invite-codes/:id/revoke | 吊销邀请码，重复调用保留首次吊销时间 |
@@ -227,5 +228,6 @@ channel 是队列的来源渠道，source 是物化内容的展示来源，二�
 - `GET /banners`
 - `GET /search?q=`（models、stations、posts 三组，各最多 10 条）
 - `GET /hot-searches`
+- `GET /site` —— 站点级公开信息，目前只有 `contact`（运维通过 `OPERATOR_CONTACT` 配置，未配置为 `null`）。不编造联系方式，也不留一句「待配置」：所有「联系管理员恢复」的提示都指向这一页
 - `POST /agent/stations`、`POST /agent/posts`、`POST /agent/models`、`GET /agent/status?limit=1..50` —— Agent 提交通道，`Authorization: Bearer zd_...` 鉴权。请求体是扁平 JSON 对象，不接受多余字段；实测指标字段（uptime、firstTokenLatencyMs、foundedAt、status、score、lowestRate）和凭证类字段一律 400 FORBIDDEN_FIELD，`authorHandle` 同样拒绝。提交强制进入待审队列，即使管理员开启自动通过也不例外；同一账号相同 pending 内容重提返回 deduplicated。速率配额：单凭证 10 条/小时、单账号 20 条/小时、单 IP 20 条/小时，超限 429 RATE_LIMITED 并带等待秒数；待审配额：单账号 5 条、单 hostname 2 条、全站 200 条，超限 409 TOO_MANY_PENDING 且不带 retryAfter。凭证无效、被吊销或账号被禁用返回 401 UNAUTHENTICATED
 - 服务端 SEO（`server/src/seo.ts` + `server/src/static.ts`）：详情页回退到 SPA 时改写 index.html 的 head（title / description / canonical / OG），并新增 `/sitemap.xml`、`/rss.xml`、`/robots.txt`。**只有真实内容进索引**：演示站与演示文章带 `noindex`（页面给人看，但不该在搜索结果里被当成真实评测），站内用户写的已发布文章可索引，投稿与 Agent 采集的内容带 `noindex`。域名未定，绝对 URL 的 origin 优先取 `PUBLIC_ORIGIN`，未配置时退回请求自身的 origin

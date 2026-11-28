@@ -594,6 +594,8 @@ export interface SearchResponse {
 }
 export type GetHotSearchesRequest = PaginationQuery;
 export type GetHotSearchesResponse = PaginatedResponse<string>;
+/** 站点级公开信息。contact 为空表示运维还没配对外联系方式。 */
+export interface GetSiteResponse { contact: string | null }
 
 // POST /api/admin/import 的通用全量导入内容。
 // 这是受保护的运维接口，不属于公开 API，所以不进 ApiContracts 和 API_ROUTES。
@@ -725,6 +727,7 @@ export interface ApiContracts {
   getBanners: { request: GetBannersRequest; response: ApiResponse<GetBannersResponse> };
   search: { request: SearchRequest; response: ApiResponse<SearchResponse> };
   getHotSearches: { request: GetHotSearchesRequest; response: ApiResponse<GetHotSearchesResponse> };
+  getSite: { request: Record<string, never>; response: ApiResponse<GetSiteResponse> };
   createInviteCode: { request: CreateInviteCodeRequest; response: ApiResponse<CreateInviteCodeResponse> };
   getInviteCodes: { request: GetInviteCodesRequest; response: ApiResponse<GetInviteCodesResponse> };
   revokeInviteCode: { request: RevokeInviteCodeRequest; response: ApiResponse<RevokeInviteCodeResponse> };

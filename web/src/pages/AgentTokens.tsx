@@ -2,10 +2,11 @@ import { useState } from 'react';
 import type { FormEvent } from 'react';
 import type { CreateAgentTokenResponse } from '@zhidedeng/shared';
 import { api } from '../api';
+import { displayTime } from '../format';
 import AsyncView, { Empty } from '../components/AsyncView';
 import { useAsync } from '../hooks';
 
-const displayTime = (iso: string) => new Date(iso).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false });
+// 时间口径统一走 format.ts：这里原来自带一份副本，两处口径迟早会分叉。
 
 export default function AgentTokens() {
   const tokens = useAsync(signal => api.getAgentTokens(signal), []);

@@ -178,9 +178,6 @@ export const admin = {
   // 而「一条评论有问题」最常见，处置手段不该比问题本身更重。
   hideComment: (id: string, hidden: boolean) =>
     request<{ id: string; hidden: boolean }>(`/api/admin/comments/${encodeURIComponent(id)}/hide`, { method: 'POST', body: { hidden } }),
-  // 禁用/恢复一个账号（禁用后所有会话立即失效，公开内容保留）。
-  setUserDisabled: (handle: string, disabled: boolean) =>
-    request<{ handle: string; disabled: boolean }>(`/api/admin/users/${encodeURIComponent(handle)}/disable`, { method: 'POST', body: { disabled } }),
   // 撤销最近一次站点投稿上线：整包替换不可逆，误批会删掉报价历史。
   revertStation: (slug: string) =>
     request<{ slug: string; restoredName: string; offerCount: number }>(`/api/admin/stations/${encodeURIComponent(slug)}/revert`, { method: 'POST' }),

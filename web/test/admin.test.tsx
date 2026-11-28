@@ -16,7 +16,10 @@ const post = {
   stationSlug: null, modelSlug: null, publishedAt: '2026-11-10T03:00:00.000Z', status: 'pending',
 };
 
-const removed = { slug: 'gone-example-com', removedAt: '2026-11-10T04:00:00.000Z' };
+const removed = {
+  slug: 'gone-example-com', removedAt: '2026-11-10T04:00:00.000Z',
+  name: '已下架的示例站', url: 'https://gone.example.com/', hasRevert: false,
+};
 
 /** 每个用例都要先输密钥，这里统一封装。 */
 async function unlock() {
@@ -112,7 +115,9 @@ describe('审核台', () => {
     });
     await unlock();
     fireEvent.click(await screen.findByRole('tab', { name: /已下架站点/ }));
-    expect(await screen.findByText('gone-example-com')).toBeInTheDocument();
+    // 列表按站名认人，slug 退到副行（只给 slug 时误下架后认不出是哪个站）。
+    expect(await screen.findByText('已下架的示例站')).toBeInTheDocument();
+    expect(screen.getByText(/gone\.example\.com/)).toBeInTheDocument();
     // 下架时间是排障信息，必须显示出来。
     expect(screen.getByText(/下架于/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: '恢复' }));
@@ -304,11 +309,11 @@ describe('拒绝理由与时间兜底', () => {
   it('下架时间不合法时显示「时间未知」，不渲染 Invalid Date', async () => {
     stubApi({
       'GET /api/admin/submissions': { items: [], total: 0 },
-      'GET /api/admin/stations/removed': { items: [{ slug: 'bad-time', removedAt: 'not-a-date' }] },
+      'GET /api/admin/stations/removed': { items: [{ slug: 'bad-time', removedAt: 'not-a-date', name: '坏时间站', url: null, hasRevert: false }] },
     });
     await unlock();
     fireEvent.click(await screen.findByRole('tab', { name: /已下架站点/ }));
-    expect(await screen.findByText('下架于 时间未知')).toBeInTheDocument();
+    expect(await screen.findByText(/时间未知/)).toBeInTheDocument();
     expect(screen.queryByText(/Invalid Date/)).not.toBeInTheDocument();
   });
 });

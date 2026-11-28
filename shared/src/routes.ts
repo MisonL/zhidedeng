@@ -55,6 +55,9 @@ export const API_ROUTES = {
   getBanners: { method: 'GET', path: '/api/banners' },
   search: { method: 'GET', path: '/api/search' },
   getHotSearches: { method: 'GET', path: '/api/hot-searches' },
+  // 站点级公开信息（当前联系方式）。运维没配时返回 null，前端据此说「暂未开通」，
+  // 而不是编一个邮箱、也不是让所有「联系管理员」的提示指向一句「待配置」。
+  getSite: { method: 'GET', path: '/api/site' },
   createInviteCode: { method: 'POST', path: '/api/admin/invite-codes' },
   getInviteCodes: { method: 'GET', path: '/api/admin/invite-codes' },
   revokeInviteCode: { method: 'POST', path: '/api/admin/invite-codes/:id/revoke' },

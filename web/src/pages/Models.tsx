@@ -110,7 +110,9 @@ export function ModelDetailPage() {
                   不同口径（按输入 / 按输出 / 打包价 / 综合）的数字不可直接比较。
                 </p>
                 {model.offers.length === 0
-                  ? <Empty title="暂时没有站点报价" />
+                  // 演示站的虚构报价在有真实报价时不参与市场统计（与榜单一致），
+                  // 所以这里可能为空——说清楚「为什么空」，别让人以为没加载。
+                  ? <Empty title="暂时没有可展示的报价" hint="演示站的虚构报价在有真实报价时不参与对比。" />
                   : (
                     <div className="table-scroll">
                       <table className="data-table">

@@ -219,13 +219,21 @@ describe('我的', () => {
 });
 
 describe('商务合作', () => {
-  it('不编造联系方式，但给出实际可用的三条通道', () => {
+  it('没配联系方式时如实说未开通，并给出站内自助入口', async () => {
     stubApi();
     renderApp('/business');
     // 只写「待配置」的话，按「联系管理员」提示过来的用户会卡在最后一步。
-    expect(screen.getByText(/暂未开通公开客服邮箱/)).toBeInTheDocument();
+    expect(await screen.findByText(/暂未开通公开客服邮箱/)).toBeInTheDocument();
     expect(screen.getByText(/一句话反馈/)).toBeInTheDocument();
-    expect(screen.getByText(/通过你提交内容时使用的渠道/)).toBeInTheDocument();
+    expect(screen.getByText(/管理员在审核台操作/)).toBeInTheDocument();
+  });
+
+  it('运维配置了联系方式就展示出来，不写死也不编造', async () => {
+    stubApi({ 'GET /api/site': { contact: 'ops@example.com' } });
+    renderApp('/business');
+    // 地址和前缀在同一个 <p> 里，按整段文本匹配。
+    expect(await screen.findByText(/ops@example\.com/)).toBeInTheDocument();
+    expect(screen.queryByText(/暂未开通公开客服邮箱/)).not.toBeInTheDocument();
   });
 });
 
@@ -407,7 +415,7 @@ describe('撤下自己的文章', () => {
     fireEvent.click(screen.getByRole('button', { name: '撤下' }));
 
     await waitFor(() => expect(callsTo(fetchMock, 'DELETE', '/api/posts/mine-1')).toHaveLength(1));
-    expect(await screen.findByText(/已撤下。恢复只能由管理员操作，请通过提交内容时用的渠道/)).toBeInTheDocument();
+    expect(await screen.findByText(/已撤下。恢复只能由管理员操作/)).toBeInTheDocument();
   });
 
   it('撤下后页头的「分享」数字跟着更新，不会和列表自相矛盾', async () => {
@@ -431,7 +439,7 @@ describe('撤下自己的文章', () => {
 
     fireEvent.click(screen.getByRole('button', { name: '撤下这篇文章' }));
     fireEvent.click(screen.getByRole('button', { name: '撤下' }));
-    await screen.findByText(/已撤下。恢复只能由管理员操作，请通过提交内容时用的渠道/);
+    await screen.findByText(/已撤下。恢复只能由管理员操作/);
 
     // 撤下后必须重新取 /api/me，页头才会变成 0。
     await waitFor(() => expect(callsTo(fetchMock, 'GET', '/api/me').length).toBeGreaterThan(1));
@@ -456,7 +464,7 @@ describe('撤下自己的文章', () => {
     expect(shareCell()).toBe('1');
     fireEvent.click(screen.getByRole('button', { name: '撤下这篇文章' }));
     fireEvent.click(screen.getByRole('button', { name: '撤下' }));
-    await screen.findByText(/已撤下。恢复只能由管理员操作，请通过提交内容时用的渠道/);
+    await screen.findByText(/已撤下。恢复只能由管理员操作/);
     // 刷新失败，但本地先减一，所以页头不能还写着 1。
     await waitFor(() => expect(shareCell()).toBe('0'));
   });
@@ -667,7 +675,7 @@ describe('我的投稿里的撤下状态', () => {
     expect(await screen.findByText('我撤下的那篇')).toBeInTheDocument();
     expect(screen.getByText('已撤下', { selector: '.tag' })).toBeInTheDocument();
     // 投稿列表里这句写得更短，避免每张卡片重复一整段说明。
-    expect(screen.getByText(/恢复需通过提交渠道联系运营者/)).toBeInTheDocument();
+    expect(screen.getByText(/恢复需联系运营者（见「商务合作」页）/)).toBeInTheDocument();
     // 正文里不能再出现「已通过」——那是两套互相矛盾的说法。
     expect(screen.queryByText('已通过')).not.toBeInTheDocument();
   });
@@ -705,7 +713,7 @@ describe('缺少数据时的空态', () => {
     });
     renderApp('/stations/empty-shop');
     // 推荐站点时报价本来就允许留空，这类站很常见；空表头会被当成「没加载出来」。
-    expect(await screen.findByText(/这个站还没有报价/, {}, { timeout: 8000 })).toBeInTheDocument();
+    expect(await screen.findByText(/这个站还没有可展示的报价/, {}, { timeout: 8000 })).toBeInTheDocument();
   });
 });
 

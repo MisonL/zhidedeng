@@ -10,10 +10,16 @@ export function Skeleton({ rows = 3 }: { rows?: number }) {
   );
 }
 
-export function Empty({ title = '这里还没有内容', action }: { title?: string; action?: { to: string; label: string } }) {
+export function Empty({ title = '这里还没有内容', hint, action }: {
+  title?: string;
+  /** 解释「为什么空」：空表和「没加载出来」长得一样，一句话能省一半困惑。 */
+  hint?: string;
+  action?: { to: string; label: string };
+}) {
   return (
     <div className="state">
       <p>{title}</p>
+      {hint && <p className="hint">{hint}</p>}
       {action && <Link className="btn btn-ghost" to={action.to}>{action.label}</Link>}
     </div>
   );

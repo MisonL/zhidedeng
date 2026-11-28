@@ -387,6 +387,7 @@ export class Service {
   // 每个站都要用，同一请求内只读一次。
   private cachedOffers?: StationOffer[];
   private cachedMarketOffers?: StationOffer[];
+  private cachedDemoStations?: Set<string>;
   private cachedOffersByStation?: Map<string, StationOffer[]>;
   private offers(): StationOffer[] {
     // 只算在线站点的报价。下架是软删除，报价行仍在库里（恢复时要原样拿回来），
@@ -409,16 +410,30 @@ export class Service {
    */
   private marketOffers(): StationOffer[] {
     return this.cachedMarketOffers ??= (() => {
-      const demo = new Set<string>();
-      for (const station of this.store.all('station')) {
-        if (station.source === 'demo') demo.add(station.slug);
-      }
-      return demo.size === 0 ? this.offers() : (() => {
-        const all = this.offers();
-        const real = all.filter(offer => !demo.has(offer.stationSlug));
-        return real.length > 0 ? real : all;
-      })();
+      // 判据是「库里有没有过任何真实报价」，**不是**「此刻在线的真实报价」：
+      // 绑在线状态会让一次运维下架（或一个真实站被删）把榜单无声地退回虚构行情，
+      // 正是这个函数要消灭的症状。只要真实报价曾经存在，演示站就永远不参与结论；
+      // 纯演示环境（从没有过真实报价）才把演示数据当作全部内容。
+      const everReal = this.store.db.prepare(
+        `SELECT 1 AS found FROM offers AS offer
+           JOIN entities AS station ON station.kind = 'station' AND station.id = offer.stationSlug
+          WHERE COALESCE(json_extract(station.data, '$.source'), 'user') != 'demo' LIMIT 1`,
+      ).get() !== undefined;
+      if (everReal) return this.offers().filter(offer => !this.demoStations().has(offer.stationSlug));
+      // 没有真实报价时把演示报价留下：纯演示环境里这就是全部内容。
+      const all = this.offers();
+      const real = all.filter(offer => !this.demoStations().has(offer.stationSlug));
+      return real.length > 0 ? real : all;
     })();
+  }
+
+  /** 演示站的 slug 集合。一次查询，比把整张站点表 JSON.parse 一遍便宜。 */
+  private demoStations(): Set<string> {
+    return this.cachedDemoStations ??= new Set(
+      (this.store.db.prepare(
+        "SELECT id FROM entities WHERE kind = 'station' AND json_extract(data, '$.source') = 'demo'",
+      ).all() as Array<{ id: string }>).map(row => row.id),
+    );
   }
 
   /**

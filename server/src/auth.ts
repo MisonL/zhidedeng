@@ -216,6 +216,26 @@ export function purgeExpired(store: Store, now: Date): void {
 /** 限流记录的保留期。取最长窗口（1 小时）的两倍，任何仍在生效的计数都不会被误删。 */
 const PURGE_RATE_LIMIT_MS = 2 * 60 * 60 * 1000;
 
+/**
+ * 登录签发前的最后一道复核。
+ *
+ * 验密要等 scrypt（几十毫秒）。这期间管理员可能重置了密码、或账号被禁用/注销。
+ * 只复查验密前那份快照是没用的——那份快照在 await 之前就读完了。所以签发前按
+ * `usernameKey` 重读一次：密码哈希必须还是验密时那一份，账号必须仍然可用。
+ *
+ * 返回 handle 表示可以签发；返回 null 表示这次登录作废（调用方按「用户名或
+ * 密码错误」回，不透露是哪一种）。
+ */
+export function confirmLoginCredentials(
+  store: Store, usernameKey: string, verifiedHash: string,
+): string | null {
+  const fresh = store.db.prepare(
+    'SELECT handle, passwordHash, disabledAt, deletedAt FROM accounts WHERE usernameKey = ?',
+  ).get(usernameKey) as { handle: string; passwordHash: string; disabledAt: string | null; deletedAt: string | null } | undefined;
+  if (!fresh || fresh.passwordHash !== verifiedHash || fresh.disabledAt !== null || fresh.deletedAt !== null) return null;
+  return fresh.handle;
+}
+
 export function createSession(store: Store, handle: string, now: Date) {
   const token = randomBytes(32).toString('base64url');
   store.db.prepare('DELETE FROM sessions WHERE expiresAt <= ?').run(now.toISOString());

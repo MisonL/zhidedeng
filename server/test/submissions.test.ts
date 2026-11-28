@@ -193,6 +193,19 @@ describe('审核物化', () => {
     expect(offers()).toEqual([{ modelSlug: 'o3', rate: 0.7 }]);
   });
 
+  it('已下架的站点退回上一版后仍然是下架状态（不能悄悄复活）', async () => {
+    store.put('station', 'sub-api-example-com', existingStation('submission'));
+    server.db.prepare('INSERT INTO offers (stationSlug, modelSlug, rate) VALUES (?, ?, ?)').run('sub-api-example-com', 'o3', 0.7);
+    const submission = queue({ payload: { ...stationPayload, name: '覆盖后', offers: [{ modelSlug: 'gpt-4-1', rate: 0.5 }] } }).submission;
+    approve(submission.id);
+    store.markRemoved('station', 'sub-api-example-com', clock().toISOString());
+
+    expect((await server.app.request('/api/admin/stations/sub-api-example-com/revert', { method: 'POST', headers: admin })).status).toBe(200);
+    expect(store.get('station', 'sub-api-example-com')).toBeUndefined();
+    // 下架标记必须还在：store.put 会把它清成 NULL，等于替管理员把站点上线。
+    expect(store.removedAt('station', 'sub-api-example-com')).not.toBeNull();
+  });
+
   it('首次上线的新站没有旧版可退：明确 409 而不是假装成功', async () => {
     const submission = queue().submission;
     approve(submission.id);

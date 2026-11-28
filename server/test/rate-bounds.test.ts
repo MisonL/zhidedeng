@@ -62,6 +62,24 @@ describe('报价倍率展示与榜单门槛', () => {
     expect(ranking.items.find(item => item.model.slug === model)).toMatchObject({ stationCount: 1, lowestRate: 0.9 });
   });
 
+  it('真实站被下架后，榜单不会退回演示站的虚构价', async () => {
+    const real = 'sub-real-gone';
+    server.db.prepare('INSERT INTO entities (kind,id,data) VALUES (?,?,?)').run('station', real, JSON.stringify({
+      slug: real, name: '会被下架的真实站', description: '群友提交', url: 'https://gone.example.com/',
+      source: 'submission', rechargeThreshold: null, paymentMethods: [], uptime: null,
+      firstTokenLatencyMs: null, foundedAt: null, status: null,
+    }));
+    const model = modelSlugs()[0];
+    insertOffer(real, model, 0.9);
+    server.db.prepare("UPDATE entities SET removedAt = ? WHERE kind='station' AND id = ?").run('2026-11-06T02:00:00Z', real);
+
+    const ranking = await getRankings();
+    if (ranking.tab !== 'model') throw new Error('排行榜类型错误');
+    // 判据是「曾经有过真实报价」而不是「此刻在线」：运维下一次架不该让虚构价重新
+    // 变成市场行情。没有在线真实报价时，这里应当如实显示「暂无报价」。
+    expect(ranking.items.find(item => item.model.slug === model)).toMatchObject({ stationCount: 0, lowestRate: null });
+  });
+
   it('单个 0.05 报价不能压过三个 0.6 报价的模型', async () => {
     const stations = stationSlugs();
     const [maliciousModel, regularModel] = modelSlugs();

@@ -230,12 +230,17 @@ export function revertStation(store: Store, slug: string, now: Date) {
       station: { name: string; description: string; url: string | null; rechargeThreshold: number | null; paymentMethods: string[] };
       offers: Array<{ modelSlug: string; rate: number; basis: string; quotedAt: string | null }>;
     };
-    store.put('station', slug, {
+    // **不能用 store.put**：它会顺手把 removedAt 清成 NULL，而这个按钮恰好只在
+    // 「已下架站点」页签里——一次「退回上一版」会静默把站点重新上线，覆盖管理员
+    // 的下架决定。这里只换 data，保留当前的上下架状态。
+    store.db.prepare('UPDATE entities SET data = ? WHERE kind = ? AND id = ?').run(JSON.stringify({
       ...station,
       name: snapshot.station.name, description: snapshot.station.description,
       url: snapshot.station.url, rechargeThreshold: snapshot.station.rechargeThreshold,
       paymentMethods: snapshot.station.paymentMethods,
-    });
+    }), 'station', slug);
+    // 直接写 entities 必须让派生缓存失效（导入/审核都靠它判断站点集合变没变）。
+    store.invalidate();
     store.db.prepare('DELETE FROM offers WHERE stationSlug = ?').run(slug);
     const insert = store.db.prepare(
       'INSERT INTO offers (stationSlug, modelSlug, rate, basis, quotedAt) VALUES (?, ?, ?, ?, ?)',
