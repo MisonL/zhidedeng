@@ -119,3 +119,35 @@ describe('文章页送花', () => {
     expect(screen.queryByRole('button', { name: /送一朵花/ })).toBeNull();
   });
 });
+
+describe('通知里的类型标签', () => {
+  it('送花通知标「送花」而不是「文章」', async () => {
+    stubApi({
+      'GET /api/me/notifications': {
+        items: [
+          { id: 'n1', kind: 'flower', title: 'demo-pedal 给你的《某文》送了一朵花', detail: null, href: '/posts/p1', at: '2026-11-15T04:00:00.000Z' },
+          { id: 'n2', kind: 'post', title: '你的文章「某文」已下架', detail: '不合规', href: null, at: '2026-11-14T04:00:00.000Z' },
+        ],
+        total: 2, page: 1, pageSize: 20,
+      },
+    });
+    renderApp('/me?tab=notifications');
+    // 送花落到 else 分支会显示成「文章」，读者会以为多了一条文章通知。
+    expect(await screen.findByText('送花', {}, { timeout: 8000 })).toBeInTheDocument();
+    expect(screen.getByText('文章')).toBeInTheDocument();
+  });
+});
+
+describe('限流提示', () => {
+  it('429 带 retry-after 时说明具体等多久，不说「稍后」', async () => {
+    stubApi({
+      'GET /api/me/tokens': () => new Response(
+        JSON.stringify({ error: { code: 'RATE_LIMITED', message: '签到太频繁了，请稍后再试', retryAfter: 1800 } }),
+        { status: 429, headers: { 'content-type': 'application/json', 'retry-after': '1800' } },
+      ),
+    });
+    renderApp('/me?tab=tokens');
+    // 签到 5 次/小时、投票收藏各有额度：只说「稍后」用户不知道等 1 分钟还是 1 小时。
+    expect(await screen.findByText(/30 分钟后再试/, {}, { timeout: 8000 })).toBeInTheDocument();
+  });
+});

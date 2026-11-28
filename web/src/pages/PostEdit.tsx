@@ -3,6 +3,7 @@ import type { FormEvent } from 'react';
 import { Link, useNavigate, useParams } from 'react-router';
 import type { PostKind } from '@zhidedeng/shared';
 import { api } from '../api';
+import { displayTime } from '../format';
 import AsyncView, { Empty } from '../components/AsyncView';
 import PostFields, { EMPTY_POST_FORM } from '../components/PostFields';
 import type { PostFormValue } from '../components/PostFields';
@@ -136,7 +137,7 @@ export default function PostEdit() {
             <>
               {pending && (
                 <p className="demo-notice" role="note">
-                  已有一版修改在审核中（{new Date(pending.submittedAt).toLocaleString('zh-CN')} 提交）。
+                  已有一版修改在审核中（{displayTime(pending.submittedAt)} 提交）。
                   想重新改就先撤回那一次。
                   <button type="button" className="text-btn" onClick={withdraw} disabled={submitting}>撤回修改</button>
                 </p>

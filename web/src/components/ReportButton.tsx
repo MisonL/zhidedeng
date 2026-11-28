@@ -85,7 +85,9 @@ export default function ReportButton({ targetType, targetId }: { targetType: 'po
         </button>
         <button type="button" className="btn btn-small btn-ghost" onClick={() => setOpen(false)}>取消</button>
       </div>
-      <p className="hint">举报会进入人工审核队列。我们不会自动下架内容，也不会告知你处理结果。</p>
+      {/* 处置结果其实会出现在「我的通知」里（service.ts 的举报事件），
+          原来这里写「不会告知你处理结果」，等于告诉用户举报石沉大海。 */}
+      <p className="hint">举报会进入人工审核队列，我们不会自动下架内容；处理结果会出现在「我的通知」里。</p>
     </div>
   );
 }

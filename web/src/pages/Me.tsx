@@ -10,7 +10,7 @@ import PostCard from '../components/PostCard';
 import StationCard from '../components/StationCard';
 import { Avatar, AvatarPresetGlyph } from '../components/visuals';
 import { AVATAR_PRESET_NAMES, AVATAR_PRESETS } from '@zhidedeng/shared';
-import { formatDate, loginPath } from '../format';
+import { displayTime, formatDate, loginPath } from '../format';
 import { useAsync, usePaged } from '../hooks';
 import { useHere, useMe, useToast } from '../state';
 import AgentTokens from './AgentTokens';
@@ -62,7 +62,12 @@ function MyNotifications() {
                 <>
                   <div className="tags">
                     <span className="tag">
-                      {item.kind === 'submission' ? '投稿' : item.kind === 'report' ? '举报' : '文章'}
+                      {/* 标签必须覆盖所有 kind：送花落到 else 里会显示成「文章」，
+                          读起来像多了一条文章通知。 */}
+                      {item.kind === 'submission' ? '投稿'
+                        : item.kind === 'report' ? '举报'
+                          : item.kind === 'flower' ? '送花'
+                            : '文章'}
                     </span>
                     <time className="hint num" dateTime={item.at}>{formatDate(item.at)}</time>
                   </div>
@@ -314,7 +319,7 @@ function TokenShop() {
                 {'　'}{REASON_LABEL[entry.reason] ?? entry.reason}
                 {entry.memo ? `　${entry.memo}` : ''}
                 {'　'}余额 <span className="num">{entry.balanceAfter}</span>
-                {'　'}{new Date(entry.at).toLocaleString('zh-CN')}
+                {'　'}{displayTime(entry.at)}
               </li>
             ))}
           </ul>

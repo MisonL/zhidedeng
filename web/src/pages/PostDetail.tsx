@@ -70,8 +70,12 @@ export default function PostDetail() {
                     <ReportButton targetType="post" targetId={post.id} />
                   )}
                   {/* 送花：只给别人的、已上线的文章。自己给自己送花没有意义，
-                      未上线的文章也不该出现在别人的阅读列表里。 */}
-                  {post.status === 'approved' && me.data && me.data.handle !== post.author.handle && (
+                      未上线的文章也不该出现在别人的阅读列表里。
+                      作者已注销时也不给：服务端会回 409 AUTHOR_GONE（花没人收得到），
+                      而全站的规则是「不给点了必然报错的按钮」。注销后的署名统一是
+                      「已注销用户·xxxx」，前端按这个前缀判断即可。 */}
+                  {post.status === 'approved' && me.data && me.data.handle !== post.author.handle
+                    && !post.author.nickname.startsWith('已注销用户') && (
                     <FlowerButton postId={post.id} />
                   )}
                   {/* 作者本人才能编辑，且只有已上线的文章有「修改」可言。 */}

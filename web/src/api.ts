@@ -7,10 +7,16 @@ import type {
 
 export class ApiError extends Error {
   readonly code?: string;
+  /**
+   * 服务端建议的重试等待（秒）。429 时后端会带 `retry-after` 头与同名字段；
+   * 不读它的话，页面只能说「请稍后再试」——用户不知道是等 1 分钟还是 1 小时。
+   */
+  readonly retryAfter?: number;
 
-  constructor(message: string, code?: string) {
+  constructor(message: string, code?: string, retryAfter?: number) {
     super(message);
     this.code = code;
+    this.retryAfter = retryAfter;
   }
 }
 
@@ -21,6 +27,19 @@ interface CallOptions {
   query?: object;
   body?: unknown;
   signal?: AbortSignal;
+}
+
+/**
+ * 把「请稍后再试」换成具体等待时间。
+ *
+ * 签到是 5 次/小时、投票收藏各有额度，光说「稍后」用户不知道是 1 分钟还是
+ * 1 小时；服务端本来就把 retry-after 一起发回来了，不用白不用。
+ */
+function withRetryHint(message: string, seconds: number): string {
+  const minutes = Math.ceil(seconds / 60);
+  const wait = seconds < 60 ? `${seconds} 秒` : minutes < 60 ? `${minutes} 分钟` : `${Math.ceil(minutes / 60)} 小时`;
+  if (/请稍后再试$/.test(message)) return message.replace(/请稍后再试$/, `请 ${wait}后再试`);
+  return `${message}（约 ${wait}后可再试）`;
 }
 
 function buildUrl(template: string, { path, query }: CallOptions) {
@@ -54,7 +73,17 @@ async function call<N extends ApiRouteName>(name: N, options: CallOptions = {}):
   // 代理在后端未就绪时会返回非 JSON 响应。
   const payload = await response.json().catch(() => null);
   if (!response.ok) {
-    throw new ApiError(payload?.error?.message ?? `请求失败（${response.status}）`, payload?.error?.code);
+    // retry-after 是秒数（HTTP 头），后端同时写进了 error 体里的 retryAfter。
+    const headerRetry = Number(response.headers.get('retry-after'));
+    const bodyRetry = Number(payload?.error?.retryAfter);
+    const retryAfter = Number.isFinite(bodyRetry) && bodyRetry > 0 ? bodyRetry
+      : Number.isFinite(headerRetry) && headerRetry > 0 ? headerRetry : undefined;
+    const message = payload?.error?.message ?? `请求失败（${response.status}）`;
+    throw new ApiError(
+      retryAfter === undefined ? message : withRetryHint(message, retryAfter),
+      payload?.error?.code,
+      retryAfter,
+    );
   }
   // 200 但不是 JSON：维护页、CDN、WAF 的拦截页都是这种形态。返回 null 会让调用方
   // 拿到一个空对象去解构（例如把用户当成未登录静默登出），所以这里显式失败。

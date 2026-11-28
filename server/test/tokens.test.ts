@@ -325,6 +325,19 @@ describe('Token 账本', () => {
     void clock;
   });
 
+  it('送花流水里写的是文章标题，不是一串 id', async () => {
+    const alice = await account('alice');
+    const bob = await account('bob');
+    const id = await publishedPost(bob, '值得送花的那篇');
+    expect((await alice.redeem('flower', id)).status).toBe(200);
+    const ledger = await (await alice.call('GET', '/api/me/tokens/ledger?pageSize=10')).json() as
+      { items: Array<{ memo: string | null }> };
+    const redeeem = ledger.items.find(item => item.memo?.includes('Token'));
+    // 流水是用户唯一能自己对账的地方：页面显示一串 uuid 等于对不上账。
+    expect(redeeem?.memo).toContain('《值得送花的那篇》');
+    expect(redeeem?.memo).not.toContain(id);
+  });
+
   it('作者注销后不再接受送花（花了 Token 也没人收到）', async () => {
     const alice = await account('alice');
     const bob = await account('bob');

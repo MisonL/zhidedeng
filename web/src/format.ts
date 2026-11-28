@@ -101,7 +101,16 @@ export const formatPercent = (ratio: number) => `${Math.round(ratio * 100)}%`;
 
 // 与服务端日期口径一致；en-CA 输出 YYYY-MM-DD。
 const shanghaiDate = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit' });
+const shanghaiTime = new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false, dateStyle: 'short', timeStyle: 'short' });
 export const formatDate = (iso: string) => shanghaiDate.format(new Date(iso));
+
+/**
+ * 日期 + 时间，固定东八区。
+ *
+ * 全站时间口径是 Asia/Shanghai；直接用 `toLocaleString('zh-CN')` 会取浏览器时区，
+ * 非东八区用户看到的「提交时间/流水时间」会和详情页差好几个小时。
+ */
+export const displayTime = (iso: string) => shanghaiTime.format(new Date(iso));
 
 /**
  * 展示前清掉会破坏排版的不可见字符。

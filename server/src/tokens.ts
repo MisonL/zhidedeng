@@ -265,6 +265,8 @@ export function redeem(store: Store, handle: string, input: {
     // 规则偏离入口一步就会有一条通道绕过它。
     let targetType: string | null = null;
     let targetId: string | null = null;
+    // 只有送花有：写进流水 memo，让用户能认出这笔钱花在哪篇文章上。
+    let targetTitle: string | null = null;
     let payload: unknown = null;
     let message = '';
     /** 导出这类「内容只在这次响应里给一次」的完整结果，不落库。 */
@@ -274,6 +276,7 @@ export function redeem(store: Store, handle: string, input: {
       if (!input.targetId) throw new ApiError(400, 'INVALID_INPUT', '送花要指明送给哪篇文章');
       const post = store.get('post', input.targetId);
       if (!post || post.status !== 'approved') throw new ApiError(404, 'NOT_FOUND', '文章不存在或还没上线');
+      targetTitle = post.title;
       if (post.authorHandle === handle) throw new ApiError(409, 'SELF_TIP', '不能给自己的文章送花');
       // 作者已经注销：花送出去没人收得到（通知走「给作者看」的那条路，作者
       // 登不进来），等于白花 5 个 Token。直接说清楚，别让用户自己猜。
@@ -362,9 +365,9 @@ export function redeem(store: Store, handle: string, input: {
     // 「余额不足」抛出时，前面的 insert 会随事务一起回滚（见调用方的 transaction）。
     const entry = appendLedger(store, {
       handle, delta: -item.cost, reason: 'redeem',
-      // 带上目标：流水是用户唯一能自己核对「这笔钱花在哪」的地方，
-      // 只写「送一朵花」的话一次 20 朵的记录全都长得一样。
-      memo: `${item.name}（${item.cost} Token）${targetId ? `· ${targetId}` : ''}`.slice(0, 200),
+      // 带上目标**标题**而不是 id：流水是用户唯一能自己核对「这笔钱花在哪」的
+      // 地方，一串 uuid 在页面上没法认；标题是当时那篇的，之后改名也能对上。
+      memo: `${item.name}（${item.cost} Token）${targetTitle ? `· 《${targetTitle}》` : ''}`.slice(0, 200),
       at,
     });
     // 导出：响应里给完整内容（只此一次），库里只有摘要（见上）。
