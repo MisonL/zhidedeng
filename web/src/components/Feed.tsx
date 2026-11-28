@@ -20,13 +20,16 @@ interface FeedProps {
 }
 
 export default function Feed({ title, heading: Heading = 'h2', kind: fixedKind }: FeedProps) {
-  const [ownKind, setOwnKind] = useState<PostKind>('deal');
+  // 默认「全部」而不是「爆料」：新站往往先有评测/指南，默认停在爆料会让首屏
+  // 只剩一句「这里还没有内容」，新用户会以为站点是空的。
+  const [ownKind, setOwnKind] = useState<PostKind | ''>('');
   const [sort, setSort] = useState<PostSort>('latest');
   const [vendor, setVendor] = useState('');
   const { data: catalog } = useCatalog();
   const kind = fixedKind ?? ownKind;
   const paged = usePaged(
-    (page, signal) => api.getPosts({ kind, sort, vendor, page, pageSize: 10 }, signal),
+    // kind 为空串表示「全部」：请求里不带这个参数，服务端就不按类型过滤。
+    (page, signal) => api.getPosts({ ...(kind ? { kind } : {}), sort, vendor, page, pageSize: 10 }, signal),
     [kind, sort, vendor],
   );
 
@@ -36,6 +39,7 @@ export default function Feed({ title, heading: Heading = 'h2', kind: fixedKind }
         <Heading className="feed-title">{title}</Heading>
         {!fixedKind && (
           <div className="segmented">
+            <button type="button" className="segment" aria-pressed={kind === ''} onClick={() => setOwnKind('')}>全部</button>
             {FEED_KINDS.map((value) => (
               <button key={value} type="button" className="segment" aria-pressed={value === kind} onClick={() => setOwnKind(value)}>
                 {KIND_LABEL[value]}

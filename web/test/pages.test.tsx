@@ -107,6 +107,22 @@ describe('首页信息流', () => {
     });
   });
 
+  it('默认「全部」：不按类型过滤，新站不会因为默认停在「爆料」而首屏空白', async () => {
+    const fetchMock = stubApi({
+      'GET /api/posts': ({ url }: { url: URL }) =>
+        url.searchParams.get('pageSize') === '6' ? page([makePost('hot')]) : page([makePost('p1')]),
+    });
+    renderApp('/');
+    await screen.findAllByText(/爆料 p1/);
+    // 默认那一档必须是「全部」：kind 参数不该出现，否则只会拉一个类型。
+    const first = callsTo(fetchMock, 'GET', '/api/posts')[0]!.url.searchParams;
+    expect(first.get('kind')).toBeNull();
+    expect(screen.getByRole('button', { name: '全部' })).toHaveAttribute('aria-pressed', 'true');
+    // 切到具体类型后要带上 kind。
+    fireEvent.click(screen.getByRole('button', { name: '评测' }));
+    await waitFor(() => expect(callsTo(fetchMock, 'GET', '/api/posts').at(-1)!.url.searchParams.get('kind')).toBe('review'));
+  });
+
   it('错误与空态', async () => {
     let attempts = 0;
     stubApi({
@@ -203,10 +219,13 @@ describe('我的', () => {
 });
 
 describe('商务合作', () => {
-  it('不编造联系方式', () => {
+  it('不编造联系方式，但给出实际可用的三条通道', () => {
     stubApi();
     renderApp('/business');
-    expect(screen.getByText(/联系方式待配置/)).toBeInTheDocument();
+    // 只写「待配置」的话，按「联系管理员」提示过来的用户会卡在最后一步。
+    expect(screen.getByText(/暂未开通公开客服邮箱/)).toBeInTheDocument();
+    expect(screen.getByText(/一句话反馈/)).toBeInTheDocument();
+    expect(screen.getByText(/通过你提交内容时使用的渠道/)).toBeInTheDocument();
   });
 });
 
@@ -388,7 +407,7 @@ describe('撤下自己的文章', () => {
     fireEvent.click(screen.getByRole('button', { name: '撤下' }));
 
     await waitFor(() => expect(callsTo(fetchMock, 'DELETE', '/api/posts/mine-1')).toHaveLength(1));
-    expect(await screen.findByText(/已撤下。需要恢复请站内联系管理员/)).toBeInTheDocument();
+    expect(await screen.findByText(/已撤下。恢复只能由管理员操作，请通过提交内容时用的渠道/)).toBeInTheDocument();
   });
 
   it('撤下后页头的「分享」数字跟着更新，不会和列表自相矛盾', async () => {
@@ -412,7 +431,7 @@ describe('撤下自己的文章', () => {
 
     fireEvent.click(screen.getByRole('button', { name: '撤下这篇文章' }));
     fireEvent.click(screen.getByRole('button', { name: '撤下' }));
-    await screen.findByText(/已撤下。需要恢复请站内联系管理员/);
+    await screen.findByText(/已撤下。恢复只能由管理员操作，请通过提交内容时用的渠道/);
 
     // 撤下后必须重新取 /api/me，页头才会变成 0。
     await waitFor(() => expect(callsTo(fetchMock, 'GET', '/api/me').length).toBeGreaterThan(1));
@@ -437,7 +456,7 @@ describe('撤下自己的文章', () => {
     expect(shareCell()).toBe('1');
     fireEvent.click(screen.getByRole('button', { name: '撤下这篇文章' }));
     fireEvent.click(screen.getByRole('button', { name: '撤下' }));
-    await screen.findByText(/已撤下。需要恢复请站内联系管理员/);
+    await screen.findByText(/已撤下。恢复只能由管理员操作，请通过提交内容时用的渠道/);
     // 刷新失败，但本地先减一，所以页头不能还写着 1。
     await waitFor(() => expect(shareCell()).toBe('0'));
   });
@@ -647,7 +666,8 @@ describe('我的投稿里的撤下状态', () => {
     renderApp('/me?tab=submissions');
     expect(await screen.findByText('我撤下的那篇')).toBeInTheDocument();
     expect(screen.getByText('已撤下', { selector: '.tag' })).toBeInTheDocument();
-    expect(screen.getByText(/需要恢复请站内联系管理员/)).toBeInTheDocument();
+    // 投稿列表里这句写得更短，避免每张卡片重复一整段说明。
+    expect(screen.getByText(/恢复需通过提交渠道联系运营者/)).toBeInTheDocument();
     // 正文里不能再出现「已通过」——那是两套互相矛盾的说法。
     expect(screen.queryByText('已通过')).not.toBeInTheDocument();
   });
@@ -669,5 +689,37 @@ describe('举报入口的几种结局', () => {
     // 表单收起来了：不该还留着一个能反复点的「提交举报」。
     expect(screen.queryByRole('button', { name: '提交举报' })).not.toBeInTheDocument();
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+});
+
+describe('缺少数据时的空态', () => {
+  it('站点没有报价时给一句解释，而不是一张只有表头的空表', async () => {
+    stubApi({
+      'GET /api/stations/empty-shop': {
+        slug: 'empty-shop', name: '还没报价的站', description: '群友刚提交', url: 'https://e.example.com/',
+        source: 'submission', rechargeThreshold: null, paymentMethods: [], uptime: null,
+        firstTokenLatencyMs: null, foundedAt: null, status: null, score: null, lowestRate: null,
+        offers: [], votes: { up: 0, down: 0, total: 0 }, favorited: false, favoriteCount: 0,
+        stationVotes: { up: 0, down: 0, total: 0 }, feedbackCount: 0,
+      },
+    });
+    renderApp('/stations/empty-shop');
+    // 推荐站点时报价本来就允许留空，这类站很常见；空表头会被当成「没加载出来」。
+    expect(await screen.findByText(/这个站还没有报价/, {}, { timeout: 8000 })).toBeInTheDocument();
+  });
+});
+
+describe('「我的」页的签到入口', () => {
+  it('未签到时能直接签到，不必回首页找按钮', async () => {
+    const fetchMock = stubApi({
+      'POST /api/me/checkin': { tokens: 140, streak: 4, tokensAwarded: 10, checkedInToday: true },
+    });
+    renderApp('/me?tab=favorites');
+    const button = await screen.findByRole('button', { name: /签到领 Token/ }, { timeout: 8000 });
+    fireEvent.click(button);
+    // 签到入口原来只在首页用户卡上：从通知或「我的」进来的用户看到「连续签到 3」
+    // 却找不到在哪里签。
+    await waitFor(() => expect(callsTo(fetchMock, 'POST', '/api/me/checkin')).toHaveLength(1));
+    expect(await screen.findByText(/今天已签/)).toBeInTheDocument();
   });
 });

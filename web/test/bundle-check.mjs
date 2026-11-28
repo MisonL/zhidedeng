@@ -22,7 +22,13 @@ try {
   symlinkSync(join(webRoot, 'node_modules'), join(work, 'node_modules'));
   if (inject) writeFileSync(join(work, 'src/main.tsx'), `\n${inject}\n`, { flag: 'a' });
 
-  execFileSync("npx", ["vite", "build"], { cwd: work, stdio: 'pipe', env: { ...process.env, NODE_ENV: '' } });
+  // 用仓库里的 vite 可执行文件，不走 `npx`：
+  // npx 在 PATH 里找不到二进制时会**去 registry 下载一个**（曾经装到 vite 8.4，
+  // 与项目锁定的版本不同，报错还指向无关的 plugin-react 解析失败）。
+  // 临时目录里的 node_modules 是软链，npx 不一定跟进；直接给出绝对路径最稳。
+  const viteBin = join(webRoot, 'node_modules', '.bin', 'vite');
+  if (!existsSync(viteBin)) throw new Error(`找不到 ${viteBin}，先跑 pnpm install`);
+  execFileSync(viteBin, ['build'], { cwd: work, stdio: 'pipe', env: { ...process.env, NODE_ENV: '' } });
 
   const assets = join(work, 'dist/assets');
   const js = readdirSync(assets).filter((f) => f.endsWith('.js'));

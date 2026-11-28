@@ -16,7 +16,8 @@ const GROUPS: { title: string; routes: Partial<Record<ApiRouteName, { summary: s
     routes: {
       getMe: { summary: '当前账号，含 Token、签到状态、连续天数、收藏数和分享数' },
       updateMe: { summary: '修改资料', params: 'body: nickname?, bio?, avatar?（预设 emoji，空串回到默认）' },
-      deletePost: { summary: '作者撤下自己已发布的文章（软删除，恢复需联系管理员）', params: 'path: id' },
+      deletePost: { summary: '作者撤下自己已发布的文章（软删除，恢复只能由管理员操作）', params: 'path: id' },
+      deleteAccount: { summary: '注销账号：内容保留但署名匿名化，用户名永久占用，需管理员恢复', params: 'body: password' },
       checkIn: { summary: '每日签到，当天重复调用返回 409 ALREADY_CHECKED_IN' },
       getMyFavorites: { summary: '我的收藏', params: 'query: page, pageSize' },
       getMyPosts: { summary: '我的分享', params: 'query: page, pageSize' },
@@ -24,6 +25,18 @@ const GROUPS: { title: string; routes: Partial<Record<ApiRouteName, { summary: s
       createAgentToken: { summary: '签发 AI Agent 凭证，明文只返回一次；需满足注册时长、通过的投稿或邀请码之一', params: 'body: label（1~100 字）, inviteCode?' },
       getAgentTokens: { summary: '列出本人凭证的元数据数组，不含明文和哈希' },
       revokeAgentToken: { summary: '吊销本人凭证，重复调用保留首次吊销时间', params: 'path: id' },
+      getMyNotifications: { summary: '我的通知（投稿结果/举报处置/下架恢复/收到送花），拉模型，无未读数', params: 'query: page, pageSize' },
+      getMyTokens: { summary: 'Token 商店：余额、本月用量、可兑换项目与限制' },
+      redeemTokens: { summary: '兑换（送花/徽章/导出/补签）；同一幂等键重复调用返回首次结果，重放不再扣费', params: 'body: itemKey, targetId?, idempotencyKey' },
+      getTokenLedger: { summary: 'Token 流水（含每笔的余额快照，可直接对账）', params: 'query: page, pageSize' },
+    },
+  },
+  {
+    title: '文章修订',
+    routes: {
+      submitRevision: { summary: '编辑已发布文章：改动进入审核队列，线上仍是旧版', params: 'path: id；body 同发帖（需带 baseVersion）' },
+      getRevision: { summary: '当前待审/被拒的修订版本，用于回填表单' },
+      withdrawRevision: { summary: '撤回正在审核的修订（线上内容不变）' },
     },
   },
   {
@@ -70,7 +83,7 @@ const GROUPS: { title: string; routes: Partial<Record<ApiRouteName, { summary: s
   {
     title: '发现',
     routes: {
-      getRankings: { summary: '排行榜', params: 'query: tab=model|community|expert, page, pageSize' },
+      getRankings: { summary: '排行榜（模型/中转站/社区/达人）', params: 'query: tab=model|station|community|expert, page, pageSize' },
       getBanners: { summary: '首页 Banner' },
       search: { summary: '跨模型、中转站、文章搜索，每组最多 10 条', params: 'query: q' },
       getHotSearches: { summary: '热门搜索词' },

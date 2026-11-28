@@ -3,7 +3,7 @@ import type { FormEvent } from 'react';
 import { Link, useSearchParams } from 'react-router';
 import type { CurrentUser } from '@zhidedeng/shared';
 import { PROFILE_LIMITS } from '@zhidedeng/shared';
-import { api } from '../api';
+import { ApiError, api } from '../api';
 import AsyncView, { Empty, LoadMore, Skeleton } from '../components/AsyncView';
 import ConfirmButton from '../components/ConfirmButton';
 import PostCard from '../components/PostCard';
@@ -117,7 +117,7 @@ function MySubmissions() {
                     {item.status === 'approved' && to ? '已上线，点标题查看'
                       // 已通过但没有落地链接：作者自己撤下了，或管理员下架了。
                       // 这时说「已通过」会让人以为撤下没生效。
-                      : item.withdrawn ? '已撤下，需要恢复请站内联系管理员'
+                      : item.withdrawn ? '已撤下，恢复需通过提交渠道联系运营者'
                       : item.status === 'approved' ? '已通过'
                       // superseded 说明线上已经是同站的新版本，这条不必再等也不必改。
                       // 原先一律落到「审核后才会公开」，和上面的「已被新提交替代」互相矛盾。
@@ -192,7 +192,7 @@ function MyPosts() {
               <div key={post.id}>
                 <PostCard post={post} />
                 {post.status === 'approved' && (withdrawn.has(post.id)
-                  ? <p className="hint">已撤下。需要恢复请站内联系管理员。</p>
+                  ? <p className="hint">已撤下。恢复只能由管理员操作，请通过提交内容时用的渠道（飞书表单或群）联系运营者，附上文章标题。</p>
                   : (
                     <p className="hint">
                       {/* 编辑入口放在这里：作者发现写错时，「我的分享」是他第一个到的地方。 */}
@@ -335,6 +335,37 @@ const REASON_LABEL: Record<string, string> = {
   admin_grant: '管理员补发', admin_deduct: '管理员扣回', refund: '退款',
 };
 
+/**
+ * 「我的」页的签到按钮。
+ *
+ * 与首页的 UserCard 共用同一个接口，但这里不展示里程表动画——个人页是
+ * 用来对账与设置的，安静一点；签到结果通过 toast 告诉用户。
+ */
+function CheckInButton({ user }: { user: CurrentUser }) {
+  const me = useMe();
+  const toast = useToast();
+  const [busy, setBusy] = useState(false);
+  async function checkIn() {
+    setBusy(true);
+    try {
+      const result = await api.checkIn();
+      me.setMe({ ...user, tokens: result.tokens, streak: result.streak, checkedInToday: true });
+      toast(`签到成功，+${result.tokensAwarded} Token（连续 ${result.streak} 天）`);
+    } catch (error) {
+      toast((error as Error).message);
+      if (error instanceof ApiError && error.code === 'ALREADY_CHECKED_IN') await me.refreshMe();
+    } finally {
+      setBusy(false);
+    }
+  }
+  if (user.checkedInToday) return <span className="hint">　今天已签</span>;
+  return (
+    <button type="button" className="btn btn-small btn-red" disabled={busy} onClick={() => { void checkIn(); }}>
+      {busy ? '签到中…' : '签到领 Token'}
+    </button>
+  );
+}
+
 function Settings({ user }: { user: CurrentUser }) {
   const { setMe } = useMe();
   const [nickname, setNickname] = useState(user.nickname);
@@ -435,7 +466,7 @@ function DangerZone() {
       <p className="hint">
         注销后：立刻退出登录，Agent 凭证作废，投票与收藏清空，未审核的投稿作废。
         你的文章和评论会保留，但署名会变成「已注销用户 · 一串短码」，不再显示你的登录名。
-        <strong>用户名会永久占用，不能再注册回来</strong>；恢复只能联系管理员。
+        <strong>用户名会永久占用，不能再注册回来</strong>；恢复只能由管理员在审核台操作，请通过提交内容时用的渠道联系运营者。
         如果只是想从此退出，直接退出登录就够了，不必注销。
       </p>
       {!open
@@ -528,7 +559,15 @@ export default function Me() {
               </div>
               <dl className="me-stats">
                 <div><dt>Token</dt><dd className="num">{user.tokens}</dd></div>
-                <div><dt>连续签到</dt><dd className="num">{user.streak}</dd></div>
+                <div>
+                  <dt>连续签到</dt>
+                  <dd className="num">
+                    {user.streak}
+                    {/* 签到入口原来只在首页用户卡上：从通知或「我的」进来的用户
+                        看到「连续签到 3」却找不到在哪里签。这里也给一个。 */}
+                    <CheckInButton user={user} />
+                  </dd>
+                </div>
                 <div><dt>收藏</dt><dd className="num">{user.favoriteCount}</dd></div>
                 <div><dt>分享</dt><dd className="num">{user.shareCount}</dd></div>
               </dl>

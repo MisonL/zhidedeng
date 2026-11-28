@@ -912,6 +912,16 @@ export default function Admin() {
                   <div className="tags">
                     <span className="tag">{TARGET_LABEL[report.targetType]}</span>
                     <span className="tag">{report.reporterHandle}</span>
+                    {/* 举报的是评论时，最小处置是隐藏这条评论；原来只能下架
+                        整篇文章，处罚比问题本身重得多。 */}
+                    {report.targetType === 'comment' && (
+                      <button
+                        className="btn btn-small btn-ghost" disabled={busy}
+                        onClick={() => act(() => admin.hideComment(report.targetId, true), '已隐藏这条评论')}
+                      >
+                        隐藏评论
+                      </button>
+                    )}
                     {/* 举报后文章可能又改过：不标出来，审核员会拿新版内容去判断
                         旧版的问题（甚至把已经修好的问题当成还在）。 */}
                     {report.targetVersion !== null && (

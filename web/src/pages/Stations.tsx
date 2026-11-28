@@ -120,6 +120,11 @@ export function StationDetailPage() {
               </dl>
               <Feedback stationSlug={station.slug} demo={station.source === 'demo'} />
               <h2 className="section-title">模型倍率</h2>
+              {/* 没有报价的站很常见（推荐站点时报价本来就允许留空）。原来这里
+                  渲染一张只有表头的空表，读者会以为表格没加载出来。 */}
+              {station.offers.length === 0 ? (
+                <p className="state">这个站还没有报价。可以让提交者补充，或在「一句话反馈」里告诉我们。</p>
+              ) : (
               <div className="table-scroll">
                 <table className="data-table data-table-compact">
                   <thead><tr><th>模型</th><th>厂商</th><th>倍率</th><th>计价口径</th><th>报价时间</th></tr></thead>
@@ -136,6 +141,7 @@ export function StationDetailPage() {
                   </tbody>
                 </table>
               </div>
+              )}
             </>
           )}
         </AsyncView>

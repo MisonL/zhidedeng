@@ -5,6 +5,7 @@ import type { PostKind } from '@zhidedeng/shared';
 import { api } from '../api';
 import { displayTime } from '../format';
 import AsyncView, { Empty } from '../components/AsyncView';
+import ConfirmButton from '../components/ConfirmButton';
 import PostFields, { EMPTY_POST_FORM } from '../components/PostFields';
 import type { PostFormValue } from '../components/PostFields';
 import { useAsync } from '../hooks';
@@ -139,7 +140,14 @@ export default function PostEdit() {
                 <p className="demo-notice" role="note">
                   已有一版修改在审核中（{displayTime(pending.submittedAt)} 提交）。
                   想重新改就先撤回那一次。
-                  <button type="button" className="text-btn" onClick={withdraw} disabled={submitting}>撤回修改</button>
+                  {/* 撤回会把正在审核的那一版直接丢掉，而站内其它破坏性操作
+                      （下架、撤销修改、恢复账号）都走二次确认，这里保持一致。 */}
+                  <ConfirmButton
+                    label="撤回修改" tone="red" busy={submitting}
+                    description="撤回后这一版改动会被丢弃，线上内容保持不变。要重新改需要重新提交。"
+                    confirmLabel="确认撤回"
+                    onConfirm={async () => { await withdraw(); }}
+                  />
                 </p>
               )}
               {rejected && (
