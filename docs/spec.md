@@ -158,6 +158,7 @@ channel 是队列的来源渠道，source 是物化内容的展示来源，二�
 | GET | /api/admin/accounts/deleted | 已注销账号列表（handle、注销时间、在线文章数），只读 |
 | POST | /api/admin/accounts/:handle/restore | 恢复已注销账号：清 deletedAt 并重建 user 行，昵称回落为 handle；未注销 409 |
 | POST | /api/admin/accounts/:handle/tokens | 直接加减 Token（delta 非 0、memo 必填）；扣成负数 409。流水就是审计日志 |
+| POST | /api/admin/posts/:id/revert | 撤销最近一次「编辑上线」：内容退回修改前，版本继续 +1；没有可回退的修改 409。旧版在通过时存进 `submissions.previousPayload`，用掉即清空 |
 | GET | /api/admin/settings | 读取 autoApprove |
 | POST | /api/admin/settings | 设置 autoApprove，持久化到 settings 表 |
 | GET | /api/admin/posts | 必填 status=pending/approved/rejected，列出对应文章 |
