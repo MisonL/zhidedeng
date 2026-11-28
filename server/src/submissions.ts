@@ -810,6 +810,22 @@ function materialize(store: Store, submission: SubmissionRecord, reviewedAt: str
     // 种子演示站的 url 都是 null，正常同步认不到它们，所以现实中碰不到；
     // 真发生了也是「改内容、不改身份」，不是数据丢失。
     const previous = store.getWithRemoved('station', slug);
+    // 站点投稿是**整包替换**：描述覆盖、旧报价全删。管理员误批之后原本没有
+    // 任何回退路径（文章编辑稿有 previousPayload，站点没有），误操作等于把
+    // 一个站的报价历史永久删掉。所以通过前先把旧站与旧报价存一份快照。
+    if (previous) {
+      const oldOffers = store.db.prepare(
+        'SELECT modelSlug, rate, basis, quotedAt FROM offers WHERE stationSlug = ? ORDER BY modelSlug',
+      ).all(slug);
+      store.db.prepare('UPDATE submissions SET previousPayload = ?, targetStationSlug = ? WHERE id = ?').run(JSON.stringify({
+        station: {
+          name: previous.name, description: previous.description, url: previous.url ?? null,
+          rechargeThreshold: previous.rechargeThreshold ?? null, paymentMethods: previous.paymentMethods ?? [],
+          source: previous.source,
+        },
+        offers: oldOffers,
+      }), slug, submission.id);
+    }
     // 更新已有 slug 时保留最初来源，不能把飞书站点改标成 AI 采集。
     // 指标字段（可用率、首字延迟、成立时间、运行状态）投稿 payload 里根本没有，
     // 全站也没有别的写入入口。这里必须沿用旧值：写 null 等于「每次同步都把

@@ -35,7 +35,8 @@ beforeEach(() => {
  * 必须再点「确认全部通过」才真的提交。所有走批量审核的用例都从这里进。
  */
 async function confirmApproveAll() {
-  fireEvent.click(await screen.findByRole('button', { name: '全部通过' }));
+  // 按钮文案现在带条数（「全部通过（N 条新增/更新）」），并把下架请求拆到另一个按钮。
+  fireEvent.click(await screen.findByRole('button', { name: /^全部通过/ }));
   fireEvent.click(await screen.findByRole('button', { name: '确认全部通过' }));
 }
 
@@ -229,9 +230,10 @@ describe('审核台的批量语义', () => {
   it('取消二次确认时不发批量请求', async () => {
     const fetchMock = stubApi({ 'GET /api/admin/submissions': { items: [submission], total: 1 } });
     await unlock();
-    fireEvent.click(await screen.findByRole('button', { name: '全部通过' }));
+    // 按钮文案现在带条数（「全部通过（N 条新增/更新）」），并把下架请求拆到另一个按钮。
+    fireEvent.click(await screen.findByRole('button', { name: /^全部通过/ }));
     // 展开后点「取消」：不该发出任何批量请求。
-    expect(screen.getByText(/确认通过全部 1 条待审投稿/)).toBeInTheDocument();
+    expect(screen.getByText(/确认通过 1 条新增\/更新投稿/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: '取消' }));
     expect(callsTo(fetchMock, 'POST', '/api/admin/submissions/batch-review')).toHaveLength(0);
     expect(screen.queryByRole('button', { name: '确认全部通过' })).not.toBeInTheDocument();

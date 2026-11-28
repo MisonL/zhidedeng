@@ -314,12 +314,16 @@ export default function Admin() {
    * 批量审核。服务端逐条独立事务，单条失败不改 HTTP 状态码，
    * 只把错误放进 results[].error——不看它就会把部分失败报成全部成功。
    */
-  async function approveAll() {
+  async function approveAll(only?: 'remove' | 'upsert') {
+    // only 把「下架站点」和「新增/更新」分开批：下架请求通过之后站点就从线上
+    // 消失，和「放一条投稿出去」是完全两种后果，混在一个「全部通过」里
+    // 一点就是不可逆的删除。不给 only 时保持全量行为（确认文案会写明含多少条下架）。
+    //
     // 站点/模型必须排在文章前面：文章物化时要靠 hostname 反查站点 slug，
     // 站点还没通过的话 stationSlug 会落成 null。服务端只在单次请求内排序，
     // 超过 BATCH_REVIEW_LIMIT 时分块会把这个保证切断——所以在这里先排好，
     // 再按顺序切块，块间也保持依赖顺序（与服务端 orderByMaterializeDependency 同规则）。
-    const ordered = [...(submissions ?? [])].sort(
+    const ordered = (submissions ?? []).filter(item => !only || item.action === only).sort(
       (a, b) => Number(a.kind === 'post') - Number(b.kind === 'post'),
     );
     const ids = ordered.map(item => item.id);
@@ -492,6 +496,9 @@ export default function Admin() {
   }
 
   const pendingSubmissions = submissions ?? [];
+  // 按 action 拆开：下架与新增/更新的后果完全不同（见 approveAll 的注释）。
+  const pendingRemovals = pendingSubmissions.filter(item => item.action === 'remove');
+  const pendingUpserts = pendingSubmissions.filter(item => item.action !== 'remove');
   // 站点类投稿要拿线上当前状态做对比；已下架的站点不在 catalog 里，按「新建」提示。
   /**
    * 站点投稿 payload 里**没有 slug**（只有 name/description/url/报价等），
@@ -617,12 +624,24 @@ export default function Admin() {
                 {/* 通过不可撤销：服务端对非 pending 一律 409 ALREADY_REVIEWED。
                     站点以自动运行为主，但一次误点把几百条全放出去没有回退手段，
                     所以这里必须二次确认，且和其它破坏性操作共用同一个组件。 */}
-                <ConfirmButton
-                  label="全部通过" busy={busy} tone="red"
-                  description={`确认通过全部 ${pendingSubmissions.length} 条待审投稿？此操作不可撤销。`}
-                  confirmLabel="确认全部通过"
-                  onConfirm={() => approveAll()}
-                />
+                {/* 下架请求和新增/更新分开批：前者一通过站点就从线上消失，
+                    后者是放内容上线。混在一个按钮里，一次误点就是不可逆的删除。 */}
+                {pendingUpserts.length > 0 && (
+                  <ConfirmButton
+                    label={`全部通过（${pendingUpserts.length} 条新增/更新）`} busy={busy} tone="red"
+                    description={`确认通过 ${pendingUpserts.length} 条新增/更新投稿？此操作不可撤销。`}
+                    confirmLabel="确认全部通过"
+                    onConfirm={() => approveAll('upsert')}
+                  />
+                )}
+                {pendingRemovals.length > 0 && (
+                  <ConfirmButton
+                    label={`批准下架（${pendingRemovals.length} 条）`} busy={busy} tone="red"
+                    description={`确认批准 ${pendingRemovals.length} 条下架请求？站点会立刻从线上消失，可在「已下架」里恢复。`}
+                    confirmLabel="确认批准下架"
+                    onConfirm={() => approveAll('remove')}
+                  />
+                )}
               </div>
               <ul className="card-list">
                 {pendingSubmissions.map(item => (
@@ -733,6 +752,17 @@ export default function Admin() {
                     </p>
                   )}
                   <p className="hint">{post.summary}</p>
+                  {/* 正文必须能展开：同一篇站内新稿在「待审投稿」里能看到正文，
+                      而这里的卡片原来只有标题和摘要——只在文章页签审的人会凭标题
+                      就点通过，还看不到另一处更全的信息。 */}
+                  {post.body && (
+                    <details className="payload-detail">
+                      <summary>展开正文</summary>
+                      {post.body.split('\n').filter((line: string) => line.trim()).slice(0, 40).map((line: string, index: number) => (
+                        <p className="hint" key={`${post.id}-body-${index}`}>{line}</p>
+                      ))}
+                    </details>
+                  )}
                   {rejectingPost === post.id && (
                     <div className="field">
                       <label className="field-label" htmlFor={`post-reason-${post.id}`}>驳回理由（必填，作者可见）</label>
@@ -853,8 +883,11 @@ export default function Admin() {
             <ul className="card-list">
               {withdrawnPosts.map(post => (
                 <li key={post.id}>
-                  <p>{post.id}</p>
-                  <p className="hint">下架于 {displayTime(post.removedAt)}</p>
+                  {/* 标题放在最前：误下架之后管理员是按标题认人的，一串 id 没法判断。 */}
+                  <p>{post.title}</p>
+                  <p className="hint">
+                    {post.authorHandle ?? '匿名'}　下架于 {displayTime(post.removedAt)}　<span className="num">{post.id}</span>
+                  </p>
                   <div className="tags">
                     <button
                       className="btn btn-small btn-red" disabled={busy}
@@ -996,6 +1029,14 @@ export default function Admin() {
                     >
                       恢复
                     </button>
+                    {/* 站点投稿是整包替换：误批之后内容与报价都被覆盖了，「恢复」
+                        只能恢复下架状态，恢复不了上一版内容。这里给撤回上一版投稿。 */}
+                    <ConfirmButton
+                      label="退回上次投稿前" tone="red" busy={busy}
+                      description={`把「${station.slug}」的内容与报价整体退回上一次投稿之前？现在展示的投稿内容会被替换。`}
+                      confirmLabel="确认退回"
+                      onConfirm={async () => { await act(() => admin.revertStation(station.slug), '已退回上次投稿前'); }}
+                    />
                   </div>
                 </li>
               ))}

@@ -154,6 +154,35 @@ describe('审核物化', () => {
     expect(offers()).toEqual([{ modelSlug: 'gpt-4-1', rate: 0.5 }]);
   });
 
+  it('站点投稿整包替换会存快照，管理员能把内容和报价退回上一版', async () => {
+    store.put('station', 'sub-api-example-com', existingStation('submission'));
+    server.db.prepare('INSERT INTO offers (stationSlug, modelSlug, rate) VALUES (?, ?, ?)').run('sub-api-example-com', 'o3', 0.7);
+    const submission = queue({ payload: { ...stationPayload, name: '覆盖后的名字', offers: [{ modelSlug: 'gpt-4-1', rate: 0.5 }] } }).submission;
+    approve(submission.id);
+    expect(store.get('station', 'sub-api-example-com')?.name).toBe('覆盖后的名字');
+
+    const reverted = await server.app.request('/api/admin/stations/sub-api-example-com/revert', { method: 'POST', headers: admin });
+    expect(reverted.status).toBe(200);
+    // 站点投稿是整包替换（描述覆盖 + 报价全删重建）。没有回退路径的话，
+    // 一次误批就等于把这个站的报价历史永久删掉。
+    expect(store.get('station', 'sub-api-example-com')).toMatchObject({ name: '旧站点', description: '旧描述' });
+    expect(offers()).toEqual([{ modelSlug: 'o3', rate: 0.7 }]);
+
+    // 同一份快照只能用一次，否则会反复把站点拉回旧版。
+    const again = await server.app.request('/api/admin/stations/sub-api-example-com/revert', { method: 'POST', headers: admin });
+    expect(again.status).toBe(409);
+  });
+
+  it('首次上线的新站没有旧版可退：明确 409 而不是假装成功', async () => {
+    const submission = queue().submission;
+    approve(submission.id);
+    const reverted = await server.app.request('/api/admin/stations/sub-api-example-com/revert', { method: 'POST', headers: admin });
+    expect(reverted.status).toBe(409);
+    expect(await reverted.json()).toMatchObject({ error: { code: 'NOTHING_TO_REVERT' } });
+    // 站点没被动过。
+    expect(store.get('station', 'sub-api-example-com')?.name).toBe('投稿示例站');
+  });
+
   it('station slug 转小写并合并连续连字符', () => {
     const submission = queue({ originKey: 'API--Example.COM', payload: { ...stationPayload, url: 'https://api--example.com/' } }).submission;
     approve(submission.id);

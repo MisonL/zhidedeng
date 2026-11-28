@@ -19,7 +19,7 @@ import type { Store } from './database.ts';
 import { Service, isReservedNickname, normalizeNickname } from './service.ts';
 import { ApiError, isDatabaseBusyError } from './errors.ts';
 import { createInviteCode, listInviteCodes, revokeInviteCode } from './invite-codes.ts';
-import { adjustTokens, listDeletedAccounts, listPosts, revertRevision, listReports, resolveReport, restoreAccount, restorePost, reviewPost, setAccountDisabled, setCommentHidden, withdrawPost } from './moderation.ts';
+import { adjustTokens, listDeletedAccounts, listPosts, revertRevision, revertStation, listReports, resolveReport, restoreAccount, restorePost, reviewPost, setAccountDisabled, setCommentHidden, withdrawPost } from './moderation.ts';
 import { autoApproveEnabled, enqueueBatch, enqueueSubmission, listSubmissions, reviewSubmission, setAutoApprove, submissionBatchReviewSchema, submissionBatchSchema, submissionQuerySchema, submissionReviewSchema, submissionState } from './submissions.ts';
 
 /**
@@ -553,8 +553,20 @@ function orderByMaterializeDependency(store: Store, ids: string[]): string[] {
   app.post('/api/admin/posts/:id/withdraw', c => c.json(withdrawPost(store, c.req.param('id'), now().toISOString())));
   app.post('/api/admin/posts/:id/restore', c => c.json(restorePost(store, c.req.param('id'), now)));
   app.get('/api/admin/posts/removed', c => {
-    const rows = store.db.prepare("SELECT id, removedAt FROM entities WHERE kind = 'post' AND removedAt IS NOT NULL ORDER BY removedAt DESC").all();
-    return c.json({ items: rows.map(row => ({ id: row.id as string, removedAt: row.removedAt as string })) });
+    const rows = store.db.prepare(
+      "SELECT id, removedAt, data FROM entities WHERE kind = 'post' AND removedAt IS NOT NULL ORDER BY removedAt DESC",
+    ).all() as Array<{ id: string; removedAt: string; data: string }>;
+    // 只给 id 是不够的：误下架之后管理员面对一串 `sub-3f2a…` 根本认不出该恢复
+    // 哪一篇，只能赌。带上标题与作者，让他按标题认人。
+    return c.json({
+      items: rows.map(row => {
+        const post = JSON.parse(row.data) as { title?: string; authorHandle?: string };
+        return {
+          id: row.id as string, removedAt: row.removedAt as string,
+          title: post.title ?? row.id, authorHandle: post.authorHandle ?? null,
+        };
+      }),
+    });
   });
   app.post('/api/admin/posts/:id/review', async c => {
     // 只接受终态。放开 'pending' 有两条坏路：队列投稿会被 reviewPost 映射成
@@ -580,6 +592,11 @@ function orderByMaterializeDependency(store: Store, ids: string[]): string[] {
   app.post('/api/admin/accounts/:handle/restore', async c => {
     const { handle } = z.strictObject({ handle: z.string().trim().min(1).max(200) }).parse(c.req.param());
     return c.json(restoreAccount(store, handle, now()));
+  });
+  // 撤销最近一次站点投稿上线：站点投稿是整包替换，没有回退就等于删报价历史。
+  app.post('/api/admin/stations/:slug/revert', async c => {
+    const { slug } = z.strictObject({ slug: z.string().trim().min(1).max(200) }).parse(c.req.param());
+    return c.json(revertStation(store, slug, now()));
   });
   // 撤销最近一次编辑上线：误批之后能退回上一版，而不是只能下架。
   app.post('/api/admin/posts/:id/revert', async c => {

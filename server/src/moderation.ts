@@ -209,6 +209,47 @@ export function revertRevision(store: Store, postId: string, now: Date) {
 }
 
 /**
+ * 撤销最近一次「站点投稿上线」：把站点内容与报价整体退回上一版。
+ *
+ * 站点投稿是整包替换（描述覆盖、`DELETE FROM offers` 后重写），误批一次就把
+ * 这个站的报价历史删干净了，而站点没有文章那样的「下架再恢复」可用——下架
+ * 保留的是**新**内容。所以通过时存快照（submissions.previousPayload），
+ * 这里按快照整体写回，并把报价一起还原。
+ */
+export function revertStation(store: Store, slug: string, now: Date) {
+  return store.transaction(() => {
+    const station = store.getWithRemoved('station', slug);
+    if (!station) throw new ApiError(404, 'NOT_FOUND', '站点不存在');
+    const row = store.db.prepare(
+      `SELECT id, previousPayload FROM submissions
+        WHERE status = 'approved' AND previousPayload IS NOT NULL AND targetStationSlug = ?
+        ORDER BY reviewedAt DESC, rowid DESC LIMIT 1`,
+    ).get(slug) as { id: string; previousPayload: string } | undefined;
+    if (!row) throw new ApiError(409, 'NOTHING_TO_REVERT', '这个站点没有可回退的投稿');
+    const snapshot = JSON.parse(row.previousPayload) as {
+      station: { name: string; description: string; url: string | null; rechargeThreshold: number | null; paymentMethods: string[] };
+      offers: Array<{ modelSlug: string; rate: number; basis: string; quotedAt: string | null }>;
+    };
+    store.put('station', slug, {
+      ...station,
+      name: snapshot.station.name, description: snapshot.station.description,
+      url: snapshot.station.url, rechargeThreshold: snapshot.station.rechargeThreshold,
+      paymentMethods: snapshot.station.paymentMethods,
+    });
+    store.db.prepare('DELETE FROM offers WHERE stationSlug = ?').run(slug);
+    const insert = store.db.prepare(
+      'INSERT INTO offers (stationSlug, modelSlug, rate, basis, quotedAt) VALUES (?, ?, ?, ?, ?)',
+    );
+    for (const offer of snapshot.offers) {
+      insert.run(slug, offer.modelSlug, offer.rate, offer.basis, offer.quotedAt);
+    }
+    // 用掉即清空：同一份快照不能被反复「回退」成同一个旧版。
+    store.db.prepare('UPDATE submissions SET previousPayload = NULL WHERE id = ?').run(row.id);
+    return { slug, restoredName: snapshot.station.name, offerCount: snapshot.offers.length };
+  });
+}
+
+/**
  * 管理员直接加减 Token。
  *
  * 只给了「补发」和「扣回」两种用途，都要写理由：流水就是审计日志，一条没有

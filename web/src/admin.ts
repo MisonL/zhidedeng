@@ -84,6 +84,8 @@ export interface AdminPostRow {
   targetTitle?: string | null;
   /** 相对线上版本变了哪几个字段（标题/摘要/正文/关联项）。 */
   changedFields?: string[];
+  /** 正文：审核台要能展开看全文，不能只凭标题摘要点通过。 */
+  body?: string;
   /** 文章当前是第几版。>1 才有「撤销上次修改」可言。 */
   contentVersion?: number;
 }
@@ -130,6 +132,9 @@ export interface RemovedStation {
 export interface RemovedPost {
   id: string;
   removedAt: string;
+  /** 标题：只给 id 的话，误下架后管理员认不出该恢复哪一篇。 */
+  title: string;
+  authorHandle: string | null;
 }
 
 export const admin = {
@@ -164,6 +169,9 @@ export const admin = {
     request<{ results: BatchReviewResult[] }>('/api/admin/submissions/batch-review', {
       method: 'POST', body: { ids, status, ...(reason ? { reason } : {}) },
     }),
+  // 撤销最近一次站点投稿上线：整包替换不可逆，误批会删掉报价历史。
+  revertStation: (slug: string) =>
+    request<{ slug: string; restoredName: string; offerCount: number }>(`/api/admin/stations/${encodeURIComponent(slug)}/revert`, { method: 'POST' }),
   // 撤销最近一次编辑上线：误批之后退回上一版，而不是只能下架。
   revertRevision: (id: string) =>
     request<{ postId: string; restoredVersion: number; title: string }>(`/api/admin/posts/${encodeURIComponent(id)}/revert`, { method: 'POST' }),

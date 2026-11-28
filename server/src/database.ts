@@ -224,6 +224,9 @@ export const SCHEMA = `
     -- 编辑上线时被替换掉的线上版正文。管理员误批之后要能退回上一版，
     -- 不留这一份就只能「下架」，等于把一个误操作变成一次内容删除。
     previousPayload TEXT,
+    -- 站点投稿对应的 slug。回退时要能按 slug 精确找到「这个站的上一版」，
+    -- 用 payload LIKE '%slug%' 会误命中（一个 slug 常常是另一个的前缀）。
+    targetStationSlug TEXT,
     targetPostId TEXT,
     baseVersion INTEGER
   );
@@ -516,6 +519,7 @@ export function ensureSubmissionColumns(store: Store) {
     ensureColumn(store.db, 'targetPostId', 'TEXT');
     ensureColumn(store.db, 'baseVersion', 'INTEGER');
     ensureColumn(store.db, 'previousPayload', 'TEXT');
+    ensureColumn(store.db, 'targetStationSlug', 'TEXT');
     store.db.prepare('CREATE INDEX IF NOT EXISTS submissions_batch ON submissions(batchId, status)').run();
     store.db.prepare('CREATE INDEX IF NOT EXISTS submissions_dedupe ON submissions(kind, originKey, action, batchId, payloadHash, status, createdAt)').run();
   });
