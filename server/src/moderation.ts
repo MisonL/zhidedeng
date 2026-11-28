@@ -1,4 +1,4 @@
-import type { AdminDisableUserResponse, PostStatus } from '@zhidedeng/shared';
+import type { AdminDisableUserResponse, Post, PostStatus } from '@zhidedeng/shared';
 import type { Store } from './database.ts';
 import { ApiError } from './errors.ts';
 import { appendLedger, balanceOf } from './tokens.ts';
@@ -12,7 +12,11 @@ import { reviewSubmission } from './submissions.ts';
 export function listPosts(store: Store, status: PostStatus) {
   const items = store.all('post').filter(post => post.status === status)
     .sort((a, b) => comparePublishedAt(a.publishedAt, b.publishedAt))
-    .map(({ id, kind, title, summary, body, authorHandle, stationSlug, modelSlug, publishedAt, status: current }) => ({ id, kind, title, summary, body, authorHandle, stationSlug, modelSlug, publishedAt, status: current }));
+    .map(({ id, kind, title, summary, body, authorHandle, stationSlug, modelSlug, publishedAt, status: current, contentVersion }) => ({
+      id, kind, title, summary, body, authorHandle, stationSlug, modelSlug, publishedAt, status: current,
+      // 版本号决定「撤销上次修改」按钮出不出来。
+      contentVersion: contentVersion ?? 1,
+    }));
   // 站内投稿已进统一队列，物化前只在 submissions 里，不列出来审核员就看不到。
   // 排除已物化的：物化时 post id 就是 submission id，两边都查会列出同一条两次。
   const queued = store.db.prepare(
@@ -21,7 +25,11 @@ export function listPosts(store: Store, status: PostStatus) {
     const payload = JSON.parse(row.payload as string) as { kind: string; title: string; summary: string; body: string; stationSlug: string | null; modelSlug: string | null };
     const targetPostId = (row.targetPostId as string | null) ?? null;
     if (!targetPostId) {
-      return { id: row.id as string, ...payload, authorHandle: row.actorHandle as string | null, publishedAt: row.createdAt as string, status, editOf: null, targetTitle: null, changedFields: [] as string[] };
+      return {
+        id: row.id as string, ...payload, authorHandle: row.actorHandle as string | null,
+        publishedAt: row.createdAt as string, status, editOf: null, targetTitle: null,
+        changedFields: [] as string[], contentVersion: 1,
+      };
     }
     // 编辑某篇文章的投稿：审核员要一眼看出「这是某篇的新版本」，而不是以为
     // 又冒出一篇新文章。顺便把哪几个字段变了算出来——不做字符级 diff，
@@ -33,6 +41,7 @@ export function listPosts(store: Store, status: PostStatus) {
       id: row.id as string, ...payload, authorHandle: row.actorHandle as string | null,
       publishedAt: row.createdAt as string, status,
       editOf: targetPostId, targetTitle: live?.title ?? null, changedFields,
+      contentVersion: live?.contentVersion ?? 1,
     };
   }).filter(item => item.editOf === null || status === 'pending');
   // 已审核过的编辑不是「一篇文章」，不该出现在文章列表里；只有待审的才需要
@@ -159,6 +168,43 @@ export function recordPostEvent(
 
 /** 禁用后所有会话立即失效，公开内容保留；恢复后要重新登录。 */
 /**
+ * 撤销最近一次「编辑上线」：把文章退回上一版。
+ *
+ * 误批是真实会发生的（审核台一条一条点，编辑稿和普通投稿长得很像）。没有这条
+ * 回退路径，唯一的补救就是「下架」，等于把一个误操作变成一次内容删除——
+ * 作者看到的是文章没了，而不是「改回原样」。
+ *
+ * 只回退**最近一次**且尚未回退过的编辑；回退本身也升一版（v+1），这样
+ * 「改过才能再报」和「更新于」仍然成立，也不会把举报快照搅乱。
+ */
+export function revertRevision(store: Store, postId: string, now: Date) {
+  const at = now.toISOString();
+  return store.transaction(() => {
+    const post = store.get('post', postId);
+    if (!post) throw new ApiError(404, 'NOT_FOUND', '文章不存在');
+    const row = store.db.prepare(
+      `SELECT id, previousPayload FROM submissions
+        WHERE targetPostId = ? AND status = 'approved' AND previousPayload IS NOT NULL
+        ORDER BY reviewedAt DESC, rowid DESC LIMIT 1`,
+    ).get(postId) as { id: string; previousPayload: string } | undefined;
+    if (!row) throw new ApiError(409, 'NOTHING_TO_REVERT', '这篇文章没有可回退的修改');
+    const previous = JSON.parse(row.previousPayload) as {
+      kind: Post['kind']; title: string; summary: string; body: string;
+      stationSlug: string | null; modelSlug: string | null;
+    };
+    store.put('post', postId, {
+      ...post,
+      kind: previous.kind, title: previous.title, summary: previous.summary, body: previous.body,
+      stationSlug: previous.stationSlug, modelSlug: previous.modelSlug,
+      contentVersion: (post.contentVersion ?? 1) + 1, revisedAt: at,
+    });
+    // 清掉这一份，避免同一次编辑被反复「回退」成同一个旧版。
+    store.db.prepare('UPDATE submissions SET previousPayload = NULL WHERE id = ?').run(row.id);
+    return { postId, restoredVersion: (post.contentVersion ?? 1) + 1, title: previous.title };
+  });
+}
+
+/**
  * 管理员直接加减 Token。
  *
  * 只给了「补发」和「扣回」两种用途，都要写理由：流水就是审计日志，一条没有
@@ -281,6 +327,14 @@ export interface ReportRow {
   targetAlive: boolean;
   /** 展示用的一句摘要（文章标题/站点名/评论正文前 40 字）。 */
   targetLabel: string;
+  /**
+   * 举报发生时文章是第几版（举报那一刻的快照）。非文章目标为 null。
+   * 与 currentVersion 一起看：两者不同说明「被举报的内容已经改过了」，
+   * 审核员不该拿新版内容去判断旧版的问题。
+   */
+  targetVersion: number | null;
+  /** 文章此刻的版本号。 */
+  currentVersion: number | null;
 }
 
 /**
@@ -316,11 +370,11 @@ export function listReports(
   const after = parseCursor(cursor);
   const rows = (after === null
     ? store.db.prepare(
-      `SELECT rowid, id,targetType,targetId,reporterHandle,reason,detail,status,createdAt,handledAt
+      `SELECT rowid, id,targetType,targetId,reporterHandle,reason,detail,status,createdAt,handledAt,targetVersion
        FROM reports WHERE status = ? ORDER BY createdAt DESC, rowid DESC LIMIT ?`,
     ).all(status, pageSize)
     : store.db.prepare(
-      `SELECT rowid, id,targetType,targetId,reporterHandle,reason,detail,status,createdAt,handledAt
+      `SELECT rowid, id,targetType,targetId,reporterHandle,reason,detail,status,createdAt,handledAt,targetVersion
        FROM reports WHERE status = ? AND (createdAt < ? OR (createdAt = ? AND rowid < ?))
        ORDER BY createdAt DESC, rowid DESC LIMIT ?`,
     ).all(status, after.createdAt, after.createdAt, after.rowid, pageSize)) as unknown as Array<
@@ -333,21 +387,24 @@ export function listReports(
   const inList = (ids: readonly string[]) => ids.map(() => '?').join(', ');
 
   // post 与 station 都是 entities 里的行，一次查完两种 kind。
-  const entityInfo = new Map<string, { alive: boolean; label: string }>();
+  const entityInfo = new Map<string, { alive: boolean; label: string; version: number | null }>();
   const entityIds = [...postIds, ...stationIds];
   if (entityIds.length > 0) {
     const found = store.db.prepare(
       `SELECT kind, id, data, removedAt FROM entities WHERE kind IN ('post','station') AND id IN (${inList(entityIds)})`,
     ).all(...entityIds) as Array<{ kind: string; id: string; data: string; removedAt: string | null }>;
     for (const row of found) {
-      const data = JSON.parse(row.data) as { title?: string; name?: string };
+      const data = JSON.parse(row.data) as { title?: string; name?: string; contentVersion?: number };
       entityInfo.set(`${row.kind}:${row.id}`, {
         alive: row.removedAt === null,
         label: (row.kind === 'post' ? data.title : data.name) ?? row.id,
+        // 当前是第几版：举报如果对着旧版提的，审核员得知道「现在看到的已经不是
+        // 被举报的那一版」，否则会按新版内容下判断。
+        version: row.kind === 'post' ? (data.contentVersion ?? 1) : null,
       });
     }
   }
-  const commentInfo = new Map<string, { alive: boolean; label: string }>();
+  const commentInfo = new Map<string, { alive: boolean; label: string; version: number | null }>();
   if (commentIds.length > 0) {
     const found = store.db.prepare(
       `SELECT id, content, hidden, deletedAt FROM comments WHERE id IN (${inList(commentIds)})`,
@@ -356,6 +413,7 @@ export function listReports(
       commentInfo.set(comment.id, {
         alive: comment.hidden === 0 && comment.deletedAt === null,
         label: comment.content.slice(0, 40) || '（已删除的评论）',
+        version: null,
       });
     }
   }
@@ -366,7 +424,12 @@ export function listReports(
       : row.targetType === 'station' ? entityInfo.get(`station:${row.targetId}`) : commentInfo.get(row.targetId);
     // 查不到 = 对象已经不在库里。这仍然是「不在线」，标签回落到 id 而不是留空，
     // 让审核员一眼看出这是个已经消失的对象。
-    return { ...row, targetAlive: info?.alive ?? false, targetLabel: info?.label ?? row.targetId };
+    return {
+      ...row, targetAlive: info?.alive ?? false, targetLabel: info?.label ?? row.targetId,
+      targetVersion: row.targetVersion ?? null,
+      // 举报时是第 N 版、现在第 M 版：两者不同说明内容已经改过。
+      currentVersion: info?.version ?? null,
+    };
   });
 
   const last = rows.at(-1);

@@ -866,6 +866,12 @@ function materialize(store: Store, submission: SubmissionRecord, reviewedAt: str
         // 内容确实变了才升版（见上面 unchanged）。
         ...(unchanged ? {} : { contentVersion: (before.contentVersion ?? 1) + 1, revisedAt: reviewedAt }),
       });
+      // 存下被替换掉的线上版：管理员误批之后要能退回去。不留这一份，
+      // 「撤销这次修改」就只能靠下架，等于把误操作变成一次内容删除。
+      store.db.prepare('UPDATE submissions SET previousPayload = ? WHERE id = ?').run(JSON.stringify({
+        kind: before.kind, title: before.title, summary: before.summary, body: before.body,
+        stationSlug: before.stationSlug ?? null, modelSlug: before.modelSlug ?? null,
+      }), submission.id);
       return;
     }
     store.put('post', submission.id, {

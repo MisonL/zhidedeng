@@ -19,7 +19,7 @@ import type { Store } from './database.ts';
 import { Service, isReservedNickname, normalizeNickname } from './service.ts';
 import { ApiError, isDatabaseBusyError } from './errors.ts';
 import { createInviteCode, listInviteCodes, revokeInviteCode } from './invite-codes.ts';
-import { adjustTokens, listDeletedAccounts, listPosts, listReports, resolveReport, restoreAccount, restorePost, reviewPost, setAccountDisabled, setCommentHidden, withdrawPost } from './moderation.ts';
+import { adjustTokens, listDeletedAccounts, listPosts, revertRevision, listReports, resolveReport, restoreAccount, restorePost, reviewPost, setAccountDisabled, setCommentHidden, withdrawPost } from './moderation.ts';
 import { autoApproveEnabled, enqueueBatch, enqueueSubmission, listSubmissions, reviewSubmission, setAutoApprove, submissionBatchReviewSchema, submissionBatchSchema, submissionQuerySchema, submissionReviewSchema, submissionState } from './submissions.ts';
 
 /**
@@ -575,6 +575,11 @@ function orderByMaterializeDependency(store: Store, ids: string[]): string[] {
   app.post('/api/admin/accounts/:handle/restore', async c => {
     const { handle } = z.strictObject({ handle: z.string().trim().min(1).max(200) }).parse(c.req.param());
     return c.json(restoreAccount(store, handle, now()));
+  });
+  // 撤销最近一次编辑上线：误批之后能退回上一版，而不是只能下架。
+  app.post('/api/admin/posts/:id/revert', async c => {
+    const { id } = z.strictObject({ id: z.string().trim().min(1).max(200) }).parse(c.req.param());
+    return c.json(revertRevision(store, id, now()));
   });
   // 直接加减 Token。只用于补偿与扣回，理由必填。
   app.post('/api/admin/accounts/:handle/tokens', async c => {

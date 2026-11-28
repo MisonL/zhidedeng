@@ -827,6 +827,16 @@ export default function Admin() {
                     >
                       下架
                     </button>
+                    {/* 编辑稿和普通投稿在列表里长得一样，手一滑就会批错。没有这条
+                        回退路径，唯一的补救是「下架」——把误操作变成一次内容删除。 */}
+                    {post.contentVersion !== undefined && post.contentVersion > 1 && (
+                      <ConfirmButton
+                        label="撤销上次修改" tone="red" busy={busy}
+                        description={`把《${post.title}》退回上一版？现在第 ${post.contentVersion} 版，撤销后变成第 ${post.contentVersion + 1} 版（内容回到修改前）。`}
+                        confirmLabel="确认撤销"
+                        onConfirm={async () => { await act(() => admin.revertRevision(post.id), '已退回上一版'); }}
+                      />
+                    )}
                   </div>
                 </li>
               ))}
@@ -869,6 +879,15 @@ export default function Admin() {
                   <div className="tags">
                     <span className="tag">{TARGET_LABEL[report.targetType]}</span>
                     <span className="tag">{report.reporterHandle}</span>
+                    {/* 举报后文章可能又改过：不标出来，审核员会拿新版内容去判断
+                        旧版的问题（甚至把已经修好的问题当成还在）。 */}
+                    {report.targetVersion !== null && (
+                      <span className={`tag ${report.currentVersion !== null && report.currentVersion !== report.targetVersion ? 'tag-warn' : ''}`}>
+                        {report.currentVersion !== null && report.currentVersion !== report.targetVersion
+                          ? `举报第 ${report.targetVersion} 版，现在第 ${report.currentVersion} 版`
+                          : `第 ${report.targetVersion} 版`}
+                      </span>
+                    )}
                     <span className="hint">{displayTime(report.createdAt)}</span>
                   </div>
                   <p><strong>{report.reason}</strong></p>

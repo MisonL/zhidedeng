@@ -217,6 +217,9 @@ export const SCHEMA = `
     -- 下面两列只对「编辑已发布文章」的投稿有值，NULL 表示普通投稿。
     -- 编辑复用同一个队列：审核入口、驳回理由、幂等、通知全都现成，
     -- 再造一张 post_revisions 表等于把同一套状态机写两遍。
+    -- 编辑上线时被替换掉的线上版正文。管理员误批之后要能退回上一版，
+    -- 不留这一份就只能「下架」，等于把一个误操作变成一次内容删除。
+    previousPayload TEXT,
     targetPostId TEXT,
     baseVersion INTEGER
   );
@@ -468,6 +471,7 @@ export function ensureSubmissionColumns(store: Store) {
     ensureColumn(store.db, 'autoApproved', 'INTEGER NOT NULL DEFAULT 0 CHECK(autoApproved IN (0,1))');
     ensureColumn(store.db, 'targetPostId', 'TEXT');
     ensureColumn(store.db, 'baseVersion', 'INTEGER');
+    ensureColumn(store.db, 'previousPayload', 'TEXT');
     store.db.prepare('CREATE INDEX IF NOT EXISTS submissions_batch ON submissions(batchId, status)').run();
     store.db.prepare('CREATE INDEX IF NOT EXISTS submissions_dedupe ON submissions(kind, originKey, action, batchId, payloadHash, status, createdAt)').run();
   });

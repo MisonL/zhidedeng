@@ -84,6 +84,8 @@ export interface AdminPostRow {
   targetTitle?: string | null;
   /** 相对线上版本变了哪几个字段（标题/摘要/正文/关联项）。 */
   changedFields?: string[];
+  /** 文章当前是第几版。>1 才有「撤销上次修改」可言。 */
+  contentVersion?: number;
 }
 
 export interface AdminDeletedAccount {
@@ -105,6 +107,9 @@ export interface AdminReport {
   handledAt: string | null;
   targetAlive: boolean;
   targetLabel: string;
+  /** 举报那一刻文章是第几版；与 currentVersion 不同说明内容已经改过。 */
+  targetVersion: number | null;
+  currentVersion: number | null;
 }
 
 export interface BatchReviewResult {
@@ -159,6 +164,9 @@ export const admin = {
     request<{ results: BatchReviewResult[] }>('/api/admin/submissions/batch-review', {
       method: 'POST', body: { ids, status, ...(reason ? { reason } : {}) },
     }),
+  // 撤销最近一次编辑上线：误批之后退回上一版，而不是只能下架。
+  revertRevision: (id: string) =>
+    request<{ postId: string; restoredVersion: number; title: string }>(`/api/admin/posts/${encodeURIComponent(id)}/revert`, { method: 'POST' }),
   // 已注销账号：只读列表 + 恢复。管理员不能代用户注销（没有可代持的凭据）。
   listDeletedAccounts: (signal?: AbortSignal) =>
     request<{ items: AdminDeletedAccount[] }>('/api/admin/accounts/deleted', { signal }),

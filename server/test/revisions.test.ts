@@ -331,6 +331,57 @@ describe('编辑已发布文章', () => {
     expect(after.revisedAt).toBeTruthy();
   });
 
+  it('管理员误批之后能退回上一版，而不是只能下架', async () => {
+    const alice = await account('alice');
+    const id = await published(alice);
+    const submitted = await alice.call('PUT', `/api/posts/${id}/revision`, {
+      kind: 'community', title: '误批的标题', summary: '误批摘要', body: '误批正文', baseVersion: 1,
+    });
+    const submissionId = (await submitted.json() as { submissionId: string }).submissionId;
+    clock = new Date(clock.getTime() + 60_000);
+    await server.app.request(`/api/admin/posts/${submissionId}/review`, {
+      method: 'POST', headers: bearer, body: JSON.stringify({ status: 'approved' }),
+    });
+    expect((await postOf(id)).title).toBe('误批的标题');
+
+    const reverted = await server.app.request(`/api/admin/posts/${id}/revert`, { method: 'POST', headers: bearer });
+    expect(reverted.status).toBe(200);
+    const after = await postOf(id);
+    // 内容退回修改前，但版本继续往前（回退本身也是一次修改）。
+    expect(after.title).toBe('初版标题');
+    expect(after.body).toBe('初版正文');
+    expect(after.contentVersion).toBe(3);
+
+    // 同一份旧版只能回退一次，否则会来回把内容拉回旧版。
+    const again = await server.app.request(`/api/admin/posts/${id}/revert`, { method: 'POST', headers: bearer });
+    expect(again.status).toBe(409);
+    expect(await again.json()).toMatchObject({ error: { code: 'NOTHING_TO_REVERT' } });
+  });
+
+  it('举报列表标出举报时的版本，文章改过之后审核员能看出来', async () => {
+    const alice = await account('alice');
+    const bob = await account('bob');
+    const id = await published(alice);
+    const report = await bob.call('POST', '/api/reports', { targetType: 'post', targetId: id, reason: '像广告' });
+    const reportId = (await report.json() as { id: string }).id;
+
+    // 举报之后作者改了一版并上线。
+    const submitted = await alice.call('PUT', `/api/posts/${id}/revision`, {
+      kind: 'community', title: '改过的标题', summary: '改过摘要', body: '改过正文', baseVersion: 1,
+    });
+    const submissionId = (await submitted.json() as { submissionId: string }).submissionId;
+    clock = new Date(clock.getTime() + 60_000);
+    await server.app.request(`/api/admin/posts/${submissionId}/review`, {
+      method: 'POST', headers: bearer, body: JSON.stringify({ status: 'approved' }),
+    });
+
+    const list = await (await server.app.request('/api/admin/reports?status=open', { headers: bearer })).json() as
+      { items: Array<{ id: string; targetVersion: number | null; currentVersion: number | null }> };
+    const row = list.items.find(item => item.id === reportId);
+    // 举报快照是第 1 版、现在是第 2 版：审核员不能拿新版内容去判断旧版的问题。
+    expect(row).toMatchObject({ targetVersion: 1, currentVersion: 2 });
+  });
+
   it('审核前文章又被改过：不覆盖，落 rejected 并说明原因', async () => {
     const alice = await account('alice');
     const id = await published(alice);
