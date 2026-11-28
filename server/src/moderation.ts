@@ -474,8 +474,12 @@ export function resolveReport(store: Store, now: () => Date, id: string, status:
   //   只拿 targetVersion 判重会误许重报：举报后、处置前文章改到 v4，管理员
   //   实际看的是 v4，而记下来的还是 v1，v1 >= v4 不成立，于是同一版可以再报。
   // 站点/评论不可编辑，两个字段都留 NULL（`createReport` 对 NULL 维持「一律拦」）。
+  // 必须用 getWithRemoved：文章被下架后 store.get 返回 undefined，
+  // `?? 1` 会把 handledVersion 记成 1——之后恢复文章、`1 >= 3` 不成立，
+  // 同一条内容可以被重复举报。实体真的没了（物理删除）时保留 NULL，
+  // 那才该维持「一律拦」。
   const currentVersion = row.targetType === 'post'
-    ? (store.get('post', row.targetId)?.contentVersion ?? 1)
+    ? (store.getWithRemoved('post', row.targetId)?.contentVersion ?? null)
     : null;
   store.db.prepare('UPDATE reports SET status = ?, handledAt = ?, note = ?, handledVersion = ? WHERE id = ?')
     .run(status, now().toISOString(), note?.trim().slice(0, 500) ?? null, currentVersion, id);

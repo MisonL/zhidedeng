@@ -375,6 +375,35 @@ describe('编辑已发布文章', () => {
     expect((await bob.call('POST', '/api/reports', { targetType: 'post', targetId: id, reason: '第三版又出现了' })).status).toBe(200);
   });
 
+  it('文章下架后处置举报：仍记下当时的版本，恢复后不能重复举报', async () => {
+    const alice = await account('alice');
+    const bob = await account('bob');
+    const id = await published(alice);
+    // 先升到 v2，再让 bob 举报、管理员在文章下架状态下驳回。
+    const submitted = await alice.call('PUT', `/api/posts/${id}/revision`, {
+      kind: 'community', title: '第二版', summary: 's', body: '第二版正文', baseVersion: 1,
+    });
+    const submissionId = (await submitted.json() as { submissionId: string }).submissionId;
+    clock = new Date(clock.getTime() + 60_000);
+    await server.app.request(`/api/admin/posts/${submissionId}/review`, {
+      method: 'POST', headers: bearer, body: JSON.stringify({ status: 'approved' }),
+    });
+    const report = await bob.call('POST', '/api/reports', { targetType: 'post', targetId: id, reason: '像广告' });
+    const reportId = (await report.json() as { id: string }).id;
+    server.store.markRemoved('post', id, clock.toISOString());
+    clock = new Date(clock.getTime() + 60_000);
+    expect((await server.app.request(`/api/admin/reports/${reportId}/resolve`, {
+      method: 'POST', headers: bearer, body: JSON.stringify({ status: 'dismissed' }),
+    })).status).toBe(200);
+    // 下架状态下 store.get 拿不到版本，写成 1 的话恢复后 `1 >= 2` 不成立，
+    // 同一版可以被无限重报。
+    expect(server.db.prepare('SELECT handledVersion FROM reports WHERE id = ?').get(reportId)).toEqual({ handledVersion: 2 });
+
+    server.store.restore('post', id);
+    const again = await bob.call('POST', '/api/reports', { targetType: 'post', targetId: id, reason: '还是' });
+    expect(again.status).toBe(409);
+  });
+
   it('内容一字未改的「编辑」不留回退快照：不能凭空造一个版本再举报', async () => {
     const alice = await account('alice');
     const bob = await account('bob');

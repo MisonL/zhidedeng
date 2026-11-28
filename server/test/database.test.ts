@@ -23,7 +23,10 @@ describe('post_events 的 action 白名单迁移', () => {
           action TEXT NOT NULL CHECK(action IN ('removed','restored')), reason TEXT, title TEXT, at TEXT NOT NULL
         );
         INSERT INTO post_events (postId, authorHandle, action, title, at)
-          VALUES ('p1','alice','removed','旧版标题','2026-11-01T00:00:00.000Z');
+          VALUES ('p1','alice','removed','旧版标题','2026-11-01T00:00:00.000Z'),
+                 ('p2','alice','restored','会删掉','2026-11-01T01:00:00.000Z');
+        -- 删掉最高 id 的那行：重建后不保留高水位的话，新行会复用 id=2。
+        DELETE FROM post_events WHERE id = 2;
       `);
       old.close();
 
@@ -37,6 +40,8 @@ describe('post_events 的 action 白名单迁移', () => {
         expect(() => db.prepare(
           "INSERT INTO post_events (postId, authorHandle, action, title, at) VALUES ('p1','alice','reverted','新标题','2026-11-02T00:00:00.000Z')",
         ).run()).not.toThrow();
+        // id 不能被复用：事件 id 参与通知 id（post:<id>），复用了就串。
+        expect(db.prepare('SELECT max(id) AS id FROM post_events').get()).toEqual({ id: 3 });
       } finally {
         db.close();
       }
@@ -44,6 +49,7 @@ describe('post_events 的 action 白名单迁移', () => {
       const again = openDatabase(file);
       try {
         expect(again.prepare('SELECT count(*) AS c FROM post_events').get()).toEqual({ c: 2 });
+        expect(again.prepare('SELECT max(id) AS id FROM post_events').get()).toEqual({ id: 3 });
       } finally {
         again.close();
       }

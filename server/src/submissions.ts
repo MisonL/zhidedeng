@@ -857,21 +857,22 @@ function materialize(store: Store, submission: SubmissionRecord, reviewedAt: str
       // 存在还不够：管理员可能把它改判 rejected（正文已下架）。编辑稿审过来
       // 不该复活一篇已经被判定不合格的文章。
       if (before.status !== 'approved') throw new ApiError(409, 'POST_NOT_PUBLISHED', '文章已不在已发布状态，修改无法生效');
+      // 内容一个字段都没变：**什么都不写**。
+      // 连一次 store.put 都不做——那会刷新实体的缓存与变更计数，还可能让
+      // 「最后更新」看起来动过；更重要的是不留回退快照，否则「撤销」会凭空
+      // 把版本 +1，让「判不成立后必须改过才能再报」被一个空操作绕过。
+      if (unchanged) return;
       store.put('post', targetId, {
         ...before,
         kind: payload.kind, title: payload.title, summary: payload.summary, body: payload.body,
         stationSlug: payload.stationSlug ?? null, modelSlug: payload.modelSlug ?? null,
         // publishedAt 不动：改一篇老文不该让它重新上榜、跳进 RSS 最新、把 sitemap
         // 的 lastmod 往后推。想表达「更新过」用 revisedAt。
-        // 内容确实变了才升版（见上面 unchanged）。
-        ...(unchanged ? {} : { contentVersion: (before.contentVersion ?? 1) + 1, revisedAt: reviewedAt }),
+        // revisedAt 只在内容确实变了时写（上面已经挡掉了 unchanged）。
+        contentVersion: (before.contentVersion ?? 1) + 1, revisedAt: reviewedAt,
       });
       // 存下被替换掉的线上版：管理员误批之后要能退回去。不留这一份，
       // 「撤销这次修改」就只能靠下架，等于把误操作变成一次内容删除。
-      //
-      // 内容一个字段都没变时不存：那种「修改」没有替换任何东西，给它留一份快照
-      // 会让「撤销」凭空把版本 +1，于是「改过才能再报」被无成本地绕过。
-      if (unchanged) return;
       store.db.prepare('UPDATE submissions SET previousPayload = ? WHERE id = ?').run(JSON.stringify({
         kind: before.kind, title: before.title, summary: before.summary, body: before.body,
         stationSlug: before.stationSlug ?? null, modelSlug: before.modelSlug ?? null,

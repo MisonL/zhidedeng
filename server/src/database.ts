@@ -446,6 +446,11 @@ export function ensurePostEventColumns(store: Store) {
     // 这是标准配方：建新表 → 拷贝 → 换名 → 补索引。不做的话「撤销修改」的通知
     // 会在老库上抛 CHECK constraint failed，而新库因为 SCHEMA 已经带 reverted 测不出来。
     if (table.sql.includes("'reverted'")) return;
+    // 重建会重置 AUTOINCREMENT 的高水位。事件 id 参与通知 id（`post:<id>`），
+    // 删过最高那一行之后重建、再插新行就会复用旧 id——同一个 id 指向两条事件，
+    // 前端把它当 React key 会串。先记住旧 seq，重建后取两者的较大值。
+    const oldSeq = (store.db.prepare("SELECT seq FROM sqlite_sequence WHERE name = 'post_events'").get() as
+      { seq: number } | undefined)?.seq ?? 0;
     store.db.exec(`
       CREATE TABLE post_events_new (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -462,6 +467,11 @@ export function ensurePostEventColumns(store: Store) {
       ALTER TABLE post_events_new RENAME TO post_events;
       CREATE INDEX IF NOT EXISTS post_events_author ON post_events(authorHandle, at DESC);
     `);
+    const newSeq = (store.db.prepare("SELECT seq FROM sqlite_sequence WHERE name = 'post_events'").get() as
+      { seq: number } | undefined)?.seq ?? 0;
+    if (oldSeq > newSeq) {
+      store.db.prepare("UPDATE sqlite_sequence SET seq = ? WHERE name = 'post_events'").run(oldSeq);
+    }
   });
 }
 
