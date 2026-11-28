@@ -1385,14 +1385,20 @@ export class Service {
     // 用版本号而不是时间戳：同毫秒处置+改稿会漏判；「改回原文」在语义上也不该算
     // 新的改动，版本号能表达得更准。
     //
-    // 判据：同一个人对同一目标、判定不成立、且**处置时记下的版本 >= 当前版本**
-    // 才算「已经看过这一版」。`targetVersion IS NULL` 是迁移前的老行与
-    // 站点/评论目标（它们不可编辑），维持原来的「一律拦」。
+    // 判据：同一个人对同一目标、判定不成立、且**处置时那一版 >= 当前版本**才算
+    // 「已经看过这一版」。
+    //
+    // 用 handledVersion（处置那一刻的版本）而不是 targetVersion（举报时的版本）：
+    // 举报之后、处置之前文章可能又改了一版，管理员实际审的是新版；拿旧版判重会
+    // 误许重报——同一版内容被驳回后立刻又能再报一次。
+    // 老行没有 handledVersion（迁移前的数据），回落到 targetVersion；
+    // 两个都 NULL 的是迁移前的老行与站点/评论目标（不可编辑），维持「一律拦」。
     const currentVersion = targetType === 'post' ? (this.store.get('post', input.targetId)?.contentVersion ?? 1) : null;
     const dismissed = this.store.db.prepare(
       `SELECT id FROM reports
         WHERE targetType = ? AND targetId = ? AND reporterHandle = ? AND status = 'dismissed'
-          AND (targetVersion IS NULL OR ? IS NULL OR targetVersion >= ?)
+          AND (COALESCE(handledVersion, targetVersion) IS NULL OR ? IS NULL
+               OR COALESCE(handledVersion, targetVersion) >= ?)
         LIMIT 1`,
     ).get(targetType, input.targetId, this.user, currentVersion, currentVersion);
     if (dismissed) throw new ApiError(409, 'ALREADY_DISMISSED', '你举报过这条内容，管理员已判定不成立；如果情况有变，请站内联系管理员');

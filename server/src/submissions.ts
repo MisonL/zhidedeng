@@ -868,6 +868,10 @@ function materialize(store: Store, submission: SubmissionRecord, reviewedAt: str
       });
       // 存下被替换掉的线上版：管理员误批之后要能退回去。不留这一份，
       // 「撤销这次修改」就只能靠下架，等于把误操作变成一次内容删除。
+      //
+      // 内容一个字段都没变时不存：那种「修改」没有替换任何东西，给它留一份快照
+      // 会让「撤销」凭空把版本 +1，于是「改过才能再报」被无成本地绕过。
+      if (unchanged) return;
       store.db.prepare('UPDATE submissions SET previousPayload = ? WHERE id = ?').run(JSON.stringify({
         kind: before.kind, title: before.title, summary: before.summary, body: before.body,
         stationSlug: before.stationSlug ?? null, modelSlug: before.modelSlug ?? null,

@@ -467,14 +467,17 @@ export function resolveReport(store: Store, now: () => Date, id: string, status:
     { status: string; targetType: string; targetId: string } | undefined;
   if (!row) throw new ApiError(404, 'NOT_FOUND', '举报不存在');
   if (row.status !== 'open') throw new ApiError(409, 'ALREADY_HANDLED', '这条举报已经处理过了');
-  // 处置时把目标内容的版本号一起记下。只有文章有版本；站点/评论不可编辑，
-  // 记 NULL 即可（`createReport` 对 NULL 维持「一律拦」的老行为）。
-  //
-  // 这里**不**用处置时刻的最新版本：管理员可能是半小时前打开页面看的 v3，
-  // 期间 v4 已经上线，等他点「驳回举报」时记成 v4——之后 v4 再出现同样的问题
-  // 就被永久拦住，而管理员从没看过 v4。真正要看的是「举报发生时那一版」，
-  // 也就是写进这条举报的 targetVersion（见 createReport 的 INSERT）。
-  store.db.prepare('UPDATE reports SET status = ?, handledAt = ?, note = ? WHERE id = ?')
-    .run(status, now().toISOString(), note?.trim().slice(0, 500) ?? null, id);
+  // 处置时把「此刻」文章的版本也记一份（handledVersion），与举报时的
+  // targetVersion 分开：
+  // - targetVersion 是举报人看到、写进举报的那一版，管理台展示用它；
+  // - handledVersion 是处置那一刻的版本，判「判不成立之后有没有改过」要用它。
+  //   只拿 targetVersion 判重会误许重报：举报后、处置前文章改到 v4，管理员
+  //   实际看的是 v4，而记下来的还是 v1，v1 >= v4 不成立，于是同一版可以再报。
+  // 站点/评论不可编辑，两个字段都留 NULL（`createReport` 对 NULL 维持「一律拦」）。
+  const currentVersion = row.targetType === 'post'
+    ? (store.get('post', row.targetId)?.contentVersion ?? 1)
+    : null;
+  store.db.prepare('UPDATE reports SET status = ?, handledAt = ?, note = ?, handledVersion = ? WHERE id = ?')
+    .run(status, now().toISOString(), note?.trim().slice(0, 500) ?? null, currentVersion, id);
   return { id, status };
 }

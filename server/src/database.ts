@@ -66,9 +66,13 @@ export const SCHEMA = `
     createdAt TEXT NOT NULL,
     handledAt TEXT,
     note TEXT,
-    -- 处置时目标内容的版本快照，只有 post 目标有值。
-    -- 用途：判断「判不成立之后内容有没有改过」——改过了才允许重新举报。
-    targetVersion INTEGER
+    -- 举报发生时目标内容的版本快照，只有 post 目标有值。
+    -- 用途 1：管理台展示「举报的是第几版」。
+    -- 用途 2：与 handledVersion 一起判断「判不成立之后内容有没有改过」。
+    targetVersion INTEGER,
+    -- 处置那一刻文章的版本。与 targetVersion 分开记：举报之后、处置之前文章
+    -- 可能又改了一版，管理员实际看的是新版；只拿举报时的版本判重会误许重报。
+    handledVersion INTEGER
   );
   -- 同一个人对同一个对象只能有一条未处理举报。用部分唯一索引而不是先查后插：
   -- 并发下「都查到没有」然后各插一条，靠应用层查重挡不住。
@@ -484,6 +488,7 @@ export function ensureReportColumns(store: Store) {
     // 表名必须显式传：ensureColumn 的默认表是 submissions，漏了就 ALTER 到投稿表上，
     // 老库的 reports 永远没有这一列——而新库因为 SCHEMA 里已经带了，测不出来。
     ensureColumn(store.db, 'targetVersion', 'INTEGER', 'reports');
+    ensureColumn(store.db, 'handledVersion', 'INTEGER', 'reports');
   });
 }
 
