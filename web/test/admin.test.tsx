@@ -125,6 +125,37 @@ describe('审核台', () => {
     expect(callsTo(fetchMock, 'POST', '/api/admin/stations/gone-example-com/restore')).toHaveLength(1);
   });
 
+  it('可回退站点：在线站也能退回上一版（误批最常见的就是在线站）', async () => {
+    const fetchMock = stubApi({
+      'GET /api/admin/submissions': { items: [], total: 0 },
+      'GET /api/admin/stations/revertible': {
+        items: [{ slug: 'online-shop', name: '在线示例站', url: 'https://online.example.com/', removedAt: null, snapshotAt: '2026-11-10T03:00:00.000Z' }],
+      },
+      'POST /api/admin/stations/online-shop/revert': { slug: 'online-shop', restoredName: '上一版', offerCount: 2 },
+    });
+    await unlock();
+    fireEvent.click(await screen.findByRole('tab', { name: /可回退站点/ }));
+    expect(await screen.findByText('在线示例站')).toBeInTheDocument();
+    // 状态要写清楚：这个列表不分上下架（在线站也可能有快照）。
+    expect(screen.getByText(/^在线/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '退回上次投稿前' }));
+    fireEvent.click(await screen.findByRole('button', { name: '确认退回' }));
+    expect(await screen.findByText('已退回上次投稿前')).toBeInTheDocument();
+    expect(callsTo(fetchMock, 'POST', '/api/admin/stations/online-shop/revert')).toHaveLength(1);
+  });
+
+  it('没有快照的站不显示「退回上次投稿前」', async () => {
+    stubApi({
+      'GET /api/admin/submissions': { items: [], total: 0 },
+      'GET /api/admin/stations/removed': { items: [removed] },
+    });
+    await unlock();
+    fireEvent.click(await screen.findByRole('tab', { name: /已下架站点/ }));
+    await screen.findByText('已下架的示例站');
+    // fixture 的 hasRevert 是 false：目录导入写进来的站没有快照，按钮不该出现。
+    expect(screen.queryByRole('button', { name: '退回上次投稿前' })).not.toBeInTheDocument();
+  });
+
   it('已下架文章可以一键恢复', async () => {
     // 已发布内容必须能撤回。群友来源的文章原先只能「去飞书撤销通过」，
     // 而那条路走不通——撤销后记录直接不在批次里，生成不了下架请求。
@@ -271,8 +302,8 @@ describe('审核台的批量语义', () => {
     await unlock();
     expect(screen.getByRole('tablist')).toBeInTheDocument();
     const tabs = screen.getAllByRole('tab');
-    // 待审投稿 / 待审文章 / 已上线文章 / 已下架站点 / 已下架文章 / 举报 / 账号
-    expect(tabs.map(tab => tab.textContent?.trim().split(' ')[0])).toEqual(['待审投稿', '待审文章', '已上线文章', '已下架站点', '已下架文章', '举报', '账号']);
+    // 待审投稿 / 待审文章 / 已上线文章 / 已下架站点 / 已下架文章 / 可回退站点 / 举报 / 账号
+    expect(tabs.map(tab => tab.textContent?.trim().split(' ')[0])).toEqual(['待审投稿', '待审文章', '已上线文章', '已下架站点', '已下架文章', '可回退站点', '举报', '账号']);
     expect(tabs.some(tab => tab.textContent?.includes('退出'))).toBe(false);
     expect(screen.getByRole('tab', { name: /待审投稿/ })).toHaveAttribute('aria-selected', 'true');
   });

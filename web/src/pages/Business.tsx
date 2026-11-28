@@ -29,7 +29,11 @@ export default function Business() {
       {/* 不编造联系方式（spec 明确要求），但也不能只留一句「待配置」——
           用户按「联系管理员」的提示走过来，会卡在最后一步。这里写清楚现在
           实际可用的是哪条通道。 */}
-      {contact === null ? (
+      {/* 还没拿到 /api/site 时不要先显示「暂未开通」：那会闪一下错误结论。
+          加载失败（site.error）则按未配置处理——少一个联系方式，不影响说明页。 */}
+      {site.data === undefined && site.error === undefined ? (
+        <p className="hint">正在读取联系方式…</p>
+      ) : contact === null ? (
         <>
           <p className="contact-pending">本站暂未开通公开客服邮箱。</p>
           <ul className="prose-list">

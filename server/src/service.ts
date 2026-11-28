@@ -417,11 +417,19 @@ export class Service {
       // LEFT JOIN 而不是 JOIN：站点实体被物理删掉、报价行还残留时（外键只在
       // 应用层维护，没有数据库约束），这条报价仍然算「真实数据存在过」。
       // 用 JOIN 会漏掉它，然后纯演示分支把虚构价当回市场行情。
+      // 「曾经有过真实数据」有两个来源，缺一不可：
+      // ① 有真实站点的报价行（LEFT JOIN 覆盖站点实体被物删、报价残留的孤儿行）；
+      // ② 有非演示站点实体本身——真实站最后一版投稿把 offers 清空后，库里就
+      //    一条真实报价都不剩了，只按报价判断会让虚构价重新变成市场行情。
       const everReal = this.store.db.prepare(
         `SELECT 1 AS found FROM offers AS offer
            LEFT JOIN entities AS station ON station.kind = 'station' AND station.id = offer.stationSlug
           WHERE station.id IS NULL
-             OR COALESCE(json_extract(station.data, '$.source'), 'user') != 'demo' LIMIT 1`,
+             OR COALESCE(json_extract(station.data, '$.source'), 'user') != 'demo'
+         UNION ALL
+         SELECT 1 FROM entities
+          WHERE kind = 'station' AND COALESCE(json_extract(data, '$.source'), 'user') != 'demo'
+         LIMIT 1`,
       ).get() !== undefined;
       if (everReal) return this.offers().filter(offer => !this.demoStations().has(offer.stationSlug));
       // 没有真实报价时把演示报价留下：纯演示环境里这就是全部内容。

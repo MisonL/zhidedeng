@@ -193,6 +193,21 @@ describe('审核物化', () => {
     expect(offers()).toEqual([{ modelSlug: 'o3', rate: 0.7 }]);
   });
 
+  it('可回退站点列表：在线站和已下架站都列出来，没有快照的不列', async () => {
+    store.put('station', 'sub-api-example-com', existingStation('submission'));
+    store.put('station', 'sub-no-snapshot', { ...existingStation('submission'), name: '没快照的站' });
+    const submission = queue({ payload: { ...stationPayload, name: '覆盖后', offers: [{ modelSlug: 'o3', rate: 0.8 }] } }).submission;
+    approve(submission.id);
+
+    const response = await server.app.request('/api/admin/stations/revertible', { headers: admin });
+    expect(response.status).toBe(200);
+    const body = await response.json() as { items: Array<{ slug: string; name: string; removedAt: string | null; snapshotAt: string | null }> };
+    // 原来退回按钮只在「已下架站点」里，误批一条**在线站**的新投稿就没有入口了。
+    expect(body.items.map(item => item.slug)).toEqual(['sub-api-example-com']);
+    expect(body.items[0]).toMatchObject({ name: '覆盖后', removedAt: null });
+    expect(body.items[0].snapshotAt).not.toBeNull();
+  });
+
   it('已下架的站点退回上一版后仍然是下架状态（不能悄悄复活）', async () => {
     store.put('station', 'sub-api-example-com', existingStation('submission'));
     server.db.prepare('INSERT INTO offers (stationSlug, modelSlug, rate) VALUES (?, ?, ?)').run('sub-api-example-com', 'o3', 0.7);

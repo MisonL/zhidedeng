@@ -64,6 +64,8 @@ describe('报价倍率展示与榜单门槛', () => {
 
   it('真实站被下架后，榜单不会退回演示站的虚构价', async () => {
     const real = 'sub-real-gone';
+    const demo = stationSlugs()[0];
+    insertOffer(demo, modelSlugs()[0], 0.35);
     server.db.prepare('INSERT INTO entities (kind,id,data) VALUES (?,?,?)').run('station', real, JSON.stringify({
       slug: real, name: '会被下架的真实站', description: '群友提交', url: 'https://gone.example.com/',
       source: 'submission', rechargeThreshold: null, paymentMethods: [], uptime: null,
@@ -84,7 +86,22 @@ describe('报价倍率展示与榜单门槛', () => {
     // 外键只在应用层维护，孤儿报价是可能的。JOIN 探测会漏掉它，
     // 然后误判成「从没有过真实报价」而把演示价放回榜单。
     const orphan = 'sub-orphan-real';
+    insertOffer(stationSlugs()[0], modelSlugs()[0], 0.35);
     insertOffer(orphan, modelSlugs()[0], 0.85);
+    const ranking = await getRankings();
+    if (ranking.tab !== 'model') throw new Error('排行榜类型错误');
+    expect(ranking.items.find(item => item.model.slug === modelSlugs()[0])).toMatchObject({ stationCount: 0, lowestRate: null });
+  });
+
+  it('真实站还在线但报价被清空：演示价同样不能顶上来', async () => {
+    const real = 'sub-real-empty';
+    server.db.prepare('INSERT INTO entities (kind,id,data) VALUES (?,?,?)').run('station', real, JSON.stringify({
+      slug: real, name: '报价被清空的真实站', description: '群友提交', url: 'https://empty.example.com/',
+      source: 'submission', rechargeThreshold: null, paymentMethods: [], uptime: null,
+      firstTokenLatencyMs: null, foundedAt: null, status: null,
+    }));
+    // 真实站最后一版投稿 offers: [] 通过后，库里一条真实报价都不剩（物化会先删后插）。
+    insertOffer(stationSlugs()[0], modelSlugs()[0], 0.35);
     const ranking = await getRankings();
     if (ranking.tab !== 'model') throw new Error('排行榜类型错误');
     expect(ranking.items.find(item => item.model.slug === modelSlugs()[0])).toMatchObject({ stationCount: 0, lowestRate: null });

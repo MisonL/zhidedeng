@@ -47,7 +47,10 @@ export function openDatabase(path: string, options: { readOnly?: boolean } = {})
     ensureAccountColumns(openStore(db));
     // 账本上线前余额只存在 user 行里，补成首条流水，否则老用户余额会变 0。
     const migration = seedTokenLedger(openStore(db), new Date());
-    if (migration.reconciled > 0) console.warn(`已把 ${migration.reconciled} 个账号的余额缓存对齐到流水账本`);
+    // 文案必须和实际做的事一致：这里是把「用户看到的余额」当真、把差额补进流水，
+    // 不是拿账本覆盖缓存。写反了会让运维以为账本才是被修正的一方。
+    if (migration.reconciled > 0) console.warn(`${migration.reconciled} 个账号的余额缓存与流水不一致，已按缓存差额补记流水`);
+    if (migration.repaired > 0) console.warn(`${migration.repaired} 个账号的余额是坏数据（负数或小数），已按流水修正缓存`);
   } catch (error) {
     db.close();
     throw error;

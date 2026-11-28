@@ -474,6 +474,31 @@ export function buildApp(store: Store, now: () => Date, options: AppOptions = {}
     if (!store.restore('station', slug)) throw new ApiError(409, 'ALREADY_ONLINE', '该站点当前在线，不需要恢复');
     return c.json({ slug, restored: true });
   });
+  // 「可回退的站点」：有投稿快照的站，不论此刻在线还是已下架。
+  // 原来退回按钮只在「已下架站点」页签里，而误批一条**在线站**的新投稿是更常见的
+  // 情形——站点没被下架，就再也找不到入口。这里把入口显式列出来。
+  app.get('/api/admin/stations/revertible', c => {
+    const rows = store.db.prepare(
+      `SELECT s.targetStationSlug AS slug, MAX(s.reviewedAt) AS snapshotAt
+         FROM submissions AS s
+        WHERE s.status = 'approved' AND s.previousPayload IS NOT NULL AND s.targetStationSlug IS NOT NULL
+        GROUP BY s.targetStationSlug
+        ORDER BY snapshotAt DESC`,
+    ).all() as Array<{ slug: string; snapshotAt: string | null }>;
+    return c.json({
+      items: rows.map(row => {
+        const station = store.getWithRemoved('station', row.slug) as { name?: string; url?: string | null } | undefined;
+        return {
+          slug: row.slug,
+          snapshotAt: row.snapshotAt,
+          name: station?.name ?? row.slug,
+          url: station?.url ?? null,
+          removedAt: store.removedAt('station', row.slug),
+        };
+      }),
+    });
+  });
+
   app.get('/api/admin/stations/removed', c => {
     const rows = store.db.prepare(
       "SELECT id, removedAt, data FROM entities WHERE kind = 'station' AND removedAt IS NOT NULL ORDER BY removedAt DESC",

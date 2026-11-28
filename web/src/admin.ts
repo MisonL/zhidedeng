@@ -134,6 +134,19 @@ export interface RemovedStation {
   hasRevert: boolean;
 }
 /** 已下架的文章。和站点不同，文章没有 slug，用 id 指代。 */
+/**
+ * 有投稿快照、可以「退回上一版」的站点。
+ * 和 RemovedStation 分开：这个列表**不分上下架状态**，误批一条在线站的新投稿
+ * 也要能退回去。
+ */
+export interface RevertibleStation {
+  slug: string;
+  name: string;
+  url: string | null;
+  removedAt: string | null;
+  /** 最近一次可退回投稿的审核时间。 */
+  snapshotAt: string | null;
+}
 export interface RemovedPost {
   id: string;
   removedAt: string;
@@ -217,6 +230,7 @@ export const admin = {
       method: 'POST', body: { status, ...(note ? { note } : {}) },
     }),
   listRemovedStations: (signal?: AbortSignal) => request<{ items: RemovedStation[] }>('/api/admin/stations/removed', { signal }),
+  listRevertibleStations: (signal?: AbortSignal) => request<{ items: RevertibleStation[] }>('/api/admin/stations/revertible', { signal }),
   restoreStation: (slug: string) =>
     request<{ slug: string; restored: true }>(`/api/admin/stations/${encodeURIComponent(slug)}/restore`, { method: 'POST', body: {} }),
 };

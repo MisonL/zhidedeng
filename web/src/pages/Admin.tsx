@@ -3,7 +3,8 @@ import type { FormEvent } from 'react';
 import { feishuHostnameKey } from '@zhidedeng/shared';
 import type { Station, SubmissionRecord } from '@zhidedeng/shared';
 import { admin, adminToken, AdminError } from '../admin';
-import type { AdminDeletedAccount, AdminPostRow, AdminReport, RemovedPost, RemovedStation } from '../admin';
+import type { AdminDeletedAccount, AdminPostRow, AdminReport, RemovedPost, RemovedStation, RevertibleStation } from '../admin';
+import { displayTime } from '../format';
 import { Skeleton } from '../components/AsyncView';
 import ConfirmButton from '../components/ConfirmButton';
 import { useCatalog } from '../state';
@@ -13,13 +14,6 @@ const REPORTS_PAGE_SIZE = 20;
 
 /** 服务端 ids 模式的单批上限，与 submissions.ts 的 schema 保持一致。 */
 const BATCH_REVIEW_LIMIT = 100;
-
-const displayTime = (iso: string) => {
-  const date = new Date(iso);
-  // removedAt 是库里的原始字段，没有格式校验；非法值不该渲染成 "Invalid Date"。
-  if (Number.isNaN(date.getTime())) return '时间未知';
-  return date.toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false });
-};
 
 const KIND_LABEL: Record<string, string> = { station: '站点', model: '模型', post: '文章' };
 const TARGET_LABEL: Record<string, string> = { post: '文章', station: '站点', comment: '评论' };
@@ -67,7 +61,7 @@ function impact(submission: SubmissionRecord, current: Station | undefined): str
   return lines;
 }
 
-type Tab = 'submissions' | 'posts' | 'published' | 'removed' | 'removedPosts' | 'reports' | 'accounts';
+type Tab = 'submissions' | 'posts' | 'published' | 'removed' | 'removedPosts' | 'revertible' | 'reports' | 'accounts';
 
 /**
  * 手动加减 Token。只用于补偿与扣回——理由必填，因为流水就是审计日志，
@@ -161,6 +155,7 @@ export default function Admin() {
   const [submissions, setSubmissions] = useState<SubmissionRecord[]>();
   const [posts, setPosts] = useState<AdminPostRow[]>();
   const [removed, setRemoved] = useState<RemovedStation[]>();
+  const [revertible, setRevertible] = useState<RevertibleStation[]>();
   // 已注销账号。管理员在这里能看到「谁走了」，并决定要不要恢复。
   const [deletedAccounts, setDeletedAccounts] = useState<AdminDeletedAccount[]>();
   const [removedPosts, setRemovedPosts] = useState<RemovedPost[]>();
@@ -215,6 +210,10 @@ export default function Admin() {
       if (active === 'removed') {
         const data = (await admin.listRemovedStations(signal)).items;
         if (!signal?.aborted) setRemoved(data);
+      }
+      if (active === 'revertible') {
+        const data = (await admin.listRevertibleStations(signal)).items;
+        if (!signal?.aborted) setRevertible(data);
       }
       if (active === 'published') {
         const data = (await admin.listPosts('approved', signal)).items;
@@ -596,6 +595,11 @@ export default function Admin() {
         </button>
         <button type="button" role="tab" aria-selected={tab === 'removedPosts'} className={`btn btn-small ${tab === 'removedPosts' ? 'btn-red' : 'btn-ghost'}`} onClick={() => setTab('removedPosts')}>
           已下架文章 {removedPosts ? `(${withdrawnPosts.length})` : ''}
+        </button>
+        {/* 站点投稿是整包替换，误批一条在线站的新投稿同样要能退回——它没被下架，
+            所以不在「已下架站点」里。 */}
+        <button type="button" role="tab" aria-selected={tab === 'revertible'} className={`btn btn-small ${tab === 'revertible' ? 'btn-red' : 'btn-ghost'}`} onClick={() => setTab('revertible')}>
+          可回退站点 {revertible ? `(${revertible.length})` : ''}
         </button>
         <button type="button" role="tab" aria-selected={tab === 'reports'} className={`btn btn-small ${tab === 'reports' ? 'btn-red' : 'btn-ghost'}`} onClick={() => setTab('reports')}>
           举报 {reports ? `(${reportTotal})` : ''}
@@ -1052,6 +1056,32 @@ export default function Admin() {
                         onConfirm={async () => { await act(() => admin.revertStation(station.slug), '已退回上次投稿前'); }}
                       />
                     )}
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )
+      )}
+      {tab === 'revertible' && (
+        revertible === undefined ? <Skeleton /> : revertible.length === 0
+          ? <p className="state">没有可退回的站点投稿。站点投稿是整包替换，通过之后才会留下快照。</p>
+          : (
+            <ul className="card-list">
+              {revertible.map(station => (
+                <li key={station.slug}>
+                  <p>{station.name}</p>
+                  <p className="hint">
+                    {station.url ?? station.slug}　
+                    {station.removedAt ? `已下架（${displayTime(station.removedAt)}）` : '在线'}
+                    {station.snapshotAt ? `　可退回至 ${displayTime(station.snapshotAt)} 之前的版本` : ''}
+                  </p>
+                  <div className="tags">
+                    <ConfirmButton
+                      label="退回上次投稿前" tone="red" busy={busy}
+                      description={`把「${station.name}」的内容与报价整体退回上一次投稿之前？现在展示的投稿内容会被替换（上下架状态不变）。`}
+                      confirmLabel="确认退回"
+                      onConfirm={async () => { await act(() => admin.revertStation(station.slug), '已退回上次投稿前'); }}
+                    />
                   </div>
                 </li>
               ))}

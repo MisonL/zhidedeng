@@ -110,7 +110,11 @@ export const formatDate = (iso: string) => shanghaiDate.format(new Date(iso));
  * 全站时间口径是 Asia/Shanghai；直接用 `toLocaleString('zh-CN')` 会取浏览器时区，
  * 非东八区用户看到的「提交时间/流水时间」会和详情页差好几个小时。
  */
-export const displayTime = (iso: string) => shanghaiTime.format(new Date(iso));
+export const displayTime = (iso: string) => {
+  const date = new Date(iso);
+  // 坏时间不能渲染成「Invalid Date」：审核台、流水页都会直接显示给用户看。
+  return Number.isNaN(date.getTime()) ? '时间未知' : shanghaiTime.format(date);
+};
 
 /**
  * 展示前清掉会破坏排版的不可见字符。

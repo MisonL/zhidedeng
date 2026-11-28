@@ -167,6 +167,7 @@ channel 是队列的来源渠道，source 是物化内容的展示来源，二�
 | POST | /api/admin/posts/:id/restore | 恢复已下架文章，只清软删除标记 |
 | GET | /api/admin/posts/removed | 已下架文章列表，含下架时间、标题与作者（只给 id 的话误下架后认不出该恢复哪篇） |
 | POST | /api/admin/stations/:slug/restore | 恢复已下架的站点，只清软删除标记 |
+| GET | /api/admin/stations/revertible | 有投稿快照、可退回上一版的站点（不分上下架状态）。退回入口原来只挂在「已下架站点」页签里，而误批一条**在线站**的新投稿是更常见的情形 |
 | POST | /api/admin/stations/:slug/revert | 把站点内容与报价整体退回上一次投稿上线之前。站点投稿是整包替换（描述覆盖 + 报价全删重建），没有这条路就等于误批一次删掉报价历史；快照存 `submissions.previousPayload`（配 `targetStationSlug` 精确定位），用掉即清空，**只改 data 不动 removedAt**（否则「退回」会顺带把下架的站重新上线） |
 | GET | /api/admin/stations/removed | 已下架站点列表，含站名、url、下架时间与 hasRevert |
 | POST | /api/admin/accounts/reset-password | username + newPassword；同时清掉该账号全部会话与 Agent 凭证 |

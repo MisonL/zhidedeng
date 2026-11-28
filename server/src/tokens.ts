@@ -434,9 +434,10 @@ export function entitlementsOf(store: Store, handle: string): string[] {
  *
  * 幂等：只在该 handle 完全没有流水时补，所以可以每次启动都跑。
  */
-export function seedTokenLedger(store: Store, now: Date): { seeded: number; reconciled: number } {
+export function seedTokenLedger(store: Store, now: Date): { seeded: number; reconciled: number; repaired: number } {
   let seeded = 0;
   let reconciled = 0;
+  let repaired = 0;
   store.transaction(() => {
     // 用户列表在事务里读：多进程同时启动时，事务外的快照可能已经过期，
     // 拿它写回整行会覆盖别的进程刚改的昵称/简介。
@@ -447,7 +448,19 @@ export function seedTokenLedger(store: Store, now: Date): { seeded: number; reco
       const user = JSON.parse(row.data) as { handle?: string; tokens?: number };
       const handle = user.handle;
       const tokens = user.tokens ?? 0;
-      if (!handle || !Number.isInteger(tokens)) continue;
+      if (!handle) continue;
+      // 负余额与小数都是脏数据（人工改库、旧版本写坏）。**不能让它们中断启动**：
+      // 早期版本在这里直接走 appendLedger，负数会抛 INSUFFICIENT_TOKENS，
+      // 一行坏数据就拖垮整个进程，其它账号也拿不到修正。这里按「以账本为准」
+      // 修缓存并计数，不产生流水（钱没变，变的只是一个坏掉的缓存值）。
+      if (!Number.isInteger(tokens) || tokens < 0) {
+        const truth = balanceOf(store, handle);
+        if (store.get('user', handle)?.tokens !== truth) {
+          store.put('user', handle, { ...user, handle, tokens: truth } as never);
+          repaired += 1;
+        }
+        continue;
+      }
       const existing = store.db.prepare('SELECT 1 FROM token_ledger WHERE handle = ? LIMIT 1').get(handle);
       if (existing) {
         // 账本已经有了，就对一次账：以账本为准。
@@ -455,13 +468,14 @@ export function seedTokenLedger(store: Store, now: Date): { seeded: number; reco
         // 再升回新版就会出现「缓存 131 / 账本 120」这种分裂，两个页面各显示一个数。
         //
         // 差额**必须落一条流水**，不能只改缓存：流水是用户唯一能自己对账的地方，
-        // 静默把余额改小等于让「账面少了几块钱」这件事无迹可查。写 admin_grant /
-        // admin_deduct 并注明来源，至少让人看得出这是启动对账而不是消费。
+        // 静默改余额等于让差额无迹可查。
+        // 方向是「以用户当时看到的余额为准」：回滚期间旧版本只写缓存，那个数字才是
+        // 用户实际拥有/花掉的；账本补认这笔差额，此后两边一致。
         const balance = balanceOf(store, handle);
         if (balance !== tokens) {
           appendLedger(store, {
             handle, delta: tokens - balance, reason: tokens > balance ? 'admin_grant' : 'admin_deduct',
-            memo: '启动对账：余额缓存与流水不一致，以流水为准', onceKey: null, at: now.toISOString(),
+            memo: '启动对账：余额缓存与流水不一致，差额已补记', onceKey: null, at: now.toISOString(),
           });
           reconciled += 1;
         }
@@ -474,5 +488,5 @@ export function seedTokenLedger(store: Store, now: Date): { seeded: number; reco
       seeded += 1;
     }
   });
-  return { seeded, reconciled };
+  return { seeded, reconciled, repaired };
 }
