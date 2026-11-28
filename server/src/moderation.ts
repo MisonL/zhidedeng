@@ -1,7 +1,7 @@
 import type { AdminDisableUserResponse, PostStatus } from '@zhidedeng/shared';
 import type { Store } from './database.ts';
 import { ApiError } from './errors.ts';
-import { appendLedger } from './tokens.ts';
+import { appendLedger, balanceOf } from './tokens.ts';
 import { comparePublishedAt } from './service.ts';
 import { reviewSubmission } from './submissions.ts';
 
@@ -218,8 +218,11 @@ export function restoreAccount(store: Store, handle: string, now: Date): { handl
     // user 实体行在注销时删掉了，恢复时必须重建，否则 /api/me 会走 requireUser 的
     // 自动重建分支（昵称=handle、tokens 初始值），看起来像「凭空多了一笔 Token」。
     if (!store.get('user', account.handle)) {
+      // 余额必须从流水回填，不能写 0：账本一直在（注销不清账本），写 0 会让
+      // /api/me 显示 0 而 Token 页显示真实余额，送花还会被判「不够」。
       store.put('user', account.handle, {
-        handle: account.handle, nickname: account.handle, avatar: '', bio: '', tokens: 0,
+        handle: account.handle, nickname: account.handle, avatar: '', bio: '',
+        tokens: balanceOf(store, account.handle),
       });
     }
   });

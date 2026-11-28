@@ -742,7 +742,9 @@ export class Service {
       items.push({
         id: `flower:${row.id}`,
         kind: 'flower',
-        title: `${row.handle} 给你的《${title}》送了一朵花`,
+        // 用昵称而不是裸 handle：站内其它地方都只显示昵称，
+        // 在通知里露出登录名等于把「谁是谁」对上了号。
+        title: `${this.author(row.handle).nickname} 给你的《${title}》送了一朵花`,
         detail: null,
         // 文章此刻在线才给链接（上面已经按 removedAt 过滤，这里只是再确认一次）。
         href: this.store.get('post', row.targetId) ? `/posts/${row.targetId}` : null,
@@ -1160,6 +1162,8 @@ export class Service {
     return {
       handle: user.handle, nickname: user.nickname, avatar: user.avatar, bio: user.bio,
       shareCount: posts.length, upCount, joinedAt: account?.createdAt ?? null,
+      // 权益表里现在只有徽章这一种，直接给出 key 列表，前端映射成名字。
+      badges: entitlementsOf(this.store, handle),
     };
   }
 

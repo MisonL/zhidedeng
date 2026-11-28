@@ -539,6 +539,11 @@ export interface PublicProfile {
   /** 这些文章收到的赞数合计，用来给主页一个「被多少人认可」的量。 */
   upCount: number;
   joinedAt: ISODate | null;
+  /**
+   * 已获得的装饰徽章（例如 `supporter`）。纯装饰：不影响排名、审核、举报，
+   * 也不代表任何内容特权——所以主页上只当一个小标记显示。
+   */
+  badges: string[];
 }
 export interface GetUserRequest { handle: string }
 export type GetUserResponse = PublicProfile;

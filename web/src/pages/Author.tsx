@@ -26,7 +26,14 @@ export default function Author() {
           <header className="author-head">
             <Avatar nickname={user.nickname} avatar={user.avatar || undefined} size={56} />
             <div>
-              <h1 className="page-title">{user.nickname}</h1>
+              <h1 className="page-title">
+                {user.nickname}
+                {/* 徽章是花 Token 买的纯装饰：只能证明「这个人愿意支持这个站」，
+                    不表示内容更好，所以只给一个小标记，不做任何排序权重。 */}
+                {user.badges?.includes('supporter') && (
+                  <span className="badge-supporter" title="支持者徽章">🌸 支持者</span>
+                )}
+              </h1>
               <p className="page-sub">{user.bio || '这个人还没有写简介'}</p>
               <p className="hint">
                 <span className="num">{user.shareCount}</span> 篇分享

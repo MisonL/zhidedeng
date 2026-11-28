@@ -325,6 +325,115 @@ describe('Token 账本', () => {
     void clock;
   });
 
+  it('每天收花上限按**作者**算：换文章也绕不开', async () => {
+    const alice = await account('alice');
+    const bob = await account('bob');
+    server.db.prepare("UPDATE token_ledger SET balanceAfter = 5000 WHERE handle = 'alice'").run();
+
+    // 51 篇 bob 的文章（直接写库，避开投稿限流）。
+    const ids: string[] = [];
+    for (let index = 0; index < 51; index += 1) {
+      const id = `cap-${index}`;
+      server.store.put('post', id, {
+        id, kind: 'community', title: `第 ${index} 篇`, summary: 's', body: 'b',
+        authorHandle: 'bob', stationSlug: null, modelSlug: null, cover: null,
+        publishedAt: clock.toISOString(), status: 'approved', source: 'user',
+      });
+      ids.push(id);
+    }
+    // 前 50 朵来自别的账号、分别落在 50 篇**不同**的文章上：按文章算的话第 51 朵
+    // 落在新文章上不会被挡，只有按作者算才会挡——这正是要证明的。
+    server.store.transaction(() => {
+      for (let index = 0; index < 50; index += 1) {
+        server.db.prepare(
+          'INSERT INTO redemptions (id,handle,itemKey,idempotencyKey,cost,targetType,targetId,payload,createdAt) VALUES (?,?,?,?,?,?,?,?,?)',
+        ).run(`seed-${index}`, `sender-${index}`, 'flower', `seed-key-${index}`, 5, 'post', ids[index], null, clock.toISOString());
+      }
+    });
+
+    const blocked = await alice.redeem('flower', ids[50]);
+    expect(blocked.status).toBe(429);
+    expect(await blocked.json()).toMatchObject({ error: { code: 'RECIPIENT_LIMIT' } });
+    expect(server.db.prepare("SELECT count(*) AS c FROM redemptions WHERE itemKey = 'flower'").get()).toEqual({ c: 50 });
+
+    // 第二天额度恢复。
+    clock = new Date(clock.getTime() + 86_400_000);
+    expect((await alice.redeem('flower', ids[50])).status).toBe(200);
+  });
+
+  it('恢复账号后余额与账本一致，不会显示 0', async () => {
+    const alice = await account('alice');
+    const checked = await alice.call('POST', '/api/me/checkin', {});
+    const expected = (await checked.json() as { tokens: number }).tokens;
+    await alice.call('POST', '/api/me/delete', { password: PASSWORD, confirm: '注销' });
+    expect((await server.app.request('/api/admin/accounts/alice/restore', { method: 'POST', headers: bearer })).status).toBe(200);
+
+    const login = await server.app.request('/api/auth/login', {
+      method: 'POST', headers: json, body: JSON.stringify({ username: 'alice', password: PASSWORD }),
+    });
+    expect(login.status).toBe(200);
+    // /api/me 的 tokens 与 Token 页的 balance 必须一致：恢复时写 0 的话，
+    // 一个显示 0 一个显示真实余额，送花还会被判「不够」。
+    const me = await login.json() as { tokens: number; handle: string };
+    expect(me.tokens).toBe(expected);
+    const cookie = (login.headers.get('set-cookie') ?? '').split(';')[0];
+    const shopAfter = await (await server.app.request('/api/me/tokens', { headers: { cookie } })).json() as GetMyTokensResponse;
+    expect(shopAfter.balance).toBe(expected);
+  });
+
+  it('签到流水已存在时，重复入账返回账本上的余额而不是幻影值', async () => {
+    const alice = await account('alice');
+    const first = await (await alice.call('POST', '/api/me/checkin', {})).json() as { tokens: number };
+    // 注销会删掉 checkins 行，但账本留着（审计记录）。恢复后同一天再签到，
+    // onceKey 撞上已有的那笔——这时必须回读旧行，不能返回「旧余额 + 本次奖励」
+    // 这个根本没落库的数字（实测响应 782、账本 771）。
+    await alice.call('POST', '/api/me/delete', { password: PASSWORD, confirm: '注销' });
+    expect((await server.app.request('/api/admin/accounts/alice/restore', { method: 'POST', headers: bearer })).status).toBe(200);
+    const login = await server.app.request('/api/auth/login', {
+      method: 'POST', headers: json, body: JSON.stringify({ username: 'alice', password: PASSWORD }),
+    });
+    const cookie = (login.headers.get('set-cookie') ?? '').split(';')[0];
+    const again = await server.app.request('/api/me/checkin', { method: 'POST', headers: { ...json, cookie }, body: '{}' });
+    expect(again.status).toBe(200);
+    const body = await again.json() as { tokens: number };
+    expect(body.tokens).toBe(first.tokens);
+    expect(server.db.prepare("SELECT count(*) AS c FROM token_ledger WHERE handle = 'alice' AND reason = 'checkin'").get()).toEqual({ c: 1 });
+    // /api/me 与 Token 页也要一致。
+    const me = await (await server.app.request('/api/me', { headers: { cookie } })).json() as { tokens: number };
+    const shopAfter = await (await server.app.request('/api/me/tokens', { headers: { cookie } })).json() as GetMyTokensResponse;
+    expect(me.tokens).toBe(first.tokens);
+    expect(shopAfter.balance).toBe(first.tokens);
+  });
+
+  it('同一个请求编号换了文章也算冲突，不能拿旧单假装送到了新文章', async () => {
+    const alice = await account('alice');
+    const bob = await account('bob');
+    const first = await publishedPost(bob, '第一篇');
+    const second = await publishedPost(bob, '第二篇');
+    expect((await alice.redeem('flower', first, 'same-key-0001')).status).toBe(200);
+    const conflict = await alice.redeem('flower', second, 'same-key-0001');
+    expect(conflict.status).toBe(409);
+    expect(await conflict.json()).toMatchObject({ error: { code: 'IDEMPOTENCY_CONFLICT' } });
+    // 第二篇确实没有收到花。
+    expect(server.db.prepare("SELECT count(*) AS c FROM redemptions WHERE targetId = ?").get(second)).toEqual({ c: 0 });
+  });
+
+  it('导出落库只存摘要，正文只在响应里给一次', async () => {
+    const alice = await account('alice');
+    server.db.prepare("UPDATE token_ledger SET balanceAfter = 1000 WHERE handle = 'alice'").run();
+    await publishedPost(alice, '会被导出的文章');
+    const exported = await alice.redeem('export');
+    const body = await exported.json() as RedeemTokensResponse;
+    expect((body.order.payload as { posts: Array<{ title: string; status: string }> }).posts[0])
+      .toMatchObject({ title: '会被导出的文章', status: 'approved' });
+
+    // 库里只有摘要：兑换单是长期保留的审计记录，把整份内容抄进去等于再存一份
+    // 用户内容（还包含已删评论的墓碑）。
+    const stored = server.db.prepare("SELECT payload FROM redemptions WHERE handle = 'alice' AND itemKey = 'export'").get() as { payload: string };
+    expect(JSON.parse(stored.payload)).toMatchObject({ postCount: 1, commentCount: 0, feedbackCount: 0 });
+    expect(stored.payload).not.toContain('会被导出的文章');
+  });
+
   it('未登录拿不到余额也兑换不了', async () => {
     expect((await server.app.request('/api/me/tokens')).status).toBe(401);
     expect((await server.app.request('/api/me/tokens/ledger')).status).toBe(401);

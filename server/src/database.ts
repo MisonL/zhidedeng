@@ -265,6 +265,9 @@ export const SCHEMA = `
     UNIQUE(handle, idempotencyKey)
   );
   CREATE INDEX IF NOT EXISTS redemptions_item ON redemptions(handle, itemKey, createdAt DESC);
+  -- 「某位作者今天收到多少朵花」要按 itemKey + 时间区间扫，没有这条索引就是全表扫
+  -- （每一朵新花都要把历史上所有花读一遍）。
+  CREATE INDEX IF NOT EXISTS redemptions_kind_time ON redemptions(itemKey, createdAt);
   -- 已获得的持久权益（徽章）。兑换单是「发生过一次」，权益是「现在拥有」。
   CREATE TABLE IF NOT EXISTS entitlements (
     handle TEXT NOT NULL,

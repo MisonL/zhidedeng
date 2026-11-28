@@ -33,7 +33,10 @@ export default function FlowerButton({ postId }: { postId: string }) {
       await me.refreshMe();
       toast('花已经送到作者那里了');
     } catch (cause) {
-      setError((cause as Error).message);
+      // 409 ALREADY_TIPPED：说明这一篇之前送过（可能换了设备/清了缓存）。
+      // 切到「已送花」比留一个点了永远报错的按钮更诚实。
+      if ((cause as Error).message.includes('已经给这篇文章送过花')) setSent(true);
+      else setError((cause as Error).message);
     } finally {
       setBusy(false);
     }

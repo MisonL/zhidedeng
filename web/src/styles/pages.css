@@ -242,3 +242,6 @@ textarea { display: block; resize: vertical; line-height: 1.6; }
 .danger-zone { margin-top: 40px; padding: 18px 20px; border: 1px solid var(--line); border-radius: 10px; background: #fff9f9; }
 .danger-zone h2 { margin: 0 0 8px; font-size: 15px; }
 .danger-zone .hint { margin: 0 0 14px; line-height: 1.7; }
+
+/* 支持者徽章：纯装饰，所以只用小号标签，不抢标题的位置。 */
+.badge-supporter { margin-left: 10px; font-size: 12px; font-weight: 400; color: var(--muted); border: 1px solid var(--line); border-radius: 999px; padding: 2px 8px; white-space: nowrap; }

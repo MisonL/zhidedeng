@@ -86,7 +86,20 @@ export function appendLedger(store: Store, input: {
     // 而 id 主键冲突意味着别的东西出了问题（随机 UUID 撞了？），那必须抛出去，
     // 静默返回一条根本没写进库的流水会让余额悄悄对不上。
     const message = String((error as Error).message);
-    if (message.includes('UNIQUE constraint failed: token_ledger.handle, token_ledger.onceKey')) return entry;
+    if (message.includes('UNIQUE constraint failed: token_ledger.handle, token_ledger.onceKey')) {
+      // 回读已经存在的**那一行**，而不是返回刚算出来、根本没写进库的 entry：
+      // 那条 entry 的 balanceAfter 带着本次 delta，直接返回会给出一个幻影余额
+      // （实测「注销→恢复→同日签到」响应说 782，账本里还是 771）。
+      const existing = store.db.prepare(
+        'SELECT * FROM token_ledger WHERE handle = ? AND onceKey = ?',
+      ).get(input.handle, input.onceKey ?? '') as SqlRow | undefined;
+      if (!existing) throw error;
+      return {
+        id: existing.id as string, handle: existing.handle as string, delta: existing.delta as number,
+        balanceAfter: existing.balanceAfter as number, reason: existing.reason as TokenLedgerEntry['reason'],
+        memo: (existing.memo as string | null) ?? null, at: existing.at as string,
+      };
+    }
     throw error;
   }
   // user.tokens 只是缓存：真正的余额以上面的流水为准。行不存在时不重建
@@ -145,6 +158,23 @@ export function monthlyUsed(store: Store, handle: string, itemKey: string, now: 
   ).get(handle, itemKey, start, end)!.count);
 }
 
+/**
+ * 某位作者今天（上海时区）收到的花的朵数。
+ *
+ * 必须按**接收者**统计而不是按文章：按文章算的话，同一个人换着文章送就能绕开
+ * 当天的上限。「作者」从文章实体上取，不额外存一份——存了就会和文章的实际
+ * 作者不一致（文章不能转让，但历史数据可能被手工改过）。
+ */
+export function flowersToAuthorToday(store: Store, authorHandle: string, now: Date): number {
+  const { start, end } = shanghaiDayRange(now);
+  return Number(store.db.prepare(
+    `SELECT count(*) AS count FROM redemptions r
+       JOIN entities p ON p.kind = 'post' AND p.id = r.targetId
+      WHERE r.itemKey = 'flower' AND json_extract(p.data,'$.authorHandle') = ?
+        AND r.createdAt >= ? AND r.createdAt < ?`,
+  ).get(authorHandle, start, end)!.count);
+}
+
 /** 当天某个兑换项已经用了几次（用来给「每天最多收到 50 朵花」这类上限计数）。 */
 export function dailyCount(store: Store, column: 'handle' | 'targetId', value: string, itemKey: string, now: Date): number {
   const { start, end } = shanghaiDayRange(now);
@@ -194,7 +224,9 @@ export function redeem(store: Store, handle: string, input: {
       'SELECT * FROM redemptions WHERE handle = ? AND idempotencyKey = ?',
     ).get(handle, input.idempotencyKey) as SqlRow | undefined;
     if (replay) {
-      if (replay.itemKey !== input.itemKey) {
+      // 项目相同但目标不同也算冲突：同一个键换一篇文章送花，如果按旧单返回，
+      // 用户以为花送到了新的那篇，实际上什么都没发生。
+      if (replay.itemKey !== input.itemKey || ((replay.targetId as string | null) ?? null) !== (input.targetId ?? null)) {
         throw new ApiError(409, 'IDEMPOTENCY_CONFLICT', '这个请求编号已经用在别的兑换上了，请换一个');
       }
       // 同一张单重放：余额按当前值返回，不再扣钱。
@@ -212,6 +244,8 @@ export function redeem(store: Store, handle: string, input: {
     let targetId: string | null = null;
     let payload: unknown = null;
     let message = '';
+    /** 导出这类「内容只在这次响应里给一次」的完整结果，不落库。 */
+    let exported: unknown = null;
 
     if (item.key === 'flower') {
       if (!input.targetId) throw new ApiError(400, 'INVALID_INPUT', '送花要指明送给哪篇文章');
@@ -223,10 +257,11 @@ export function redeem(store: Store, handle: string, input: {
         "SELECT 1 FROM redemptions WHERE handle = ? AND itemKey = 'flower' AND targetId = ?",
       ).get(handle, input.targetId);
       if (already) throw new ApiError(409, 'ALREADY_TIPPED', '你已经给这篇文章送过花了');
-      // 作者每天最多收到 50 朵：这是防刷，不是惩罚——一个人一天被同一个号刷 20 朵
-      // 已经够了，不设上限的话排行榜式的「花最多的文章」会被一个人刷出来。
-      if (dailyCount(store, 'targetId', input.targetId, 'flower', now) >= 50) {
-        throw new ApiError(429, 'RECIPIENT_LIMIT', '这篇文章今天收到的花已经够多了，明天再来吧');
+      // **按作者**每天最多 50 朵，不是按文章：一天只限一篇的话，给同一个人换 51
+      // 篇文章各送一朵就绕开了（实测能到 51 朵）。这是防刷，不是惩罚——一个人一天
+      // 收 50 朵已经很多了。
+      if (flowersToAuthorToday(store, post.authorHandle, now) >= 50) {
+        throw new ApiError(429, 'RECIPIENT_LIMIT', '这位作者今天收到的花已经够多了，明天再来吧');
       }
       targetType = 'post'; targetId = input.targetId;
       message = `已经送了《${post.title}》一朵花`;
@@ -243,8 +278,19 @@ export function redeem(store: Store, handle: string, input: {
       store.db.prepare('INSERT INTO entitlements (handle, key, grantedAt) VALUES (?, ?, ?)').run(handle, 'supporter', at);
       message = '徽章已经挂在你的主页上了';
     } else if (item.key === 'export') {
-      payload = exportSnapshot(store, handle);
+      // 落库只存摘要：兑换单是长期保留的审计记录，把整份导出正文永久存进去
+      // 等于在库里又抄一份用户内容（还包含已删除的评论墓碑）。正文只在这次
+      // 响应里给一次，用户自己保存。
+      const snapshot = exportSnapshot(store, handle);
+      payload = {
+        generatedAt: at,
+        postCount: snapshot.posts.length,
+        commentCount: snapshot.comments.length,
+        feedbackCount: snapshot.feedback.length,
+      };
       message = '数据已经打包好，可以直接保存';
+      // 完整内容随响应返回，不进库（见上）。
+      exported = snapshot;
     } else {
       // makeup：只补昨天，且必须是真的漏签了。
       const yesterday = shanghaiDay.format(new Date(now.getTime() - 86_400_000));
@@ -254,16 +300,22 @@ export function redeem(store: Store, handle: string, input: {
       if (filled) throw new ApiError(409, 'ALREADY_CHECKED_IN', '昨天已经签到过了，不需要补签');
       // 补签只恢复连续天数，不补发那天的 Token：漏签那天本来就没挣到，
       // 用完卡又拿到币，等于签到可以花钱买，签到榜就没意义了。
-      const last = store.db.prepare(
-        'SELECT date, streak FROM checkins WHERE userHandle = ? ORDER BY date DESC LIMIT 1',
-      ).get(handle) as { date: string; streak: number } | undefined;
+      const today = shanghaiDay.format(now);
       const dayBefore = shanghaiDay.format(new Date(now.getTime() - 2 * 86_400_000));
-      // 只有「昨天之前那天签过」才算接得上连续；否则补了也只是凭空多一条记录。
-      if (!last || last.date !== dayBefore) {
-        throw new ApiError(409, 'STREAK_UNRECOVERABLE', '再往前一天也没签到，连续天数已经断了，补不回来');
-      }
+      // 前一天（补签的锚点）必须真的签过，否则补了也只是凭空多一条记录。
+      const anchor = store.db.prepare('SELECT date, streak FROM checkins WHERE userHandle = ? AND date = ?')
+        .get(handle, dayBefore) as { date: string; streak: number } | undefined;
+      if (!anchor) throw new ApiError(409, 'STREAK_UNRECOVERABLE', '再往前一天也没签到，连续天数已经断了，补不回来');
       store.db.prepare('INSERT INTO checkins (userHandle, date, tokensAwarded, streak) VALUES (?, ?, 0, ?)')
-        .run(handle, targetId, last.streak + 1);
+        .run(handle, targetId, anchor.streak + 1);
+      // 今天已经签过、但当时是按「断掉」算的（streak 从 1 开始）：补完昨天要把它
+      // 一并接上，否则页面上会出现「补签成功，连续还是 1」这种自相矛盾的显示。
+      const todayRow = store.db.prepare('SELECT streak FROM checkins WHERE userHandle = ? AND date = ?')
+        .get(handle, today) as { streak: number } | undefined;
+      if (todayRow && todayRow.streak <= anchor.streak + 2) {
+        store.db.prepare('UPDATE checkins SET streak = ? WHERE userHandle = ? AND date = ?')
+          .run(anchor.streak + 2, handle, today);
+      }
       message = `已经补上 ${targetId} 的签到，连续天数接上了`;
     }
 
@@ -280,7 +332,9 @@ export function redeem(store: Store, handle: string, input: {
     const entry = appendLedger(store, {
       handle, delta: -item.cost, reason: 'redeem', memo: `${item.name}（${item.cost} Token）`, at,
     });
-    return { order, balance: entry.balanceAfter, message };
+    // 导出：响应里给完整内容（只此一次），库里只有摘要（见上）。
+    const responseOrder = exported === null ? order : { ...order, payload: exported };
+    return { order: responseOrder, balance: entry.balanceAfter, message };
   });
 }
 
@@ -298,12 +352,18 @@ function replayMessage(row: SqlRow): string {
  * 不含别人的评论、不含投票给谁——那些是别人和站点的数据，导出自己的内容
  * 才是这个功能的用途（换站、备份、或者只是想留一份）。
  */
-function exportSnapshot(store: Store, handle: string): unknown {
+function exportSnapshot(store: Store, handle: string): { handle: string; posts: unknown[]; comments: unknown[]; feedback: unknown[] } {
   const posts = store.db.prepare(
     "SELECT data FROM entities WHERE kind = 'post' AND json_extract(data,'$.authorHandle') = ? AND removedAt IS NULL ORDER BY rowid",
   ).all(handle).map(row => {
-    const post = JSON.parse(row.data as string) as { id: string; title: string; summary: string; body: string; publishedAt: string };
-    return { id: post.id, title: post.title, summary: post.summary, body: post.body, publishedAt: post.publishedAt };
+    const post = JSON.parse(row.data as string) as
+      { id: string; title: string; summary: string; body: string; publishedAt: string; status?: string };
+    // 带上 status：被管理员改判 rejected 的文章不该和正常上线的混在一起看不出来，
+    // 导出的是「我写过的东西」，用户要能分辨哪几篇现在还在线上。
+    return {
+      id: post.id, title: post.title, summary: post.summary, body: post.body,
+      publishedAt: post.publishedAt, status: post.status ?? 'approved',
+    };
   });
   const comments = store.db.prepare(
     // 排除墓碑与隐藏：导出的应该是「我写过的话」，不是被我自己删掉的占位行，

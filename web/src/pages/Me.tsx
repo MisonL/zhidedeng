@@ -231,8 +231,9 @@ function TokenShop() {
         itemKey, idempotencyKey: `${itemKey}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
         ...(targetId ? { targetId } : {}),
       });
-      state.setData({ ...state.data!, balance: result.balance } as never);
       state.reload();
+      // 流水必须重拉：不重拉的话刚扣的那笔不在列表里，用户会以为没扣或扣错了。
+      ledger.reload();
       refreshMe();
       if (itemKey === 'export') setExported(JSON.stringify(result.order.payload, null, 2));
       toast('兑换成功，余额 ' + result.balance);
@@ -273,13 +274,19 @@ function TokenShop() {
                     </div>
                     <h3 className="post-title">{item.name}</h3>
                     <p className="hint">{item.description}</p>
-                    <button
-                      type="button" className="btn btn-small btn-red"
-                      disabled={Boolean(busy) || exhausted || owned || !affordable}
-                      onClick={() => redeem(item.key)}
-                    >
-                      {busy === item.key ? '兑换中…' : owned ? '已拥有' : exhausted ? '本月已用完' : !affordable ? `还差 ${item.cost - data.balance}` : `花 ${item.cost} Token`}
-                    </button>
+                    {item.requiresTarget === 'post'
+                      // 送花必须指明送哪一篇，这一页没有文章可选。直接给出路径，
+                      // 别在这里放一个点了必然报错的按钮。
+                      ? <p className="hint">到文章页点「送一朵花」即可</p>
+                      : (
+                        <button
+                          type="button" className="btn btn-small btn-red"
+                          disabled={Boolean(busy) || exhausted || owned || !affordable}
+                          onClick={() => redeem(item.key)}
+                        >
+                          {busy === item.key ? '兑换中…' : owned ? '已拥有' : exhausted ? '本月已用完' : !affordable ? `还差 ${item.cost - data.balance}` : `花 ${item.cost} Token`}
+                        </button>
+                      )}
                   </article>
                 );
               })}

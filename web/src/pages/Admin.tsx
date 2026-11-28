@@ -73,8 +73,10 @@ type Tab = 'submissions' | 'posts' | 'published' | 'removed' | 'removedPosts' | 
  * 手动加减 Token。只用于补偿与扣回——理由必填，因为流水就是审计日志，
  * 一条没有理由的负数事后没人解释得清。
  */
-function TokenAdjust({ handle }: { handle: string }) {
+function TokenAdjust({ handle: fixedHandle = '' }: { handle?: string }) {
+  // 从已注销列表进来时 handle 固定；从页面顶部进来时手填（活跃账号也要能补发）。
   const [open, setOpen] = useState(false);
+  const [handle, setHandle] = useState(fixedHandle);
   const [delta, setDelta] = useState('');
   const [memo, setMemo] = useState('');
   const [message, setMessage] = useState<{ ok: boolean; text: string }>();
@@ -83,11 +85,12 @@ function TokenAdjust({ handle }: { handle: string }) {
   async function apply(event: FormEvent) {
     event.preventDefault();
     const value = Number(delta);
+    if (!handle.trim()) return setMessage({ ok: false, text: '请填写用户名' });
     if (!Number.isInteger(value) || value === 0) return setMessage({ ok: false, text: '请填写一个非零整数' });
     if (!memo.trim()) return setMessage({ ok: false, text: '必须填写理由' });
     setBusy(true);
     try {
-      const result = await admin.adjustTokens(handle, value, memo.trim());
+      const result = await admin.adjustTokens(handle.trim().toLowerCase(), value, memo.trim());
       setMessage({ ok: true, text: `已调整，当前余额 ${result.balance}` });
       setDelta(''); setMemo('');
     } catch (error) {
@@ -97,17 +100,31 @@ function TokenAdjust({ handle }: { handle: string }) {
     }
   }
 
-  if (!open) return <button type="button" className="btn btn-small btn-ghost" onClick={() => setOpen(true)}>调整 Token</button>;
+  if (!open) {
+    return (
+      <div className="tags">
+        <button type="button" className="btn btn-small btn-ghost" onClick={() => setOpen(true)}>
+          {fixedHandle === '' ? '按用户名调整 Token' : '调整 Token'}
+        </button>
+      </div>
+    );
+  }
   return (
     <form onSubmit={apply} noValidate>
       <div className="field-row">
+        {fixedHandle === '' && (
+          <div className="field">
+            <label className="field-label" htmlFor="token-handle">用户名</label>
+            <input id="token-handle" value={handle} onChange={event => setHandle(event.target.value)} />
+          </div>
+        )}
         <div className="field">
-          <label className="field-label" htmlFor={`token-delta-${handle}`}>增减（负数＝扣回）</label>
-          <input id={`token-delta-${handle}`} value={delta} onChange={event => setDelta(event.target.value)} inputMode="numeric" />
+          <label className="field-label" htmlFor={`token-delta-${handle || 'any'}`}>增减（负数＝扣回）</label>
+          <input id={`token-delta-${handle || 'any'}`} value={delta} onChange={event => setDelta(event.target.value)} inputMode="numeric" />
         </div>
         <div className="field">
-          <label className="field-label" htmlFor={`token-memo-${handle}`}>理由（必填）</label>
-          <input id={`token-memo-${handle}`} value={memo} onChange={event => setMemo(event.target.value)} maxLength={200} />
+          <label className="field-label" htmlFor={`token-memo-${handle || 'any'}`}>理由（必填）</label>
+          <input id={`token-memo-${handle || 'any'}`} value={memo} onChange={event => setMemo(event.target.value)} maxLength={200} />
         </div>
       </div>
       {message && <p className={message.ok ? 'form-success' : 'form-error'}>{message.text}</p>}
@@ -898,6 +915,10 @@ export default function Admin() {
               )}
             </ul>
           )
+      )}
+
+      {tab === 'accounts' && (
+        <TokenAdjust handle="" />
       )}
 
       {tab === 'accounts' && (
