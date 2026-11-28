@@ -470,7 +470,13 @@ export function ensurePostEventColumns(store: Store) {
     const newSeq = (store.db.prepare("SELECT seq FROM sqlite_sequence WHERE name = 'post_events'").get() as
       { seq: number } | undefined)?.seq ?? 0;
     if (oldSeq > newSeq) {
-      store.db.prepare("UPDATE sqlite_sequence SET seq = ? WHERE name = 'post_events'").run(oldSeq);
+      // 表里一行事件都没有时，重建后的新表还没写过任何行，sqlite_sequence 里
+      // **没有 post_events 这一行**——UPDATE 打空，高水位照样丢。所以按「有则更新、
+      // 没有则插入」处理。
+      const updated = store.db.prepare("UPDATE sqlite_sequence SET seq = ? WHERE name = 'post_events'").run(oldSeq);
+      if ((updated as { changes?: number }).changes === 0) {
+        store.db.prepare("INSERT INTO sqlite_sequence (name, seq) VALUES ('post_events', ?)").run(oldSeq);
+      }
     }
   });
 }

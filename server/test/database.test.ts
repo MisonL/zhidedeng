@@ -59,6 +59,43 @@ describe('post_events 的 action 白名单迁移', () => {
   });
 });
 
+describe('post_events 重建后空表的高水位', () => {
+  it('表里事件被全部删光后重建，新事件 id 仍然不回头', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'zhidedeng-events-empty-'));
+    try {
+      const file = join(dir, 'old.db');
+      const old = new DatabaseSync(file);
+      // 老 CHECK（没有 reverted）+ 事件被删光：重建后新表没写过任何行，
+      // sqlite_sequence 里也没有 post_events 这一行，只 UPDATE 会打空。
+      old.exec(`
+        PRAGMA foreign_keys = ON;
+        CREATE TABLE post_events (
+          id INTEGER PRIMARY KEY AUTOINCREMENT, postId TEXT NOT NULL, authorHandle TEXT NOT NULL,
+          action TEXT NOT NULL CHECK(action IN ('removed','restored')), reason TEXT, title TEXT, at TEXT NOT NULL
+        );
+        INSERT INTO post_events (postId, authorHandle, action, title, at)
+          VALUES ('p1','alice','removed','旧','2026-11-01T00:00:00.000Z'),
+                 ('p2','alice','restored','旧2','2026-11-01T01:00:00.000Z');
+        DELETE FROM post_events;
+      `);
+      old.close();
+
+      const db = openDatabase(file);
+      try {
+        db.prepare(
+          "INSERT INTO post_events (postId, authorHandle, action, title, at) VALUES ('p3','alice','reverted','新','2026-11-02T00:00:00.000Z')",
+        ).run();
+        // 删光前最高 id 是 2，新行必须是 3，不能回头复用。
+        expect(db.prepare('SELECT id FROM post_events').all()).toEqual([{ id: 3 }]);
+      } finally {
+        db.close();
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('实体版本号与派生缓存', () => {
   const station = (slug: string, overrides: Record<string, unknown> = {}) => ({
     slug, name: slug, url: `https://${slug}.example.com/`, description: 'd', source: 'agent' as const,
