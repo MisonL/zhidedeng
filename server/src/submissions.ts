@@ -50,7 +50,10 @@ const submissionFields = {
 export const submissionBatchSchema = z.strictObject({
   channel: submissionChannel,
   batchId: batchIdentifier.optional(),
-  items: z.array(z.object(submissionFields)).max(500),
+  // 管理批次**不接受**编辑列。批次是同步脚本/运维用的批量入口，它没有「作者
+  // 打开编辑器时看到第几版」这个概念；放进来就能绕过 baseVersion 校验直接改
+  // 别人的已发布文章。编辑只有一个入口：作者本人调 submitRevision。
+  items: z.array(z.object({ ...submissionFields, targetPostId: z.never().optional(), baseVersion: z.never().optional() })).max(500),
 });
 const enqueueSchema = z.object({
   ...submissionFields,
@@ -843,6 +846,13 @@ function materialize(store: Store, submission: SubmissionRecord, reviewedAt: str
         throw new ApiError(409, 'POST_REMOVED', '文章已下架或删除，修改无法生效');
       }
       const before = store.get('post', targetId)!;
+      // 内容一个字段都没变就不升版。版本号是「内容变过」的凭证：
+      // 白涨一版会让「举报判不成立后改过才能再报」这条规则失效（作者什么都不改
+      // 重发一次就能再举报一轮），也会让「更新于」显示一个假的时间。
+      const unchanged = before.title === payload.title && before.summary === payload.summary
+        && before.body === payload.body
+        && (before.stationSlug ?? null) === (payload.stationSlug ?? null)
+        && (before.modelSlug ?? null) === (payload.modelSlug ?? null);
       // 存在还不够：管理员可能把它改判 rejected（正文已下架）。编辑稿审过来
       // 不该复活一篇已经被判定不合格的文章。
       if (before.status !== 'approved') throw new ApiError(409, 'POST_NOT_PUBLISHED', '文章已不在已发布状态，修改无法生效');
@@ -852,7 +862,8 @@ function materialize(store: Store, submission: SubmissionRecord, reviewedAt: str
         stationSlug: payload.stationSlug ?? null, modelSlug: payload.modelSlug ?? null,
         // publishedAt 不动：改一篇老文不该让它重新上榜、跳进 RSS 最新、把 sitemap
         // 的 lastmod 往后推。想表达「更新过」用 revisedAt。
-        contentVersion: (before.contentVersion ?? 1) + 1, revisedAt: reviewedAt,
+        // 内容确实变了才升版（见上面 unchanged）。
+        ...(unchanged ? {} : { contentVersion: (before.contentVersion ?? 1) + 1, revisedAt: reviewedAt }),
       });
       return;
     }
@@ -1027,6 +1038,22 @@ function reviewSubmissionInner(store: Store, now: Date, id: string, decision: {
       let resolvedReason = reason ?? null;
       let materializationReason: string | undefined;
       if (status === 'approved') {
+        // 编辑稿要复验 baseVersion。提交时校验过一次，但到审核之间文章可能又上线
+        // 了一版（另一台设备、或者管理员直接改过）。这时批准它等于把中间那次改动
+        // 悄悄覆盖掉——而作者以为自己只是改了「看到的那一版」。
+        // 落 rejected 而不是抛错：抛错会让记录留在 pending（见下面的 catch），
+        // 审核员反复点同一条也永远过不去。
+        const targetId = submission.targetPostId ?? null;
+        const baseVersion = submission.baseVersion ?? null;
+        if (targetId !== null && baseVersion !== null) {
+          const live = store.get('post', targetId);
+          if (live && (live.contentVersion ?? 1) !== baseVersion) {
+            const stale = `文章已更新到第 ${live.contentVersion ?? 1} 版，这次修改基于第 ${baseVersion} 版，已作废`;
+            store.db.prepare("UPDATE submissions SET status = 'rejected', autoApproved = 0, reason = ?, reviewedAt = ? WHERE id = ?")
+              .run(stale, reviewedAt, id);
+            return { ...submission, status: 'rejected', reason: stale, reviewedAt };
+          }
+        }
         // 历史 pending 也采用 URL 身份，避免审核后仍用旧 key 绕过下架版本校验。
         if (submission.kind === 'station' && submission.action === 'upsert') submission.originKey = submissionOriginKey(store, submission);
         materializationReason = materialize(store, submission, reviewedAt);

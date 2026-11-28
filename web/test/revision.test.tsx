@@ -1,6 +1,6 @@
 import { fireEvent, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { callsTo, renderApp, stubApi } from './helpers';
+import { callsTo, deferred, renderApp, stubApi } from './helpers';
 import { makePost } from './fixtures';
 
 // 不用 vi.mock：这个仓库的 vitest 跑在 --no-isolate 下，模块 mock 会跨文件泄漏，
@@ -30,6 +30,28 @@ describe('编辑已发布文章页', () => {
     await edit();
     await waitFor(() => expect(screen.getByLabelText('标题')).toHaveValue('线上标题'));
     expect(screen.getByText(/当前版本第 2 版/)).toBeTruthy();
+  });
+
+  it('文章详情先返回、修改后返回时，仍然预填被拒那一版（预填竞态）', async () => {
+    // 正常网络顺序就是详情先到。只等 post 就灌值的话，被拒那版永远进不来，
+    // 而 banner 还写着「下面预填的是被拒的那一版」。
+    const slowRevision = deferred<unknown>();
+    fetchMock = stubApi({
+      'GET /api/posts/p1': live,
+      'GET /api/posts/p1/revision': () => slowRevision.promise,
+    });
+    renderApp('/posts/p1/edit');
+    // 先让详情的那一轮渲染跑完。
+    await waitFor(() => expect(screen.getByText('编辑文章')).toBeTruthy());
+    slowRevision.resolve({
+      revision: {
+        submissionId: 's1', status: 'rejected', reviewReason: '写得不行',
+        submittedAt: '2026-11-02T00:00:00.000Z',
+        payload: { kind: 'community', title: '被拒的标题', summary: '被拒摘要', body: '被拒正文', stationSlug: null, modelSlug: null },
+      },
+    });
+    await waitFor(() => expect(screen.getByLabelText('标题')).toHaveValue('被拒的标题'));
+    expect(screen.getByLabelText(/^正文/)).toHaveValue('被拒正文');
   });
 
   it('被拒时预填被拒那一版，不是线上版', async () => {

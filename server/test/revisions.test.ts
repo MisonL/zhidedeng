@@ -310,6 +310,82 @@ describe('编辑已发布文章', () => {
     expect(edit.changedFields).toEqual(['title']);
   });
 
+  it('审核前文章又被改过：不覆盖，落 rejected 并说明原因', async () => {
+    const alice = await account('alice');
+    const id = await published(alice);
+    const submitted = await alice.call('PUT', `/api/posts/${id}/revision`, {
+      kind: 'community', title: '基于第 1 版写的', summary: 's', body: 'b', baseVersion: 1,
+    });
+    const submissionId = (await submitted.json() as { submissionId: string }).submissionId;
+
+    // 直接改库模拟「提交之后、审核之前文章又上线了一版」——目前站内只有审核这一条
+    // 改版路径，但别的写入方（运维脚本、未来的批量工具）同样能让版本前进。
+    // 这条防线要能在那种情况下保住用户那次改动，而不是悄悄覆盖。
+    const raw = server.db.prepare("SELECT data FROM entities WHERE kind = 'post' AND id = ?").get(id) as { data: string };
+    const data = JSON.parse(raw.data) as Record<string, unknown>;
+    server.db.prepare("UPDATE entities SET data = ? WHERE kind = 'post' AND id = ?")
+      .run(JSON.stringify({ ...data, contentVersion: 2, title: '别人改的标题' }), id);
+
+    clock = new Date(clock.getTime() + 60_000);
+    const reviewed = await server.app.request(`/api/admin/posts/${submissionId}/review`, {
+      method: 'POST', headers: bearer, body: JSON.stringify({ status: 'approved' }),
+    });
+    expect(reviewed.status).toBe(200);
+
+    const after = await postOf(id);
+    // 关键：正文没被那次「基于旧版」的修改覆盖掉。
+    expect(after.title).toBe('别人改的标题');
+    expect(after.contentVersion).toBe(2);
+    const mine = await revisionOf(alice, id);
+    expect(mine.revision?.status).toBe('rejected');
+    expect(mine.revision?.reviewReason).toContain('已更新到第 2 版');
+  });
+
+  it('内容一个字都没改时不算新版本，也不允许借此重新举报', async () => {
+    const alice = await account('alice');
+    const bob = await account('bob');
+    const id = await published(alice);
+    const before = await postOf(id);
+
+    // 原样重发一次（作者可能只是点了保存）。
+    const submitted = await alice.call('PUT', `/api/posts/${id}/revision`, {
+      kind: 'community', title: before.title, summary: '初版摘要', body: '初版正文', baseVersion: 1,
+    });
+    const submissionId = (await submitted.json() as { submissionId: string }).submissionId;
+    clock = new Date(clock.getTime() + 60_000);
+    await server.app.request(`/api/admin/posts/${submissionId}/review`, {
+      method: 'POST', headers: bearer, body: JSON.stringify({ status: 'approved' }),
+    });
+
+    const after = await postOf(id);
+    // 版本号是「内容变过」的凭证：白涨一版会让「举报判不成立后改过才能再报」
+    // 这条规则失效，也会让「更新于」显示一个假时间。
+    expect(after.contentVersion ?? 1).toBe(1);
+    expect(after.revisedAt ?? null).toBeNull();
+
+    // 只改正文、标题摘要不变，仍然算新版本。少比一个字段就会把「改了正文」
+    // 判成没改——那等于让作者的一次真实修改静默失效。
+    const bodyOnly = await alice.call('PUT', `/api/posts/${id}/revision`, {
+      kind: 'community', title: before.title, summary: '初版摘要', body: '换了一个说法', baseVersion: 1,
+    });
+    const bodyOnlyId = (await bodyOnly.json() as { submissionId: string }).submissionId;
+    clock = new Date(clock.getTime() + 60_000);
+    await server.app.request(`/api/admin/posts/${bodyOnlyId}/review`, {
+      method: 'POST', headers: bearer, body: JSON.stringify({ status: 'approved' }),
+    });
+    expect((await postOf(id)).contentVersion).toBe(2);
+    expect((await postOf(id)).body).toBe('换了一个说法');
+
+    // 顺带确认效力：判定不成立后，原样重发一次仍然拦住重复举报。
+    const report = await bob.call('POST', '/api/reports', { targetType: 'post', targetId: id, reason: '像广告' });
+    const reportId = (await report.json() as { id: string }).id;
+    await server.app.request(`/api/admin/reports/${reportId}/resolve`, {
+      method: 'POST', headers: bearer, body: JSON.stringify({ status: 'dismissed', note: '看过' }),
+    });
+    const again = await bob.call('POST', '/api/reports', { targetType: 'post', targetId: id, reason: '还是像广告' });
+    expect(again.status).toBe(409);
+  });
+
   it('同一时刻的两次编辑不会把顺序写乱（版本号单调）', async () => {
     const alice = await account('alice');
     const id = await published(alice);

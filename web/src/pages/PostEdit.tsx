@@ -45,7 +45,11 @@ export default function PostEdit() {
   // 之后用户正在输入的内容不能被后台刷新覆盖。
   const [loaded, setLoaded] = useState(false);
   useEffect(() => {
-    if (loaded || !post.data) return;
+    // 必须等**两个**请求都回来再灌值。只等 post 的话，文章详情先返回（正常网络
+    // 顺序就是这样）就会拿线上版填表并标记 loaded，随后被拒那一版到了也进不来——
+    // 而 banner 还写着「下面预填的是被拒的那一版」，正好说了反话。
+    // revision.error 也算「回来了」：那一版读不到时退回线上版，总比一直空着强。
+    if (loaded || !post.data || (revision.data === undefined && revision.error === undefined)) return;
     const source = revision.data?.revision?.payload ?? post.data;
     setForm({
       title: source.title, summary: source.summary, body: source.body,
@@ -53,7 +57,7 @@ export default function PostEdit() {
     });
     setKind((revision.data?.revision?.payload.kind ?? post.data.kind) as PostKind);
     setLoaded(true);
-  }, [loaded, post.data, revision.data]);
+  }, [loaded, post.data, revision.data, revision.error]);
 
   const change = (field: keyof PostFormValue, value: string) => setForm((current) => ({ ...current, [field]: value }));
   const pending = revision.data?.revision?.status === 'pending' ? revision.data.revision : null;
