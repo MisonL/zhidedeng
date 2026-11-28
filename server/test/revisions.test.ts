@@ -352,6 +352,14 @@ describe('编辑已发布文章', () => {
     expect(after.body).toBe('初版正文');
     expect(after.contentVersion).toBe(3);
 
+    // 作者要收到通知：不然他只会看到「内容变回去了」，以为编辑从没生效。
+    const notices = await (await alice.call('GET', '/api/me/notifications?pageSize=10')).json() as
+      { items: Array<{ title: string; detail: string | null; href: string | null }> };
+    const notice = notices.items.find(item => item.title.includes('修改被撤回'));
+    expect(notice).toBeTruthy();
+    expect(notice?.detail).toContain('退回修改前');
+    expect(notice?.href).toBe(`/posts/${id}`);
+
     // 同一份旧版只能回退一次，否则会来回把内容拉回旧版。
     const again = await server.app.request(`/api/admin/posts/${id}/revert`, { method: 'POST', headers: bearer });
     expect(again.status).toBe(409);

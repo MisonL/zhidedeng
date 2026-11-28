@@ -9,6 +9,50 @@ import { createApp, defaultDbPath, openDatabase, openStore } from '../src/node-a
 /** 测试口令用常量：username/password 相邻字面量会被 GitGuardian 当成硬编码凭据（已误报三次）。 */
 const PASSWORD = 'correct-horse-battery';
 
+describe('post_events 的 action 白名单迁移', () => {
+  it('老库只有 removed/restored 时，重开服务后能写 reverted', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'zhidedeng-events-'));
+    try {
+      const file = join(dir, 'old.db');
+      // 造一个「撤销功能之前」的库：CHECK 里没有 reverted。
+      const old = new DatabaseSync(file);
+      old.exec(`
+        PRAGMA foreign_keys = ON;
+        CREATE TABLE post_events (
+          id INTEGER PRIMARY KEY AUTOINCREMENT, postId TEXT NOT NULL, authorHandle TEXT NOT NULL,
+          action TEXT NOT NULL CHECK(action IN ('removed','restored')), reason TEXT, title TEXT, at TEXT NOT NULL
+        );
+        INSERT INTO post_events (postId, authorHandle, action, title, at)
+          VALUES ('p1','alice','removed','旧版标题','2026-11-01T00:00:00.000Z');
+      `);
+      old.close();
+
+      // 重开 = 升级：迁移必须把表重建掉，并且把老数据原样搬过去。
+      const db = openDatabase(file);
+      try {
+        expect(db.prepare("SELECT action, title FROM post_events").all()).toEqual([
+          { action: 'removed', title: '旧版标题' },
+        ]);
+        // 现在能写 reverted 了（老表的 CHECK 会拒绝）。
+        expect(() => db.prepare(
+          "INSERT INTO post_events (postId, authorHandle, action, title, at) VALUES ('p1','alice','reverted','新标题','2026-11-02T00:00:00.000Z')",
+        ).run()).not.toThrow();
+      } finally {
+        db.close();
+      }
+      // 幂等：再开一次不会重建第二次、也不会丢数据。
+      const again = openDatabase(file);
+      try {
+        expect(again.prepare('SELECT count(*) AS c FROM post_events').get()).toEqual({ c: 2 });
+      } finally {
+        again.close();
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('实体版本号与派生缓存', () => {
   const station = (slug: string, overrides: Record<string, unknown> = {}) => ({
     slug, name: slug, url: `https://${slug}.example.com/`, description: 'd', source: 'agent' as const,

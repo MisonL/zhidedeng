@@ -159,7 +159,7 @@ export function restorePost(store: Store, id: string, now = () => new Date()): {
  * 不会是它们；真实账号不会去关注演示文章。
  */
 export function recordPostEvent(
-  store: Store, postId: string, authorHandle: string, action: 'removed' | 'restored',
+  store: Store, postId: string, authorHandle: string, action: 'removed' | 'restored' | 'reverted',
   at: string, reason: string | null, title: string | null,
 ) {
   store.db.prepare('INSERT INTO post_events (postId, authorHandle, action, reason, title, at) VALUES (?,?,?,?,?,?)')
@@ -200,6 +200,10 @@ export function revertRevision(store: Store, postId: string, now: Date) {
     });
     // 清掉这一份，避免同一次编辑被反复「回退」成同一个旧版。
     store.db.prepare('UPDATE submissions SET previousPayload = NULL WHERE id = ?').run(row.id);
+    // 作者必须知道：他的修改被撤回了。不然他只会看到「内容变回去了」，
+    // 以为自己的编辑从来没生效过。
+    recordPostEvent(store, postId, post.authorHandle, 'reverted', at,
+      '这次修改被管理员撤回，内容已退回修改前', previous.title);
     return { postId, restoredVersion: (post.contentVersion ?? 1) + 1, title: previous.title };
   });
 }

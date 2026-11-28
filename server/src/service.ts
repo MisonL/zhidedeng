@@ -833,7 +833,8 @@ export class Service {
        WHERE authorHandle = ? AND authorHandle NOT IN ('unknown','unknown-feishu')
        ORDER BY at DESC, id DESC`,
     ).all(this.user) as Array<{
-      id: number; postId: string; action: 'removed' | 'restored'; reason: string | null; title: string | null; at: string;
+      id: number; postId: string; action: 'removed' | 'restored' | 'reverted';
+      reason: string | null; title: string | null; at: string;
     }>;
     for (const row of events) {
       // 链接要求文章此刻在线（恢复后可能又被下架）。
@@ -846,11 +847,15 @@ export class Service {
         kind: 'post',
         title: row.action === 'removed'
           ? `你的文章「${title}」已下架`
-          : `你的文章「${title}」已恢复`,
+          : row.action === 'reverted'
+            // 撤回和「恢复」是两件事：一个是内容退回修改前，一个是下架后重新上线。
+            ? `你的文章「${title}」的修改被撤回`
+            : `你的文章「${title}」已恢复`,
         detail: row.reason,
         // 下架后详情页 404，给链接等于给一个死链；恢复后也要确认它现在真的在线
         // （可能恢复之后又被下架了一次）。
-        href: row.action === 'restored' && online ? `/posts/${row.postId}` : null,
+        // 下架才没链接；恢复与撤回都要在线才有得看。
+        href: row.action !== 'removed' && online ? `/posts/${row.postId}` : null,
         at: row.at,
       });
     }

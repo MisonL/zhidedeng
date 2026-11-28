@@ -88,7 +88,7 @@ export const SCHEMA = `
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     postId TEXT NOT NULL,
     authorHandle TEXT NOT NULL,
-    action TEXT NOT NULL CHECK(action IN ('removed','restored')),
+    action TEXT NOT NULL CHECK(action IN ('removed','restored','reverted')),
     reason TEXT,
     -- 标题快照：文章随后被改标题/改写作者，历史通知仍应显示当时那篇。
     title TEXT,
@@ -292,6 +292,8 @@ export interface SqlDatabase {
     get(...params: SqlValue[]): SqlRow | undefined;
     all(...params: SqlValue[]): SqlRow[];
   };
+  /** 多语句 DDL 用（表重建、迁移脚本）。读路径不要用它。 */
+  exec(sql: string): void;
 }
 export type SqlValue = string | number | null;
 export type SqlRow = Record<string, unknown>;
@@ -431,10 +433,31 @@ export function ensureCommentColumns(store: Store) {
  * 没有这一列，读取时 `SELECT title` 会直接报 no such column。
  */
 export function ensurePostEventColumns(store: Store) {
-  const table = store.db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'post_events'").get();
+  const table = store.db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'post_events'").get() as
+    { sql: string } | undefined;
   if (!table) return;
   store.transaction(() => {
     ensureColumn(store.db, 'title', 'TEXT', 'post_events');
+    // 老表的 CHECK 只允许 removed/restored。加值要重建表（SQLite 不能改 CHECK），
+    // 这是标准配方：建新表 → 拷贝 → 换名 → 补索引。不做的话「撤销修改」的通知
+    // 会在老库上抛 CHECK constraint failed，而新库因为 SCHEMA 已经带 reverted 测不出来。
+    if (table.sql.includes("'reverted'")) return;
+    store.db.exec(`
+      CREATE TABLE post_events_new (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        postId TEXT NOT NULL,
+        authorHandle TEXT NOT NULL,
+        action TEXT NOT NULL CHECK(action IN ('removed','restored','reverted')),
+        reason TEXT,
+        title TEXT,
+        at TEXT NOT NULL
+      );
+      INSERT INTO post_events_new (id, postId, authorHandle, action, reason, title, at)
+        SELECT id, postId, authorHandle, action, reason, title, at FROM post_events;
+      DROP TABLE post_events;
+      ALTER TABLE post_events_new RENAME TO post_events;
+      CREATE INDEX IF NOT EXISTS post_events_author ON post_events(authorHandle, at DESC);
+    `);
   });
 }
 
