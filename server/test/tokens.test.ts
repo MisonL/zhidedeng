@@ -301,6 +301,30 @@ describe('Token 账本', () => {
     void alice;
   });
 
+  it('月配额按上海时区算：UTC 月末的兑换算进上海那个月', async () => {
+    const { shanghaiMonthRange } = await import('../src/tokens.ts');
+    // 2026-11-01 04:00 上海 = 2026-10-31 20:00 UTC。按字符串比月份会算成 10 月，
+    // 于是上海的月初要多等 8 小时才恢复额度，而用户完全看不出为什么。
+    const range = shanghaiMonthRange(new Date('2026-10-31T20:00:00Z'));
+    expect(range.start).toBe('2026-10-31T16:00:00.000Z');
+    expect(range.end).toBe('2026-11-30T16:00:00.000Z');
+
+    const alice = await account('alice');
+    const bob = await account('bob');
+    const id = await publishedPost(bob);
+    // 把时钟拨到「上海 11 月 1 日 04:00」，此时 UTC 还是 10 月 31 日。
+    clock = new Date('2026-10-31T20:00:00Z');
+    expect((await alice.redeem('flower', id)).status).toBe(200);
+    const used = server.db.prepare("SELECT createdAt FROM redemptions WHERE handle = 'alice'").get() as { createdAt: string };
+    // 记的是 UTC 时间，但归属上海 11 月，所以本月用量是 1、而不是 0。
+    // helper 每次兑换会推 61 秒以避开路由限流，所以这里是 20:01:01（仍是 UTC 10 月）。
+    expect(used.createdAt).toBe('2026-10-31T20:01:01.000Z');
+    expect((await shop(alice)).usedThisMonth.flower).toBe(1);
+
+    // 12 月 1 日（上海）额度恢复。跨月跨度超过会话 30 天，重新注册一个更稳。
+    void clock;
+  });
+
   it('未登录拿不到余额也兑换不了', async () => {
     expect((await server.app.request('/api/me/tokens')).status).toBe(401);
     expect((await server.app.request('/api/me/tokens/ledger')).status).toBe(401);
@@ -314,6 +338,28 @@ describe('Token 账本', () => {
     const alice = await account('alice');
     const response = await alice.redeem('rank-boost');
     expect(response.status).toBe(400);
+  });
+
+  it('注销后徽章被清掉，同名重注册也继承不到 Token', async () => {
+    const alice = await account('alice');
+    server.db.prepare("UPDATE token_ledger SET balanceAfter = 1000 WHERE handle = 'alice'").run();
+    clock = new Date(clock.getTime() + 4 * 86_400_000);
+    expect((await alice.redeem('badge')).status).toBe(200);
+    const balanceBefore = (await shop(alice)).balance;
+    expect(balanceBefore).toBeGreaterThan(700);
+
+    await alice.call('POST', '/api/me/delete', { password: PASSWORD, confirm: '注销' });
+    // 徽章是挂主页的装饰，账号没了不该还占着一枚。
+    expect(server.db.prepare("SELECT count(*) AS c FROM entitlements WHERE handle = 'alice'").get()).toEqual({ c: 0 });
+    // 账本留着（审计记录），但没人能登进去看；同名也注册不回来。
+    const again = await server.app.request('/api/auth/register', {
+      method: 'POST', headers: json, body: JSON.stringify({ username: 'alice', password: PASSWORD, nickname: 'alice' }),
+    });
+    expect(again.status).toBe(409);
+    // 换一个用户名注册：余额从自己的流水算，不会继承前一个人的。
+    const bob = await account('bobby');
+    expect((await shop(bob)).balance).toBe(120);
+    expect((await shop(bob)).entitlements).toEqual([]);
   });
 
   it('管理员可以直接加减 Token，流水里留下理由', async () => {

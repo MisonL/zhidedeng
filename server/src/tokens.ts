@@ -81,7 +81,12 @@ export function appendLedger(store: Store, input: {
   } catch (error) {
     // 幂等键撞了：同一个来源事件已经入过账。调用方按「已经记过」处理即可，
     // 这里不当作错误——重放一次签到应该安静地什么都不发生。
-    if (String((error as Error).message).includes('UNIQUE constraint failed: token_ledger')) return entry;
+    //
+    // 只认 onceKey 那个索引：`token_ledger(handle, onceKey)` 是唯一约束，
+    // 而 id 主键冲突意味着别的东西出了问题（随机 UUID 撞了？），那必须抛出去，
+    // 静默返回一条根本没写进库的流水会让余额悄悄对不上。
+    const message = String((error as Error).message);
+    if (message.includes('UNIQUE constraint failed: token_ledger.handle, token_ledger.onceKey')) return entry;
     throw error;
   }
   // user.tokens 只是缓存：真正的余额以上面的流水为准。行不存在时不重建
@@ -108,30 +113,48 @@ export function ledgerOf(store: Store, handle: string, page: number, pageSize: n
   };
 }
 
+/**
+ * 上海时区某个自然月的 UTC 区间 [start, end)。
+ *
+ * 不能用 `substr(createdAt,1,7)` 比月份：createdAt 存的是 UTC，上海 11 月 1 日
+ * 04:00 对应 UTC 10 月 31 日 20:00，按字符串比会被算进上个月——月初的额度就
+ * 要多等 8 小时才恢复，而用户完全看不出为什么。
+ * 上海无夏令时，固定 +08:00，区间端点可以直接写死偏移。
+ */
+export function shanghaiMonthRange(now: Date): { start: string; end: string } {
+  const [year, month] = shanghaiDay.format(now).split('-').map(Number);
+  const pad = (value: number) => String(value).padStart(2, '0');
+  const start = new Date(`${year}-${pad(month)}-01T00:00:00+08:00`);
+  const nextMonth = month === 12 ? { year: year + 1, month: 1 } : { year, month: month + 1 };
+  const end = new Date(`${nextMonth.year}-${pad(nextMonth.month)}-01T00:00:00+08:00`);
+  return { start: start.toISOString(), end: end.toISOString() };
+}
+
+/** 上海时区某一天（含 now 那天）的 UTC 区间 [start, end)。 */
+export function shanghaiDayRange(now: Date): { start: string; end: string } {
+  const date = shanghaiDay.format(now);
+  const start = new Date(`${date}T00:00:00+08:00`);
+  return { start: start.toISOString(), end: new Date(start.getTime() + 86_400_000).toISOString() };
+}
+
 /** 本月（上海时区自然月）某个兑换项已经用了几次。 */
 export function monthlyUsed(store: Store, handle: string, itemKey: string, now: Date): number {
-  const prefix = shanghaiMonth.format(now);
+  const { start, end } = shanghaiMonthRange(now);
   return Number(store.db.prepare(
-    "SELECT count(*) AS count FROM redemptions WHERE handle = ? AND itemKey = ? AND substr(createdAt, 1, 7) = ?",
-  ).get(handle, itemKey, prefix)!.count);
+    'SELECT count(*) AS count FROM redemptions WHERE handle = ? AND itemKey = ? AND createdAt >= ? AND createdAt < ?',
+  ).get(handle, itemKey, start, end)!.count);
 }
 
 /** 当天某个兑换项已经用了几次（用来给「每天最多收到 50 朵花」这类上限计数）。 */
 export function dailyCount(store: Store, column: 'handle' | 'targetId', value: string, itemKey: string, now: Date): number {
-  const prefix = shanghaiDay.format(now);
-  // 2026-11 的上海时间是 UTC+8，`substr(createdAt,1,10)` 拿的是 UTC 日期，
-  // 跨过 16:00Z 就会差一天。所以存的是 UTC 时间，比较时先换成上海日期。
-  const rows = store.db.prepare(
-    `SELECT createdAt FROM redemptions WHERE itemKey = ? AND ${column} = ?`,
-  ).all(itemKey, value) as Array<{ createdAt: string }>;
-  return rows.filter(row => shanghaiDay.format(new Date(row.createdAt)) === prefix).length;
+  const { start, end } = shanghaiDayRange(now);
+  return Number(store.db.prepare(
+    `SELECT count(*) AS count FROM redemptions WHERE itemKey = ? AND ${column} = ? AND createdAt >= ? AND createdAt < ?`,
+  ).get(itemKey, value, start, end)!.count);
 }
 
 export const shanghaiDay = new Intl.DateTimeFormat('en-CA', {
   timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit',
-});
-export const shanghaiMonth = new Intl.DateTimeFormat('en-CA', {
-  timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit',
 });
 
 export function redemptionOf(row: SqlRow): TokenRedemption {

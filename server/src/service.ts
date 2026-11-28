@@ -1425,7 +1425,13 @@ export class Service {
       for (const table of ['votes', 'favorites', 'checkins', 'comment_writes']) {
         this.store.db.prepare(`DELETE FROM ${table} WHERE ${table === 'favorites' ? 'userHandle' : 'userHandle'} = ?`).run(this.user);
       }
-      // 4) 队列里没人认领的稿子：落终态，别占着待审配额等人审。
+      // 4) Token：账本留着（它是审计记录，删了等于把「这个人曾经有过多少」抹掉），
+      //    但权益清掉——徽章是挂在个人主页上的装饰，账号都没了不该还占着一枚。
+      //    兑换单也留着：花是别人收到的，删了作者那条通知就会凭空消失。
+      //    余额本身不再有意义（登录不进来），同名重注册也继承不到——注册时
+      //    余额从流水算，而新账号的第一条流水就是 signup。
+      this.store.db.prepare('DELETE FROM entitlements WHERE handle = ?').run(this.user);
+      // 5) 队列里没人认领的稿子：落终态，别占着待审配额等人审。
       this.store.db.prepare(
         "UPDATE submissions SET status = 'rejected', reason = ?, reviewedAt = ? WHERE actorHandle = ? AND status = 'pending'",
       ).run('提交者已注销账号', at, this.user);
