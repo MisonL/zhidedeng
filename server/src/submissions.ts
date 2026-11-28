@@ -849,7 +849,8 @@ function materialize(store: Store, submission: SubmissionRecord, reviewedAt: str
       // 内容一个字段都没变就不升版。版本号是「内容变过」的凭证：
       // 白涨一版会让「举报判不成立后改过才能再报」这条规则失效（作者什么都不改
       // 重发一次就能再举报一轮），也会让「更新于」显示一个假的时间。
-      const unchanged = before.title === payload.title && before.summary === payload.summary
+      const unchanged = before.kind === payload.kind
+        && before.title === payload.title && before.summary === payload.summary
         && before.body === payload.body
         && (before.stationSlug ?? null) === (payload.stationSlug ?? null)
         && (before.modelSlug ?? null) === (payload.modelSlug ?? null);

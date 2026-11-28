@@ -8,6 +8,7 @@ import type {
   DeleteAccountRequest, RedeemTokensRequest, SearchResponse, Station, StationDetail, StationOffer, SubmissionStatus, SubmitRevisionRequest, Target, UpdateMeRequest,
   User, VendorWithModels, Vote,
 } from '@zhidedeng/shared';
+import { createHash } from 'node:crypto';
 import { ApiError, isDatabaseBusyError, isUniqueConstraintError } from './errors.ts';
 import { verifyPassword } from './auth.ts';
 import { Store } from './database.ts';
@@ -19,6 +20,15 @@ import { recordPostEvent, rejectPendingEdits } from './moderation.ts';
 import { appendLedger, balanceOf, entitlementsOf, ledgerOf, monthlyUsed, redeem, TOKEN_ITEMS } from './tokens.ts';
 
 const dayMs = 86400000;
+/** 注销后的署名前缀。文案与注销页、管理台保持一致。 */
+export const ANONYMOUS_PREFIX = '已注销用户';
+/**
+ * 用稳定短哈希代替 handle 区分不同的注销用户。
+ * 不能直接用 handle：那是登录名，挂在公开文章/评论上等于公开「谁注销了」。
+ */
+export function handleTag(handle: string): string {
+  return createHash('sha256').update(handle).digest('hex').slice(0, 4);
+}
 const shanghaiDate = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit' });
 
 /** 取 `post:<n>` 形态 id 里的数字；不是这种形态时返回 null。 */
@@ -220,6 +230,11 @@ export class Service {
   private requireUser(): User {
     const existing = this.store.get('user', this.user);
     if (existing) return existing;
+    // 注销事务里删掉了 user 行；如果这时还有在途请求走到这里，重建会让
+    // author() 不再降级、AUTHOR_GONE 判据失效——「已注销」的账号又有了资料。
+    const account = this.store.db.prepare('SELECT deletedAt FROM accounts WHERE handle = ?').get(this.user) as
+      { deletedAt: string | null } | undefined;
+    if (account?.deletedAt) throw new ApiError(401, 'UNAUTHENTICATED', '请先登录');
     // 余额从账本取，不要塞 INITIAL_TOKENS：那样 /api/me 会显示 120 而 Token 页
     // 显示 0，同一个数字两个答案。账本里有历史流水的话这里自然就是真实余额。
     const rebuilt: User = {
@@ -229,12 +244,27 @@ export class Service {
     return rebuilt;
   }
 
+  /**
+   * 今天签到了没有。checkins 行 + 账本的 checkin:<date> 任一存在即算——
+   * 注销会删 checkins 行、账本留着，恢复账号后只看 checkins 会让按钮整天亮着、
+   * 点一次失败一次。
+   */
+  private checkedInToday(date: string): boolean {
+    const today = this.store.db.prepare('SELECT 1 FROM checkins WHERE userHandle = ? AND date = ?').get(this.user, date);
+    if (today) return true;
+    return this.store.db.prepare('SELECT 1 FROM token_ledger WHERE handle = ? AND onceKey = ?')
+      .get(this.user, `checkin:${date}`) !== undefined;
+  }
+
   private author(handle: string): Author {
     const user = this.store.get('user', handle);
     if (user) return { handle, nickname: user.nickname, avatar: user.avatar };
     // 昵称带上 handle，否则不同缺失用户的评论会显示成同一个名字、同一个头像
     // （Avatar 用昵称算字形与底色），读者分不清是一条历史评论还是好几个人。
-    return { handle, nickname: `已注销用户·${handle}`, avatar: '' };
+    // 后缀用 handle 的短哈希，**不是 handle 本身**：handle 就是登录名，
+    // 挂在公开文章/评论上等于把「谁注销了」直接说出来——而注销页承诺的正是
+    // 「署名变成已注销用户」。哈希只解决「不同的人不能显示成同一个名字」。
+    return { handle, nickname: `${ANONYMOUS_PREFIX}·${handleTag(handle)}`, avatar: '' };
   }
 
   /**
@@ -576,7 +606,7 @@ export class Service {
     const yesterday = shanghaiDate.format(new Date(this.now().getTime() - dayMs));
     const last = this.store.db.prepare('SELECT date,streak FROM checkins WHERE userHandle=? ORDER BY date DESC LIMIT 1').get(this.user);
     return {
-      ...this.requireUser(), checkedInToday: last?.date === today,
+      ...this.requireUser(), checkedInToday: last?.date === today || this.checkedInToday(today),
       streak: last && (last.date === today || last.date === yesterday) ? Number(last.streak) : 0,
       // 只要个数，不要内容：原来调 myFavorites() 会把每个收藏的目标都读出来并
       // 逐条组装详情（1000 收藏时 1023 条 SQL / 364ms），而 /api/me 每次页面
@@ -740,14 +770,20 @@ export class Service {
     // 1.5) 收到的花。别人花 Token 送来的，作者该收到通知——这是唯一一个
     //    「别人主动为我花钱」的信号，看不到就等于白送了。从 redemptions 派生，
     //    不额外记事件表：花本身就是一条兑换单。
+    // 只取最近半年：这一条是全表扫（花越多越慢），而通知列表本来就只关心近期。
+    // 可见性判据与「文章链接」保持一致：下架/改判未通过的文章不在这里出现，
+    // 否则点进去是 404，恢复后通知又凭空冒出来。
+    const flowerSince = new Date(this.now().getTime() - 180 * dayMs).toISOString();
     const flowers = this.store.db.prepare(
       `SELECT r.id, r.handle, r.targetId, r.createdAt, p.data FROM redemptions r
         JOIN entities p ON p.kind = 'post' AND p.id = r.targetId
        WHERE r.itemKey = 'flower'
          AND json_extract(p.data,'$.authorHandle') = ?
+         AND json_extract(p.data,'$.status') = 'approved'
          AND p.removedAt IS NULL
+         AND r.createdAt >= ?
        ORDER BY r.createdAt DESC LIMIT 50`,
-    ).all(this.user) as Array<{ id: string; handle: string; targetId: string; createdAt: string; data: string }>;
+    ).all(this.user, flowerSince) as Array<{ id: string; handle: string; targetId: string; createdAt: string; data: string }>;
     for (const row of flowers) {
       const title = (JSON.parse(row.data) as { title?: string }).title ?? row.targetId;
       items.push({
@@ -759,7 +795,7 @@ export class Service {
         // 而且「已注销用户·handle」这种兜底昵称本身就带着登录名。
         title: `${this.store.get('user', row.handle)?.nickname ?? '已注销用户'} 给你的《${title}》送了一朵花`,
         detail: null,
-        // 文章此刻在线才给链接（上面已经按 removedAt 过滤，这里只是再确认一次）。
+        // 上面已按「已通过且未下架」过滤，这里再确认一次（并发下架时仍可能变）。
         href: this.store.get('post', row.targetId) ? `/posts/${row.targetId}` : null,
         at: row.createdAt,
       });

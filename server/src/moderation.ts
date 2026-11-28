@@ -224,6 +224,16 @@ export function restoreAccount(store: Store, handle: string, now: Date): { handl
         handle: account.handle, nickname: account.handle, avatar: '', bio: '',
         tokens: balanceOf(store, account.handle),
       });
+      // 徽章按兑换单重建：注销时清了权益、账本与单据都留着（审计），
+      // 不重建的话用户花 240 买的东西在「注销→恢复」之后凭空消失，
+      // 而当月的兑换记录还会让重买先撞月配额——永久失去且当月自愈不了。
+      const badge = store.db.prepare(
+        "SELECT 1 FROM redemptions WHERE handle = ? AND itemKey = 'badge' LIMIT 1",
+      ).get(account.handle);
+      if (badge) {
+        store.db.prepare('INSERT OR IGNORE INTO entitlements (handle, key, grantedAt) VALUES (?, ?, ?)')
+          .run(account.handle, 'supporter', now.toISOString());
+      }
     }
   });
   void now;

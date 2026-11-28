@@ -581,6 +581,60 @@ describe('Token 账本', () => {
     expect(flower?.title).not.toContain('alice');
   });
 
+  it('买过徽章后注销再恢复：权益按兑换单重建，不用再花 240', async () => {
+    const alice = await account('alice');
+    server.db.prepare("UPDATE token_ledger SET balanceAfter = 1000 WHERE handle = 'alice'").run();
+    clock = new Date(clock.getTime() + 4 * 86_400_000);
+    expect((await alice.redeem('badge')).status).toBe(200);
+    await alice.call('POST', '/api/me/delete', { password: PASSWORD, confirm: '注销' });
+    expect(server.db.prepare("SELECT count(*) AS c FROM entitlements WHERE handle = 'alice'").get()).toEqual({ c: 0 });
+
+    expect((await server.app.request('/api/admin/accounts/alice/restore', { method: 'POST', headers: bearer })).status).toBe(200);
+    // 注销时清了权益，恢复必须按包单重建：不然 240 Token 买的东西凭空消失，
+    // 而当月兑换记录还在，重买会先撞月配额（永久失去且当月自愈不了）。
+    expect(server.db.prepare("SELECT key FROM entitlements WHERE handle = 'alice'").get()).toEqual({ key: 'supporter' });
+  });
+
+  it('注销后恢复：当天已签到不会被显示成「没签到」', async () => {
+    const alice = await account('alice');
+    await alice.call('POST', '/api/me/checkin', {});
+    await alice.call('POST', '/api/me/delete', { password: PASSWORD, confirm: '注销' });
+    await server.app.request('/api/admin/accounts/alice/restore', { method: 'POST', headers: bearer });
+    const login = await server.app.request('/api/auth/login', {
+      method: 'POST', headers: json, body: JSON.stringify({ username: 'alice', password: PASSWORD }),
+    });
+    const cookie = (login.headers.get('set-cookie') ?? '').split(';')[0];
+    const me = await (await server.app.request('/api/me', { headers: { cookie } })).json() as
+      { checkedInToday: boolean; streak: number };
+    // 注销删了 checkins 行、账本留着：只看 checkins 会让签到按钮整天亮着，
+    // 点一次失败一次。
+    expect(me.checkedInToday).toBe(true);
+  });
+
+  it('给作者下架文章送的花不出现在通知里，恢复后才出现', async () => {
+    const alice = await account('alice');
+    const bob = await account('bob');
+    const id = await publishedPost(bob, '会下架的文章');
+    expect((await alice.redeem('flower', id)).status).toBe(200);
+    server.store.markRemoved('post', id, clock.toISOString());
+    const hidden = await (await bob.call('GET', '/api/me/notifications?pageSize=20')).json() as
+      { items: Array<{ title: string }> };
+    // 下架后通知消失：否则点进去就是 404。
+    expect(hidden.items.some(item => item.title.includes('送了一朵花'))).toBe(false);
+    server.store.restore('post', id);
+    const back = await (await bob.call('GET', '/api/me/notifications?pageSize=20')).json() as
+      { items: Array<{ title: string }> };
+    expect(back.items.some(item => item.title.includes('送了一朵花'))).toBe(true);
+
+    // 改判未通过（没有下架）也要消失：判据是「文章此刻能不能点开」，不是「有没有下架」。
+    expect((await server.app.request(`/api/admin/posts/${id}/review`, {
+      method: 'POST', headers: bearer, body: JSON.stringify({ status: 'rejected', reason: '内容不合规' }),
+    })).status).toBe(200);
+    const rejected = await (await bob.call('GET', '/api/me/notifications?pageSize=20')).json() as
+      { items: Array<{ title: string }> };
+    expect(rejected.items.some(item => item.title.includes('送了一朵花'))).toBe(false);
+  });
+
   it('未登录拿不到余额也兑换不了', async () => {
     expect((await server.app.request('/api/me/tokens')).status).toBe(401);
     expect((await server.app.request('/api/me/tokens/ledger')).status).toBe(401);

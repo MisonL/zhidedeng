@@ -40,7 +40,7 @@ async function published(who: Caller, title = '初版标题') {
   return id;
 }
 const postOf = async (id: string) => (await (await server.app.request(`/api/posts/${id}`)).json()) as
-  { title: string; body: string; contentVersion?: number; publishedAt: string; revisedAt?: string | null };
+  { kind: string; title: string; body: string; contentVersion?: number; publishedAt: string; revisedAt?: string | null; status: string };
 const revisionOf = async (who: Caller, id: string) => await (await who.call('GET', `/api/posts/${id}/revision`)).json() as {
   revision: { submissionId: string; status: string; payload: { title: string }; reviewReason: string | null } | null;
 };
@@ -308,6 +308,27 @@ describe('编辑已发布文章', () => {
     const edit = posts.items.find(item => item.id === submissionId)!;
     expect(edit.editOf).toBe(id);
     expect(edit.changedFields).toEqual(['title']);
+  });
+
+  it('只改类型也算修改：要升版，否则永远不能重新举报', async () => {
+    const alice = await account('alice');
+    const id = await published(alice);
+    const before = await postOf(id);
+    const submitted = await alice.call('PUT', `/api/posts/${id}/revision`, {
+      // 正文一字未改，只把「爆料」改成「评测」。
+      kind: 'review', title: before.title, summary: '初版摘要', body: '初版正文', baseVersion: 1,
+    });
+    const submissionId = (await submitted.json() as { submissionId: string }).submissionId;
+    clock = new Date(clock.getTime() + 60_000);
+    await server.app.request(`/api/admin/posts/${submissionId}/review`, {
+      method: 'POST', headers: bearer, body: JSON.stringify({ status: 'approved' }),
+    });
+    const after = await postOf(id);
+    expect(after.kind).toBe('review');
+    // 少比 kind 的话：内容「没变」→ 不升版 → 「改过才能再报」被锁死，
+    // 「更新于」也不会出现，用户看着像没保存成功。
+    expect(after.contentVersion).toBe(2);
+    expect(after.revisedAt).toBeTruthy();
   });
 
   it('审核前文章又被改过：不覆盖，落 rejected 并说明原因', async () => {

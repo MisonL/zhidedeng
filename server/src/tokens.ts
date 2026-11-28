@@ -361,7 +361,11 @@ export function redeem(store: Store, handle: string, input: {
     // 先写兑换单再扣钱：两条都在同一个事务里，顺序不影响原子性，但这样
     // 「余额不足」抛出时，前面的 insert 会随事务一起回滚（见调用方的 transaction）。
     const entry = appendLedger(store, {
-      handle, delta: -item.cost, reason: 'redeem', memo: `${item.name}（${item.cost} Token）`, at,
+      handle, delta: -item.cost, reason: 'redeem',
+      // 带上目标：流水是用户唯一能自己核对「这笔钱花在哪」的地方，
+      // 只写「送一朵花」的话一次 20 朵的记录全都长得一样。
+      memo: `${item.name}（${item.cost} Token）${targetId ? `· ${targetId}` : ''}`.slice(0, 200),
+      at,
     });
     // 导出：响应里给完整内容（只此一次），库里只有摘要（见上）。
     const responseOrder = exported === null ? order : { ...order, payload: exported };
