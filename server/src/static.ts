@@ -67,7 +67,11 @@ export function mountWeb<E extends Env>(app: Hono<E>, webRoot: string, store: St
         for (const [name, value] of SECURITY_HEADERS) found.headers.set(name, value);
         return found;
       }
-      if (path.startsWith('/assets/')) return next();
+      // 带扩展名的路径是「文件请求」，不是 SPA 路由：给它回一个 200 的
+      // HTML 壳子只会造成软 404（浏览器拿 HTML 当图片/脚本解析，搜索引擎
+      // 把不存在的地址当成一个可索引页面）。直接交给 Hono 回 404。
+      const last = path.split('/').at(-1) ?? '';
+      if (last.includes('.') || path.startsWith('/assets/')) return next();
     }
 
     // 回退到 SPA（或首页壳子），带上这条路径对应的 meta。

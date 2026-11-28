@@ -261,10 +261,11 @@ export class Service {
     if (user) return { handle, nickname: user.nickname, avatar: user.avatar };
     // 昵称带上 handle，否则不同缺失用户的评论会显示成同一个名字、同一个头像
     // （Avatar 用昵称算字形与底色），读者分不清是一条历史评论还是好几个人。
-    // 后缀用 handle 的短哈希，**不是 handle 本身**：handle 就是登录名，
-    // 挂在公开文章/评论上等于把「谁注销了」直接说出来——而注销页承诺的正是
-    // 「署名变成已注销用户」。哈希只解决「不同的人不能显示成同一个名字」。
-    return { handle, nickname: `${ANONYMOUS_PREFIX}·${handleTag(handle)}`, avatar: '' };
+    // handle 与昵称都不带登录名：handle 就是登录名，挂在公开文章/评论上等于
+    // 把「谁注销了」直接说出来。后缀用短哈希，既区分不同的人又不泄露身份。
+    // 作者主页对匿名 id 依然 404（没有对应的 user 行），不会串到别人。
+    const anonymous = `anon-${handleTag(handle)}`;
+    return { handle: anonymous, nickname: `${ANONYMOUS_PREFIX}·${handleTag(handle)}`, avatar: '' };
   }
 
   /**
@@ -385,6 +386,7 @@ export class Service {
 
   // 每个站都要用，同一请求内只读一次。
   private cachedOffers?: StationOffer[];
+  private cachedMarketOffers?: StationOffer[];
   private cachedOffersByStation?: Map<string, StationOffer[]>;
   private offers(): StationOffer[] {
     // 只算在线站点的报价。下架是软删除，报价行仍在库里（恢复时要原样拿回来），
@@ -394,6 +396,29 @@ export class Service {
        FROM offers AS offer JOIN entities AS station ON station.kind = 'station' AND station.id = offer.stationSlug
        WHERE station.removedAt IS NULL`,
     ).all() as unknown as StationOffer[];
+  }
+
+  /**
+   * 「市场行情」用的报价：模型榜的「低至 Xx」「N 站有报价」、模型页的报价条数。
+   *
+   * 与 offers() 的区别只在演示站：虚构站点的倍率一旦参与市场结论，读者会把
+   * 0.35x 当成真实行情（对比页本来就不列演示站）。但**不能无条件排除**——
+   * 纯演示环境里所有站都是 demo，全排除等于把榜单清空。所以只在库里已经有
+   * 真实报价时才摘掉演示站：有真实数据时虚构数据不参与结论；没有真实数据时
+   * 它就是全部内容（页面底部有统一提示）。
+   */
+  private marketOffers(): StationOffer[] {
+    return this.cachedMarketOffers ??= (() => {
+      const demo = new Set<string>();
+      for (const station of this.store.all('station')) {
+        if (station.source === 'demo') demo.add(station.slug);
+      }
+      return demo.size === 0 ? this.offers() : (() => {
+        const all = this.offers();
+        const real = all.filter(offer => !demo.has(offer.stationSlug));
+        return real.length > 0 ? real : all;
+      })();
+    })();
   }
 
   /**
@@ -995,9 +1020,9 @@ export class Service {
     // 所以预取。但预取是扫**全站**的票/收藏/评论，成本跟要展示的报价条数无关——
     // 16 个站点挂这个模型时全量预取 6ms、400 个站点时 59ms，而点查只有十几条 SQL。
     // 实测报价条数达到阈值以上，预取才开始划算。
-    const ratedStations = this.offers().reduce((count, offer) => count + Number(offer.modelSlug === slug), 0);
+    const ratedStations = this.marketOffers().reduce((count, offer) => count + Number(offer.modelSlug === slug), 0);
     const interactions = ratedStations >= PREFETCH_MIN_ROWS ? this.interactionMap('station') : null;
-    const offers = sortOffersForDisplay(this.offers().filter(o => o.modelSlug === slug))
+    const offers = sortOffersForDisplay(this.marketOffers().filter(o => o.modelSlug === slug))
       // 站点已被下架时报价不该出现；用 filter 兜底而不是非空断言，
       // 一条孤儿报价不能把整个模型页变成 500。
       .flatMap(o => { const station = this.store.get('station', o.stationSlug); return station ? [{ ...o, station: this.station(station, interactions ?? undefined) }] : []; });
@@ -1703,7 +1728,8 @@ export class Service {
       // blendedCount 数综合口径，门槛与最低倍率都只认它——两处口径必须一致，
       // 否则会出现「够格参与低价加成、却算不出可比最低价」的自相矛盾状态。
       const stats = new Map<string, { count: number; blendedCount: number; lowest: number }>();
-      for (const offer of this.offers()) {
+      // 用市场口径：有真实报价时不把演示站的虚构倍率算进「低至」与「N 站有报价」。
+      for (const offer of this.marketOffers()) {
         const blended = (offer.basis ?? 'blended') === 'blended';
         const current = stats.get(offer.modelSlug);
         if (current === undefined) {

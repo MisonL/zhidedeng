@@ -46,7 +46,8 @@ export function openDatabase(path: string, options: { readOnly?: boolean } = {})
     ensureReportColumns(openStore(db));
     ensureAccountColumns(openStore(db));
     // 账本上线前余额只存在 user 行里，补成首条流水，否则老用户余额会变 0。
-    seedTokenLedger(openStore(db), new Date());
+    const migration = seedTokenLedger(openStore(db), new Date());
+    if (migration.reconciled > 0) console.warn(`已把 ${migration.reconciled} 个账号的余额缓存对齐到流水账本`);
   } catch (error) {
     db.close();
     throw error;

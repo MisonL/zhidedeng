@@ -339,6 +339,11 @@ export function buildApp(store: Store, now: () => Date, options: AppOptions = {}
         return c.json({ status: 'degraded', checks, mode: options.siteMode ?? 'production' }, 503);
       }
       checks.frontend = 'ok';
+    } else if (process.env.NODE_ENV === 'production') {
+      // 生产打包后前端一定在 release/web 里；没有 webRoot 说明构建产物没带上，
+      // 此时返回 200 会让发布流程以为部署成功，而用户打开的是白页。
+      checks.frontend = 'missing';
+      return c.json({ status: 'degraded', checks, mode: options.siteMode ?? 'production' }, 503);
     }
     return c.json({ status: 'ok', checks, mode: options.siteMode ?? 'production' });
   });
@@ -766,9 +771,29 @@ function orderByMaterializeDependency(store: Store, ids: string[]): string[] {
     if (!account || !valid || account.disabledAt !== null || account.deletedAt !== null) {
       throw new ApiError(401, 'INVALID_CREDENTIALS', '用户名或密码错误');
     }
+    // 验密要等 scrypt（几十毫秒）。这期间管理员可能重置了密码、或用户被禁用/注销。
+    // **签发前在事务里复核**并写会话：一个 BEGIN IMMEDIATE 把「复核 + 建会话」
+    // 串成一步，晚到的重置/禁用要么排在前面（这里读到新值，拒绝登录），
+    // 要么排在后面（重置方会清会话）。不这么做的话，重置后仍在途的旧登录
+    // 能签出一个有效会话——用户以为改密码把别人踢下线了，其实没有。
+    let handle: string;
+    let token: string;
+    try {
+      ({ handle, token } = store.transaction(() => {
+        const fresh = store.db.prepare('SELECT passwordHash, disabledAt, deletedAt FROM accounts WHERE usernameKey = ?').get(usernameKey) as
+          { passwordHash: string; disabledAt: string | null; deletedAt: string | null } | undefined;
+        if (!fresh || fresh.passwordHash !== account.passwordHash
+          || fresh.disabledAt !== null || fresh.deletedAt !== null) {
+          throw new ApiError(401, 'INVALID_CREDENTIALS', '用户名或密码错误');
+        }
+        return { handle: account.handle as string, token: createSession(store, account.handle as string, now()) };
+      }));
+    } catch (error) {
+      refund();
+      throw error;
+    }
     refundOnSuccess();
-    const handle = account.handle as string;
-    c.header('set-cookie', sessionCookie(createSession(store, handle, now()), cookieSecure()));
+    c.header('set-cookie', sessionCookie(token, cookieSecure()));
     return c.json(new Service(store, now, handle).getMe());
   });
 

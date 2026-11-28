@@ -44,6 +44,24 @@ describe('报价倍率展示与榜单门槛', () => {
     expect(detail.offers.map(offer => offer.station.lowestRate)).toEqual([0.05, 0.6, 0.7]);
   });
 
+  it('有真实报价时，演示站的虚构倍率不参与「低至」与站数', async () => {
+    // 种子里全是演示站（0.35x 级别的虚构报价）。再造一个真实站，报 0.9x。
+    const real = 'sub-real-example-com';
+    server.db.prepare('INSERT INTO entities (kind,id,data) VALUES (?,?,?)').run('station', real, JSON.stringify({
+      slug: real, name: '真实站', description: '群友提交', url: 'https://real.example.com/',
+      source: 'submission', rechargeThreshold: null, paymentMethods: [], uptime: null,
+      firstTokenLatencyMs: null, foundedAt: null, status: null,
+    }));
+    const model = modelSlugs()[0];
+    insertOffer(real, model, 0.9);
+
+    const ranking = await getRankings();
+    if (ranking.tab !== 'model') throw new Error('排行榜类型错误');
+    // 一旦真实报价存在，虚构的 0.35 就不该再决定「低至」——否则读者会把它
+    // 当成真实行情（对比页本来就不列演示站）。
+    expect(ranking.items.find(item => item.model.slug === model)).toMatchObject({ stationCount: 1, lowestRate: 0.9 });
+  });
+
   it('单个 0.05 报价不能压过三个 0.6 报价的模型', async () => {
     const stations = stationSlugs();
     const [maliciousModel, regularModel] = modelSlugs();

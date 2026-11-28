@@ -426,24 +426,36 @@ export function entitlementsOf(store: Store, handle: string): string[] {
  *
  * 幂等：只在该 handle 完全没有流水时补，所以可以每次启动都跑。
  */
-export function seedTokenLedger(store: Store, now: Date): number {
+export function seedTokenLedger(store: Store, now: Date): { seeded: number; reconciled: number } {
   const users = store.db.prepare(
     "SELECT data FROM entities WHERE kind = 'user' AND removedAt IS NULL",
   ).all() as Array<{ data: string }>;
   let seeded = 0;
+  let reconciled = 0;
   store.transaction(() => {
     for (const row of users) {
       const user = JSON.parse(row.data) as { handle?: string; tokens?: number };
       const handle = user.handle;
       const tokens = user.tokens ?? 0;
-      if (!handle || !Number.isInteger(tokens) || tokens <= 0) continue;
+      if (!handle || !Number.isInteger(tokens)) continue;
       const existing = store.db.prepare('SELECT 1 FROM token_ledger WHERE handle = ? LIMIT 1').get(handle);
-      if (existing) continue;
+      if (existing) {
+        // 账本已经有了，就对一次账：缓存以账本为准。
+        // 这不是假想场景——回滚到旧版本时余额只写 user.tokens、不写账本，
+        // 再升回新版就会出现「缓存 131 / 账本 120」这种分裂，两个页面各显示一个数。
+        const balance = balanceOf(store, handle);
+        if (balance !== tokens) {
+          store.put('user', handle, { ...user, handle, tokens: balance } as never);
+          reconciled += 1;
+        }
+        continue;
+      }
+      if (tokens <= 0) continue;
       store.db.prepare(
         'INSERT INTO token_ledger (id,handle,delta,balanceAfter,reason,memo,onceKey,at) VALUES (?,?,?,?,?,?,?,?)',
       ).run(randomUUID(), handle, tokens, tokens, 'admin_grant', '历史余额迁移（账本上线前）', null, now.toISOString());
       seeded += 1;
     }
   });
-  return seeded;
+  return { seeded, reconciled };
 }

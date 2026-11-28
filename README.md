@@ -156,10 +156,13 @@ sudo systemctl start zhidedeng-docker-backup.service #立刻验证一次
 3. 把当前库改名留底，再把备份换进去，删掉 `-wal`/`-shm`伴生文件（它们属于旧库）。
  **必须带 `--user`**：`docker run` 默认以 root 执行，`cp` 出来的库属主是 root；而应用以 `USER node`（uid 1000）运行、启动还要 `PRAGMA journal_mode=WAL` 写库，属主不对会直接 `attempt to write a readonly database`。
  ```sh
+ # 备份文件由宿主机 root 写入、属主是 root；容器里以 uid 1000 运行时**读不到**。
+ # 先在宿主机用 root 校验、复制到一个属主正确的临时位置，再让容器里的 node 取用。
+ sudo sh -c 'sqlite3 /var/backups/zhidedeng/app-<时间戳>.db "PRAGMA integrity_check;" && install -o 1000 -g 1000 -m 0644 /var/backups/zhidedeng/app-<时间戳>.db /var/backups/zhidedeng/restore.db'
  docker run --rm --user 1000:1000 \
    -v zhidedeng_zhidedeng-data:/data \
    -v /var/backups/zhidedeng:/bak:ro \
-   node:22-slim sh -c 'mv /data/zhidedeng.db /data/zhidedeng.db.bak-<时间戳> && cp /bak/app-<时间戳>.db /data/zhidedeng.db && rm -f /data/zhidedeng.db-wal /data/zhidedeng.db-shm'
+   node:22-slim sh -c 'mv /data/zhidedeng.db /data/zhidedeng.db.bak-<时间戳> && cp /bak/restore.db /data/zhidedeng.db && rm -f /data/zhidedeng.db-wal /data/zhidedeng.db-shm'
  ```
  卷名以 `docker volume ls` 的实际输出为准。若已用 root 跑过，补一句 `chown 1000:1000 /data/zhidedeng.db` 也行。
 4. `docker start zhidedeng`，`curl -s http://<服务器地址>:<映射端口>/api/health` 应返回 database ok，再抽查前台站点数。

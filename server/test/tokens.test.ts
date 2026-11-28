@@ -509,15 +509,15 @@ describe('Token 账本', () => {
     const { seedTokenLedger } = await import('../src/tokens.ts');
     server.store.put('user', 'legacy', { handle: 'legacy', nickname: '老用户', avatar: '', bio: '', tokens: 307 });
     // 演示账号（seed 出来的）也带 tokens，所以这里可能补不止一条；只关心 legacy。
-    expect(seedTokenLedger(server.store, clock)).toBeGreaterThanOrEqual(1);
+    expect(seedTokenLedger(server.store, clock).seeded).toBeGreaterThanOrEqual(1);
     expect(server.db.prepare("SELECT delta, balanceAfter, reason FROM token_ledger WHERE handle = 'legacy'").get())
       .toEqual({ delta: 307, balanceAfter: 307, reason: 'admin_grant' });
     // 幂等：再跑一次什么都不做（否则每次重启余额翻倍）。
-    expect(seedTokenLedger(server.store, clock)).toBe(0);
+    expect(seedTokenLedger(server.store, clock).seeded).toBe(0);
     expect(server.db.prepare("SELECT count(*) AS c FROM token_ledger WHERE handle = 'legacy'").get()).toEqual({ c: 1 });
     // 已经有流水的账号（注册用户）不会被重复补。
     await account('alice');
-    expect(seedTokenLedger(server.store, clock)).toBe(0);
+    expect(seedTokenLedger(server.store, clock).seeded).toBe(0);
   });
 
   it('收花上限不跨作者串账：另一位作者照常能收到', async () => {

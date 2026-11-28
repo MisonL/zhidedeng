@@ -46,6 +46,14 @@ describe('托管前端', () => {
     expect((await server.app.request('/assets/missing.js')).status).toBe(404);
   });
 
+  it('带扩展名但文件不存在：返回 404，不回退成 200 的页面', async () => {
+    // 给它一个 200 的 HTML 壳子就是软 404：浏览器把 HTML 当图片解析、
+    // 搜索引擎把不存在的地址当成可索引页面。
+    for (const path of ['/favicon.ico', '/banners/missing.webp', '/robots.txt.bak']) {
+      expect((await server.app.request(path)).status, path).toBe(404);
+    }
+  });
+
   it('其他静态文件短缓存', async () => {
     const response = await server.app.request('/banners/a.webp');
     expect(response.status).toBe(200);

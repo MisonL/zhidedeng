@@ -17,7 +17,14 @@ FROM node:22-slim AS build
 WORKDIR /app
 RUN corepack enable
 # 复用上一层的 node_modules，避免重复下载。
+# **工作区每个包的 node_modules 里的 .bin 也要拷**：pnpm 把 esbuild/vite 的可执行
+# 文件按包放在这里，只拷根 node_modules 的话，干净构建会在 `esbuild: not found`
+# 或 `vite: not found` 上失败——本地开发因为整树都装过，一直测不出来。
 COPY --from=deps /app/node_modules ./node_modules
+COPY --from=deps /app/shared/node_modules ./shared/node_modules
+COPY --from=deps /app/server/node_modules ./server/node_modules
+COPY --from=deps /app/web/node_modules ./web/node_modules
+COPY --from=deps /app/scripts/node_modules ./scripts/node_modules
 COPY . .
 # 产出 release/server.mjs 与 release/web。
 RUN pnpm build

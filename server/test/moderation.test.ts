@@ -404,12 +404,14 @@ describe('作者实体缺失时的韧性', () => {
     expect(feed.items.find(item => item.id === post.id)!.author)
       // 后缀是 handle 的短哈希，不是 handle 本身：handle 就是登录名，
       // 挂在公开内容上等于公开「谁注销了」。
-      .toMatchObject({ handle: 'ghost', nickname: expect.stringMatching(/^已注销用户·[0-9a-f]{4}$/) });
+      .toMatchObject({ handle: expect.stringMatching(/^anon-[0-9a-f]{4}$/), nickname: expect.stringMatching(/^已注销用户·[0-9a-f]{4}$/) });
     // 详情与评论也走同一条 author()，一并确认。
     const byline = (await anonymous.get<Post>(`/api/posts/${post.id}`)).author.nickname;
     expect(byline).toMatch(/^已注销用户·[0-9a-f]{4}$/);
     // 不能把登录名带出去。
     expect(byline).not.toContain('ghost');
+    // 连 handle 字段也不能带登录名（前端拿它做链接 key，公开 API 同样会读到）。
+    expect((await anonymous.get<Post>(`/api/posts/${post.id}`)).author.handle).toMatch(/^anon-[0-9a-f]{4}$/);
   });
 
   it('会话有效但资料行丢失时，个人接口自动重建资料而不是返回半个对象', async () => {
