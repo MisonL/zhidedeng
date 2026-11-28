@@ -3,6 +3,7 @@ import { api } from '../api';
 import AsyncView from '../components/AsyncView';
 import Comments from '../components/Comments';
 import FavoriteButton from '../components/FavoriteButton';
+import FlowerButton from '../components/FlowerButton';
 import Markdown from '../components/Markdown';
 import ReportButton from '../components/ReportButton';
 import AuthorName from '../components/AuthorName';
@@ -67,6 +68,11 @@ export default function PostDetail() {
                       自己的文章不显示——那不是举报，是撤下，入口在「我的分享」。 */}
                   {post.status === 'approved' && me.data?.handle !== post.author.handle && (
                     <ReportButton targetType="post" targetId={post.id} />
+                  )}
+                  {/* 送花：只给别人的、已上线的文章。自己给自己送花没有意义，
+                      未上线的文章也不该出现在别人的阅读列表里。 */}
+                  {post.status === 'approved' && me.data && me.data.handle !== post.author.handle && (
+                    <FlowerButton postId={post.id} />
                   )}
                   {/* 作者本人才能编辑，且只有已上线的文章有「修改」可言。 */}
                   {post.status === 'approved' && me.data?.handle === post.author.handle && (

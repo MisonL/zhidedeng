@@ -230,6 +230,48 @@ export const SCHEMA = `
     ON submissions(targetPostId) WHERE status = 'pending' AND targetPostId IS NOT NULL;
   CREATE INDEX IF NOT EXISTS submissions_edit_target ON submissions(targetPostId, status, reviewedAt DESC);
   -- 管理端的运行时开关，管理员随时改，所以存库不存启动配置。
+  -- Token 流水。**余额 = 最后一行的 balanceAfter**，user.tokens 退化成缓存。
+  -- 只记流水不记余额的话，任何一次「读-改-写」并发都会丢一笔；
+  -- 只记余额不记流水的话，用户问「我的 Token 怎么少了」时无从回答。
+  CREATE TABLE IF NOT EXISTS token_ledger (
+    id TEXT PRIMARY KEY,
+    handle TEXT NOT NULL,
+    delta INTEGER NOT NULL CHECK(delta <> 0),
+    balanceAfter INTEGER NOT NULL CHECK(balanceAfter >= 0),
+    -- 收入：注册赠币、签到、管理员补发、退款；支出：兑换。
+    reason TEXT NOT NULL CHECK(reason IN ('signup','checkin','redeem','admin_grant','admin_deduct','refund')),
+    memo TEXT,
+    -- 幂等键：同一个来源事件只能入账一次（例如同一天的签到）。
+    -- NULL 表示这条流水不需要幂等约束（兑换另有 redemptions 表的唯一键管着）。
+    onceKey TEXT,
+    at TEXT NOT NULL
+  );
+  -- 不能把 rowid 写进索引（SQLite 不允许），排序时用 ORDER BY rowid 就够。
+  CREATE INDEX IF NOT EXISTS token_ledger_handle ON token_ledger(handle, at DESC);
+  -- 部分唯一索引而不是先查后插：并发下「都查到没有」然后各写一条挡不住。
+  CREATE UNIQUE INDEX IF NOT EXISTS token_ledger_once ON token_ledger(handle, onceKey) WHERE onceKey IS NOT NULL;
+  -- 兑换单。idempotencyKey 由客户端生成，重试同一个键必须返回同一张单而不是扣两次。
+  CREATE TABLE IF NOT EXISTS redemptions (
+    id TEXT PRIMARY KEY,
+    handle TEXT NOT NULL,
+    itemKey TEXT NOT NULL,
+    idempotencyKey TEXT NOT NULL,
+    cost INTEGER NOT NULL CHECK(cost > 0),
+    -- 送花指向文章、补签指向日期、导出/徽章没有目标。
+    targetType TEXT,
+    targetId TEXT,
+    payload TEXT,
+    createdAt TEXT NOT NULL,
+    UNIQUE(handle, idempotencyKey)
+  );
+  CREATE INDEX IF NOT EXISTS redemptions_item ON redemptions(handle, itemKey, createdAt DESC);
+  -- 已获得的持久权益（徽章）。兑换单是「发生过一次」，权益是「现在拥有」。
+  CREATE TABLE IF NOT EXISTS entitlements (
+    handle TEXT NOT NULL,
+    key TEXT NOT NULL,
+    grantedAt TEXT NOT NULL,
+    PRIMARY KEY (handle, key)
+  );
   CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL,

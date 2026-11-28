@@ -11,7 +11,7 @@ import StationCard from '../components/StationCard';
 import { Avatar, AvatarPresetGlyph } from '../components/visuals';
 import { AVATAR_PRESET_NAMES, AVATAR_PRESETS } from '@zhidedeng/shared';
 import { formatDate, loginPath } from '../format';
-import { usePaged } from '../hooks';
+import { useAsync, usePaged } from '../hooks';
 import { useHere, useMe, useToast } from '../state';
 import AgentTokens from './AgentTokens';
 
@@ -22,6 +22,9 @@ const TABS = [
   // 只在「我的分享」里看，作者补了模型/站点就查不到任何结果。
   { value: 'submissions', label: '我的投稿' },
   { value: 'notifications', label: '通知' },
+  // Token 以前只能看一个数字，没有任何用处——「攒着干什么」用户不知道，
+  // 管理员也没法解释。这里把余额、流水、能换什么放在一起。
+  { value: 'tokens', label: 'Token' },
   { value: 'settings', label: '账户设置' },
 ] as const;
 
@@ -208,6 +211,117 @@ function MyPosts() {
     </>
   );
 }
+
+function TokenShop() {
+  const state = useAsync((signal: AbortSignal) => api.getMyTokens(signal), []);
+  const ledger = usePaged((page, signal) => api.getTokenLedger({ page, pageSize: 20 }, signal), []);
+  const { refreshMe } = useMe();
+  const toast = useToast();
+  const [busy, setBusy] = useState<string>();
+  const [error, setError] = useState<string>();
+  const [exported, setExported] = useState<string>();
+
+  async function redeem(itemKey: string, targetId?: string) {
+    setBusy(itemKey);
+    setError(undefined);
+    try {
+      // 幂等键每一次点击都新生成：用户连点两下是两次真实意图，重试同一个请求
+      // 才应该复用同一个键（那时前端自己会重发这一份）。
+      const result = await api.redeemTokens({
+        itemKey, idempotencyKey: `${itemKey}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+        ...(targetId ? { targetId } : {}),
+      });
+      state.setData({ ...state.data!, balance: result.balance } as never);
+      state.reload();
+      refreshMe();
+      if (itemKey === 'export') setExported(JSON.stringify(result.order.payload, null, 2));
+      toast('兑换成功，余额 ' + result.balance);
+    } catch (cause) {
+      setError((cause as Error).message);
+    } finally {
+      setBusy(undefined);
+    }
+  }
+
+  return (
+    <>
+      <AsyncView state={state}>
+        {(data) => (
+          <>
+            <dl className="me-stats">
+              <div><dt>当前余额</dt><dd className="num">{data.balance}</dd></div>
+              <div><dt>累计获得</dt><dd className="num">{data.earned}</dd></div>
+              <div><dt>累计花费</dt><dd className="num">{data.spent}</dd></div>
+            </dl>
+            <p className="hint">
+              Token 只能用来换下面这几样，<strong>买不到排名、审核通过或举报优先</strong>——
+              榜单和审核要是能花钱买，这个站就没有可信的东西了。
+            </p>
+            {error && <p className="form-error" role="alert">{error}</p>}
+            <div className="card-list">
+              {data.items.map(item => {
+                const used = data.usedThisMonth[item.key] ?? 0;
+                const owned = item.key === 'badge' && data.entitlements.includes('supporter');
+                const affordable = data.balance >= item.cost;
+                const exhausted = used >= item.monthlyLimit;
+                return (
+                  <article key={item.key} className="card">
+                    <div className="tags">
+                      <span className="tag">{item.cost} Token / {item.unit}</span>
+                      <span className="tag">{item.monthlyLimit ? `本月 ${used}/${item.monthlyLimit}` : '不限次'}</span>
+                      {owned && <span className="tag tag-warn">已拥有</span>}
+                    </div>
+                    <h3 className="post-title">{item.name}</h3>
+                    <p className="hint">{item.description}</p>
+                    <button
+                      type="button" className="btn btn-small btn-red"
+                      disabled={Boolean(busy) || exhausted || owned || !affordable}
+                      onClick={() => redeem(item.key)}
+                    >
+                      {busy === item.key ? '兑换中…' : owned ? '已拥有' : exhausted ? '本月已用完' : !affordable ? `还差 ${item.cost - data.balance}` : `花 ${item.cost} Token`}
+                    </button>
+                  </article>
+                );
+              })}
+            </div>
+            {exported && (
+              <div className="field">
+                <div className="field-head">
+                  <label className="field-label" htmlFor="token-export">导出的数据</label>
+                  <button type="button" className="text-btn" onClick={() => setExported(undefined)}>收起</button>
+                </div>
+                <textarea id="token-export" readOnly rows={10} value={exported} />
+                <p className="hint">复制保存即可。也可以再花一次重新导出。</p>
+              </div>
+            )}
+          </>
+        )}
+      </AsyncView>
+      <h3 className="field-label">流水</h3>
+      <AsyncView state={ledger} isEmpty={(items) => items.length === 0} empty={<p className="state">还没有流水</p>}>
+        {(items) => (
+          <ul className="card-list">
+            {items.map(entry => (
+              <li key={entry.id} className="hint">
+                <span className="num">{entry.delta > 0 ? '+' : ''}{entry.delta}</span>
+                {'　'}{REASON_LABEL[entry.reason] ?? entry.reason}
+                {entry.memo ? `　${entry.memo}` : ''}
+                {'　'}余额 <span className="num">{entry.balanceAfter}</span>
+                {'　'}{new Date(entry.at).toLocaleString('zh-CN')}
+              </li>
+            ))}
+          </ul>
+        )}
+      </AsyncView>
+      <LoadMore paged={ledger} />
+    </>
+  );
+}
+
+const REASON_LABEL: Record<string, string> = {
+  signup: '注册赠币', checkin: '签到', redeem: '兑换',
+  admin_grant: '管理员补发', admin_deduct: '管理员扣回', refund: '退款',
+};
 
 function Settings({ user }: { user: CurrentUser }) {
   const { setMe } = useMe();
@@ -416,6 +530,7 @@ export default function Me() {
             {tab === 'posts' && <MyPosts />}
             {tab === 'submissions' && <MySubmissions />}
             {tab === 'notifications' && <MyNotifications />}
+            {tab === 'tokens' && <TokenShop />}
             {tab === 'settings' && <><Settings user={user} /><ChangePassword /><AgentTokens key={user.handle} /><DangerZone /></>}
             {tab !== 'settings' && <p className="hint me-tip">想分享新的体验？<Link to="/submit">去投稿</Link></p>}
           </>

@@ -86,6 +86,13 @@ export interface AdminPostRow {
   changedFields?: string[];
 }
 
+export interface AdminDeletedAccount {
+  handle: string;
+  createdAt: string;
+  deletedAt: string;
+  postCount: number;
+}
+
 export interface AdminReport {
   id: string;
   targetType: 'post' | 'station' | 'comment';
@@ -151,6 +158,16 @@ export const admin = {
   batchReview: (ids: string[], status: 'approved' | 'rejected', reason?: string) =>
     request<{ results: BatchReviewResult[] }>('/api/admin/submissions/batch-review', {
       method: 'POST', body: { ids, status, ...(reason ? { reason } : {}) },
+    }),
+  // 已注销账号：只读列表 + 恢复。管理员不能代用户注销（没有可代持的凭据）。
+  listDeletedAccounts: (signal?: AbortSignal) =>
+    request<{ items: AdminDeletedAccount[] }>('/api/admin/accounts/deleted', { signal }),
+  restoreAccount: (handle: string) =>
+    request<{ handle: string; restored: true }>(`/api/admin/accounts/${encodeURIComponent(handle)}/restore`, { method: 'POST' }),
+  // 加减 Token：理由必填（流水就是审计日志）。
+  adjustTokens: (handle: string, delta: number, memo: string) =>
+    request<{ handle: string; balance: number }>(`/api/admin/accounts/${encodeURIComponent(handle)}/tokens`, {
+      method: 'POST', body: { delta, memo },
     }),
   listPosts: (status: string, signal?: AbortSignal) =>
     request<{ items: AdminPostRow[] }>(`/api/admin/posts?status=${encodeURIComponent(status)}`, { signal }),

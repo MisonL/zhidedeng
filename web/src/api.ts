@@ -1,6 +1,6 @@
 import { API_ROUTES } from '@zhidedeng/shared';
 import type {
-  ApiContracts, ApiErrorResponse, ApiRouteName, ChangePasswordRequest, CreateAgentTokenRequest, CreateCommentRequest, CreatePostRequest, CreateReportRequest, DeleteAccountRequest, SubmitRevisionRequest,
+  ApiContracts, ApiErrorResponse, ApiRouteName, ChangePasswordRequest, CreateAgentTokenRequest, CreateCommentRequest, CreatePostRequest, CreateReportRequest, DeleteAccountRequest, GetTokenLedgerRequest, RedeemTokensRequest, SubmitRevisionRequest,
   GetModelsRequest, GetPostsRequest, GetRankingsRequest, GetStationsRequest, LoginRequest, PaginationQuery,
   PutFavoriteRequest, PutVoteRequest, RegisterRequest, SuggestModelRequest, Target, SuggestStationRequest, UpdateMeRequest
 } from '@zhidedeng/shared';
@@ -90,6 +90,9 @@ export const api = {
   deleteAccount: (body: DeleteAccountRequest) => call('deleteAccount', { body }),
   submitRevision: (id: string, body: Omit<SubmitRevisionRequest, 'id'>) => call('submitRevision', { path: { id }, body: { ...body, id } }),
   getRevision: (id: string, signal?: AbortSignal) => call('getRevision', { path: { id }, signal }),
+  getMyTokens: (signal?: AbortSignal) => call('getMyTokens', { signal }),
+  getTokenLedger: (query: GetTokenLedgerRequest, signal?: AbortSignal) => call('getTokenLedger', { query, signal }),
+  redeemTokens: (body: RedeemTokensRequest) => call('redeemTokens', { body }),
   withdrawRevision: (id: string) => call('withdrawRevision', { path: { id } }),
   suggestModel: (body: SuggestModelRequest) => call('suggestModel', { body }),
   suggestStation: (body: SuggestStationRequest) => call('suggestStation', { body }),

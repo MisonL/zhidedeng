@@ -1,6 +1,7 @@
 import type { AdminDisableUserResponse, PostStatus } from '@zhidedeng/shared';
 import type { Store } from './database.ts';
 import { ApiError } from './errors.ts';
+import { appendLedger } from './tokens.ts';
 import { comparePublishedAt } from './service.ts';
 import { reviewSubmission } from './submissions.ts';
 
@@ -157,6 +158,27 @@ export function recordPostEvent(
 }
 
 /** 禁用后所有会话立即失效，公开内容保留；恢复后要重新登录。 */
+/**
+ * 管理员直接加减 Token。
+ *
+ * 只给了「补发」和「扣回」两种用途，都要写理由：流水就是审计日志，一条没有
+ * 理由的负数事后没人解释得清。扣到负数直接拒绝——余额是余额，不是信用额度。
+ */
+export function adjustTokens(store: Store, handle: string, input: { delta: number; memo: string }, now: Date) {
+  const account = store.db.prepare('SELECT handle FROM accounts WHERE usernameKey = ?').get(handle.toLowerCase()) as
+    { handle: string } | undefined;
+  if (!account) throw new ApiError(404, 'NOT_FOUND', '账号不存在');
+  const memo = input.memo.trim();
+  if (!memo) throw new ApiError(400, 'INVALID_INPUT', '必须填写理由，流水就是审计日志');
+  return store.transaction(() => {
+    const entry = appendLedger(store, {
+      handle: account.handle, delta: input.delta, reason: input.delta > 0 ? 'admin_grant' : 'admin_deduct',
+      memo: memo.slice(0, 200), at: now.toISOString(),
+    });
+    return { handle: account.handle, balance: entry.balanceAfter, entry };
+  });
+}
+
 /**
  * 管理员查看已注销账号。
  *

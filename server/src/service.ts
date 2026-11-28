@@ -5,7 +5,7 @@ import type {
   CreateFeedbackRequest, CreateReportRequest, CurrentUser, Favorite, FavoriteItem, GetCommentsRequest, GetModelsRequest, GetPostsRequest,
   GetRankingsRequest, GetRankingsResponse, GetStationsRequest, InteractionState, ModelDetail,
   Feedback, FeedbackVerdict, GetFeedbackRequest, PaginationQuery, Post, PublicProfile, PutFavoriteRequest, PutFavoriteResponse, PutVoteRequest, PutVoteResponse,
-  DeleteAccountRequest, SearchResponse, Station, StationDetail, StationOffer, SubmissionStatus, SubmitRevisionRequest, Target, UpdateMeRequest,
+  DeleteAccountRequest, RedeemTokensRequest, SearchResponse, Station, StationDetail, StationOffer, SubmissionStatus, SubmitRevisionRequest, Target, UpdateMeRequest,
   User, VendorWithModels, Vote,
 } from '@zhidedeng/shared';
 import { ApiError, isDatabaseBusyError, isUniqueConstraintError } from './errors.ts';
@@ -16,6 +16,7 @@ import type { PostRecord, StationRecord } from './database.ts';
 // submissions.ts 不 import service.ts，这个方向是单向的。
 import { enqueueSubmission, findStation, hostnameOf, materializedPostId } from './submissions.ts';
 import { recordPostEvent, rejectPendingEdits } from './moderation.ts';
+import { appendLedger, balanceOf, entitlementsOf, ledgerOf, monthlyUsed, redeem, TOKEN_ITEMS } from './tokens.ts';
 
 const dayMs = 86400000;
 const shanghaiDate = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit' });
@@ -621,9 +622,13 @@ export class Service {
       const tokensAwarded = 10 + Math.min(streak, 7);
       const date = shanghaiDate.format(this.now());
       this.store.db.prepare('INSERT INTO checkins (userHandle,date,tokensAwarded,streak) VALUES (?,?,?,?)').run(this.user, date, tokensAwarded, streak);
-      const user = this.requireUser();
-      this.store.put('user', this.user, { ...user, tokens: user.tokens + tokensAwarded });
-      return { userHandle: this.user, date, tokensAwarded, streak, tokens: user.tokens + tokensAwarded, checkedInToday: true };
+      // 余额只从流水算：直接把 user.tokens 加一下的话，「签到」和「兑换」两条
+      // 路径的并发会互相覆盖，用户的余额和账本对不上。
+      const entry = appendLedger(this.store, {
+        handle: this.user, delta: tokensAwarded, reason: 'checkin',
+        memo: `第 ${streak} 天签到`, onceKey: `checkin:${date}`, at: this.now().toISOString(),
+      });
+      return { userHandle: this.user, date, tokensAwarded, streak, tokens: entry.balanceAfter, checkedInToday: true };
     });
   }
 
@@ -718,6 +723,30 @@ export class Service {
         // 编辑的链接永远指回原来那篇文章（不是那条队列记录）。
         href: approved ? this.liveSubmissionHref(row, payload) : null,
         at: row.reviewedAt,
+      });
+    }
+
+    // 1.5) 收到的花。别人花 Token 送来的，作者该收到通知——这是唯一一个
+    //    「别人主动为我花钱」的信号，看不到就等于白送了。从 redemptions 派生，
+    //    不额外记事件表：花本身就是一条兑换单。
+    const flowers = this.store.db.prepare(
+      `SELECT r.id, r.handle, r.targetId, r.createdAt, p.data FROM redemptions r
+        JOIN entities p ON p.kind = 'post' AND p.id = r.targetId
+       WHERE r.itemKey = 'flower'
+         AND json_extract(p.data,'$.authorHandle') = ?
+         AND p.removedAt IS NULL
+       ORDER BY r.createdAt DESC LIMIT 50`,
+    ).all(this.user) as Array<{ id: string; handle: string; targetId: string; createdAt: string; data: string }>;
+    for (const row of flowers) {
+      const title = (JSON.parse(row.data) as { title?: string }).title ?? row.targetId;
+      items.push({
+        id: `flower:${row.id}`,
+        kind: 'flower',
+        title: `${row.handle} 给你的《${title}》送了一朵花`,
+        detail: null,
+        // 文章此刻在线才给链接（上面已经按 removedAt 过滤，这里只是再确认一次）。
+        href: this.store.get('post', row.targetId) ? `/posts/${row.targetId}` : null,
+        at: row.createdAt,
       });
     }
 
@@ -1328,6 +1357,36 @@ export class Service {
       throw error;
     }
     return { id, status: 'open' as const };
+  }
+
+  /** Token 余额、商店目录、本月用量、已有权益。一处取齐，前端不用打三个请求。 */
+  getMyTokens() {
+    const handle = this.user;
+    const totals = this.store.db.prepare(
+      "SELECT COALESCE(SUM(CASE WHEN delta > 0 THEN delta ELSE 0 END), 0) AS earned, COALESCE(SUM(CASE WHEN delta < 0 THEN -delta ELSE 0 END), 0) AS spent FROM token_ledger WHERE handle = ?",
+    ).get(handle) as { earned: number; spent: number };
+    const usedThisMonth: Record<string, number> = {};
+    for (const item of TOKEN_ITEMS) usedThisMonth[item.key] = monthlyUsed(this.store, handle, item.key, this.now());
+    return {
+      balance: balanceOf(this.store, handle),
+      earned: Number(totals.earned), spent: Number(totals.spent),
+      items: TOKEN_ITEMS, entitlements: entitlementsOf(this.store, handle), usedThisMonth,
+    };
+  }
+
+  getTokenLedger(query: PaginationQuery) {
+    const page = query.page ?? 1;
+    const pageSize = Math.min(query.pageSize ?? 20, 50);
+    return ledgerOf(this.store, this.user, page, pageSize);
+  }
+
+  /**
+   * 兑换。限流放在路由层（按账号），这里只管业务规则。
+   * 送花之后要给作者一条通知——但通知走的是「我的通知」那条拉取路径，
+   * 花本身记在 redemptions 里，由通知那侧按它派生，不额外写事件表。
+   */
+  redeemTokens(input: RedeemTokensRequest) {
+    return redeem(this.store, this.user, input, this.now());
   }
 
   /**

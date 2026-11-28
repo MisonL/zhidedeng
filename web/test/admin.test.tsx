@@ -264,8 +264,8 @@ describe('审核台的批量语义', () => {
     await unlock();
     expect(screen.getByRole('tablist')).toBeInTheDocument();
     const tabs = screen.getAllByRole('tab');
-    // 待审投稿 / 待审文章 / 已上线文章 / 已下架站点 / 已下架文章 / 举报
-    expect(tabs.map(tab => tab.textContent?.trim().split(' ')[0])).toEqual(['待审投稿', '待审文章', '已上线文章', '已下架站点', '已下架文章', '举报']);
+    // 待审投稿 / 待审文章 / 已上线文章 / 已下架站点 / 已下架文章 / 举报 / 账号
+    expect(tabs.map(tab => tab.textContent?.trim().split(' ')[0])).toEqual(['待审投稿', '待审文章', '已上线文章', '已下架站点', '已下架文章', '举报', '账号']);
     expect(tabs.some(tab => tab.textContent?.includes('退出'))).toBe(false);
     expect(screen.getByRole('tab', { name: /待审投稿/ })).toHaveAttribute('aria-selected', 'true');
   });

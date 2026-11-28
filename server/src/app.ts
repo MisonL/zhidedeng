@@ -13,12 +13,13 @@ import { AttemptLimiter, burnPasswordCheck, clearedSessionCookie, createSession,
 import { agentTokenSchema, createAgentToken, listAgentTokens, revokeAgentToken } from './agent-tokens.ts';
 import { agentHandle, agentTokenHash } from './agent-auth.ts';
 import { AgentApi } from './agent-api.ts';
+import { appendLedger } from './tokens.ts';
 import { authorizeAdmin, adminSlug, createModel, createVendor, deleteModel, importResponse, updateModel } from './catalog.ts';
 import type { Store } from './database.ts';
 import { Service, isReservedNickname, normalizeNickname } from './service.ts';
 import { ApiError, isDatabaseBusyError } from './errors.ts';
 import { createInviteCode, listInviteCodes, revokeInviteCode } from './invite-codes.ts';
-import { listDeletedAccounts, listPosts, listReports, resolveReport, restoreAccount, restorePost, reviewPost, setAccountDisabled, setCommentHidden, withdrawPost } from './moderation.ts';
+import { adjustTokens, listDeletedAccounts, listPosts, listReports, resolveReport, restoreAccount, restorePost, reviewPost, setAccountDisabled, setCommentHidden, withdrawPost } from './moderation.ts';
 import { autoApproveEnabled, enqueueBatch, enqueueSubmission, listSubmissions, reviewSubmission, setAutoApprove, submissionBatchReviewSchema, submissionBatchSchema, submissionQuerySchema, submissionReviewSchema, submissionState } from './submissions.ts';
 
 /**
@@ -81,6 +82,9 @@ const CHECKIN_PER_USER = 5;
 // 注销要做一次 scrypt 校验（几十毫秒）。不限流可以拿它当 CPU 放大器，
 // 而成功一次就少一个账号，本来也不该被连点。3 次/小时够正常人试错。
 const DELETE_ACCOUNT_PER_IP = 3;
+// 兑换按账号限流。一分钟 6 次足够正常人操作（含误点重试），
+// 又挡住了「脚本把每月额度几秒刷完」。
+const REDEEM_PER_MINUTE = 6;
 
 //投票与收藏按用户滑窗限流：主键去重挡不住「反复切换值」的刷量写事务，
 //每次调用都全表扫描互动数据，不设闸会被低成本压库。
@@ -271,6 +275,7 @@ export function buildApp(store: Store, now: () => Date, options: AppOptions = {}
   // 按 IP 而不是按账号：注销成功之后就没有账号可记了，按账号的桶会跟着消失，
   // 于是可以注册一批账号刷同一个 IP。
   const deleteAccountByIp = new AttemptLimiter(DELETE_ACCOUNT_PER_IP, CHECKIN_WINDOW_MS, store, 'delete-account-ip');
+  const redeemByUser = new AttemptLimiter(REDEEM_PER_MINUTE, 60_000, store, 'redeem-user');
  const voteByUser = new AttemptLimiter(VOTE_PER_USER, VOTE_WINDOW_MS, store, 'vote-user');
 
   const app = new Hono<{ Bindings: Bindings }>();
@@ -571,6 +576,12 @@ function orderByMaterializeDependency(store: Store, ids: string[]): string[] {
     const { handle } = z.strictObject({ handle: z.string().trim().min(1).max(200) }).parse(c.req.param());
     return c.json(restoreAccount(store, handle, now()));
   });
+  // 直接加减 Token。只用于补偿与扣回，理由必填。
+  app.post('/api/admin/accounts/:handle/tokens', async c => {
+    const { handle } = z.strictObject({ handle: z.string().trim().min(1).max(200) }).parse(c.req.param());
+    const body = z.strictObject({ delta: z.number().int().min(-100_000).max(100_000).refine(value => value !== 0, '加减额不能为 0'), memo: z.string().trim().min(1).max(200) }).parse(await c.req.json());
+    return c.json(adjustTokens(store, handle, body, now()));
+  });
   app.post('/api/admin/users/:handle/disable', async c => {
     const { disabled } = z.strictObject({ disabled: z.boolean() }).parse(await c.req.json());
     return c.json(setAccountDisabled(store, c.req.param('handle'), disabled, now()));
@@ -689,7 +700,13 @@ function orderByMaterializeDependency(store: Store, ids: string[]): string[] {
       // 事务外那次检查都会通过。
       checkNickname();
       store.db.prepare('INSERT INTO accounts (handle, usernameKey, passwordHash, createdAt) VALUES (?, ?, ?, ?)').run(handle, usernameKey, passwordHash, now().toISOString());
-      store.put('user', handle, { handle, nickname: wantedNickname, avatar: '', bio: '', tokens: INITIAL_TOKENS });
+      store.put('user', handle, { handle, nickname: wantedNickname, avatar: '', bio: '', tokens: 0 });
+      // 注册赠币也走流水：不记的话「余额 = 流水累加」在第一个用户身上就对不上，
+      // 后面所有对账都是错的。
+      appendLedger(store, {
+        handle, delta: INITIAL_TOKENS, reason: 'signup', memo: '注册赠币',
+        onceKey: 'signup', at: now().toISOString(),
+      });
       return createSession(store, handle, now());
     });
     c.header('set-cookie', sessionCookie(token, cookieSecure()));
@@ -851,6 +868,22 @@ function orderByMaterializeDependency(store: Store, ids: string[]): string[] {
     if (wait > 0) throw new ApiError(429, 'RATE_LIMITED', '签到太频繁了，请稍后再试', { retryAfter: wait });
     checkInByUser.record(key, now().getTime());
     return service.checkIn();
+  });
+  route('getMyTokens', z.strictObject({}), service => service.getMyTokens());
+  route('getTokenLedger', z.strictObject(pagination), (service, input) => service.getTokenLedger(input));
+  route('redeemTokens', z.strictObject({
+    itemKey: identifier,
+    // 客户端生成的请求编号。重试同一个键返回同一张单，不会扣两次。
+    idempotencyKey: z.string().trim().min(8).max(100),
+    targetId: z.string().trim().max(200).optional(),
+  }), (service, input, ip) => {
+    // 兑换要扣钱，按账号限流：脚本连点会把「每月 20 朵花」的额度在几秒内刷完，
+    // 而用户根本来不及看清自己点了什么。
+    const key = service.handle ?? ip;
+    const wait = redeemByUser.retryAfter(key, now().getTime());
+    if (wait > 0) throw new ApiError(429, 'RATE_LIMITED', '兑换太频繁了，请稍后再试', { retryAfter: wait });
+    redeemByUser.record(key, now().getTime());
+    return service.redeemTokens(input);
   });
   // 注销账号。口令校验一次要跑 scrypt（几十毫秒），不限流的话可以拿来当
   // CPU 放大器；而且注销每成功一次就少一个账号，本来也不该被连点。

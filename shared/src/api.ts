@@ -209,6 +209,79 @@ export interface DeleteAccountRequest {
 }
 export interface DeleteAccountResponse { ok: true; deletedAt: string }
 
+/**
+ * Token 消耗。只卖「不影响内容准入」的东西：送花、徽章、导出自己的数据、补签。
+ * 买排名/审核/举报优先这类一律不做——能买就不再是真实体验。
+ */
+export interface TokenShopItem {
+  key: string;
+  name: string;
+  cost: number;
+  unit: string;
+  description: string;
+  /** 每自然月的次数上限（上海时区）。 */
+  monthlyLimit: number;
+  /** 每自然日的次数上限，未设则不限制。 */
+  dailyLimit?: number;
+  /** 兑换时必须带 targetId 的话，这里说明目标是什么。 */
+  requiresTarget: 'post' | 'date' | null;
+}
+
+export interface TokenLedgerEntry {
+  id: string;
+  handle: string;
+  /** 正数为收入，负数为支出。 */
+  delta: number;
+  balanceAfter: number;
+  reason: 'signup' | 'checkin' | 'redeem' | 'admin_grant' | 'admin_deduct' | 'refund';
+  memo: string | null;
+  at: string;
+}
+
+export interface TokenRedemption {
+  id: string;
+  itemKey: string;
+  cost: number;
+  targetType: string | null;
+  targetId: string | null;
+  payload: unknown;
+  createdAt: string;
+}
+
+export interface GetMyTokensRequest { [key: string]: never }
+export interface GetMyTokensResponse {
+  balance: number;
+  earned: number;
+  spent: number;
+  items: TokenShopItem[];
+  /** 已获得的持久权益（例如徽章）。 */
+  entitlements: string[];
+  /** 各项目本自然月已用次数，key 是 itemKey。 */
+  usedThisMonth: Record<string, number>;
+}
+
+export interface GetTokenLedgerRequest {
+  page?: number;
+  pageSize?: number;
+}
+export interface GetTokenLedgerResponse {
+  items: TokenLedgerEntry[];
+  total: number;
+  page: number;
+  pageSize: number;
+}
+
+export interface RedeemTokensRequest {
+  itemKey: string;
+  /** 客户端生成，重试同一个键返回同一张单，不会扣两次。 */
+  idempotencyKey: string;
+  targetId?: string;
+}
+export interface RedeemTokensResponse {
+  order: TokenRedemption;
+  balance: number;
+}
+
 export interface DeletePostRequest { id: string }
 export interface DeletePostResponse { id: string; removed: true }
 
@@ -373,11 +446,11 @@ export type GetMySubmissionsResponse = PaginatedResponse<MySubmission>;
  */
 export interface NotificationItem {
   /**
-   * 稳定 id，由来源表的主键派生（`submission:<id>` / `report:<id>` / `post:<流水主键>`）。
+   * 稳定 id，由来源表的主键派生（`submission:<id>` / `report:<id>` / `post:<流水主键>` / `flower:<兑换单>`）。
    * 前端只拿它当 React key，不做业务判断。
    */
   id: string;
-  kind: 'submission' | 'report' | 'post';
+  kind: 'submission' | 'report' | 'post' | 'flower';
   /** 一句话标题，服务端拼好。文案归服务端管，前端不再二次解释。 */
   title: string;
   /** 补充说明：驳回理由、举报处置备注、下架原因。没有就是 null。 */
@@ -633,6 +706,9 @@ export interface ApiContracts {
   getPost: { request: GetPostRequest; response: ApiResponse<GetPostResponse> };
   createPost: { request: CreatePostRequest; response: ApiResponse<CreatePostResponse> };
   deleteAccount: { request: DeleteAccountRequest; response: ApiResponse<DeleteAccountResponse> };
+  getMyTokens: { request: GetMyTokensRequest; response: ApiResponse<GetMyTokensResponse> };
+  getTokenLedger: { request: GetTokenLedgerRequest; response: ApiResponse<GetTokenLedgerResponse> };
+  redeemTokens: { request: RedeemTokensRequest; response: ApiResponse<RedeemTokensResponse> };
   submitRevision: { request: SubmitRevisionRequest; response: ApiResponse<SubmitRevisionResponse> };
   getRevision: { request: GetRevisionRequest; response: ApiResponse<GetRevisionResponse> };
   withdrawRevision: { request: WithdrawRevisionRequest; response: ApiResponse<WithdrawRevisionResponse> };

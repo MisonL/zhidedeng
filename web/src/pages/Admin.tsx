@@ -3,7 +3,7 @@ import type { FormEvent } from 'react';
 import { feishuHostnameKey } from '@zhidedeng/shared';
 import type { Station, SubmissionRecord } from '@zhidedeng/shared';
 import { admin, adminToken, AdminError } from '../admin';
-import type { AdminPostRow, AdminReport, RemovedPost, RemovedStation } from '../admin';
+import type { AdminDeletedAccount, AdminPostRow, AdminReport, RemovedPost, RemovedStation } from '../admin';
 import { Skeleton } from '../components/AsyncView';
 import ConfirmButton from '../components/ConfirmButton';
 import { useCatalog } from '../state';
@@ -67,7 +67,57 @@ function impact(submission: SubmissionRecord, current: Station | undefined): str
   return lines;
 }
 
-type Tab = 'submissions' | 'posts' | 'published' | 'removed' | 'removedPosts' | 'reports';
+type Tab = 'submissions' | 'posts' | 'published' | 'removed' | 'removedPosts' | 'reports' | 'accounts';
+
+/**
+ * 手动加减 Token。只用于补偿与扣回——理由必填，因为流水就是审计日志，
+ * 一条没有理由的负数事后没人解释得清。
+ */
+function TokenAdjust({ handle }: { handle: string }) {
+  const [open, setOpen] = useState(false);
+  const [delta, setDelta] = useState('');
+  const [memo, setMemo] = useState('');
+  const [message, setMessage] = useState<{ ok: boolean; text: string }>();
+  const [busy, setBusy] = useState(false);
+
+  async function apply(event: FormEvent) {
+    event.preventDefault();
+    const value = Number(delta);
+    if (!Number.isInteger(value) || value === 0) return setMessage({ ok: false, text: '请填写一个非零整数' });
+    if (!memo.trim()) return setMessage({ ok: false, text: '必须填写理由' });
+    setBusy(true);
+    try {
+      const result = await admin.adjustTokens(handle, value, memo.trim());
+      setMessage({ ok: true, text: `已调整，当前余额 ${result.balance}` });
+      setDelta(''); setMemo('');
+    } catch (error) {
+      setMessage({ ok: false, text: (error as Error).message });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (!open) return <button type="button" className="btn btn-small btn-ghost" onClick={() => setOpen(true)}>调整 Token</button>;
+  return (
+    <form onSubmit={apply} noValidate>
+      <div className="field-row">
+        <div className="field">
+          <label className="field-label" htmlFor={`token-delta-${handle}`}>增减（负数＝扣回）</label>
+          <input id={`token-delta-${handle}`} value={delta} onChange={event => setDelta(event.target.value)} inputMode="numeric" />
+        </div>
+        <div className="field">
+          <label className="field-label" htmlFor={`token-memo-${handle}`}>理由（必填）</label>
+          <input id={`token-memo-${handle}`} value={memo} onChange={event => setMemo(event.target.value)} maxLength={200} />
+        </div>
+      </div>
+      {message && <p className={message.ok ? 'form-success' : 'form-error'}>{message.text}</p>}
+      <div className="tags">
+        <button type="submit" className="btn btn-small btn-red" disabled={busy}>{busy ? '提交中…' : '确认调整'}</button>
+        <button type="button" className="btn btn-small btn-ghost" onClick={() => setOpen(false)}>取消</button>
+      </div>
+    </form>
+  );
+}
 
 /** 编辑稿「改动了什么」的中文名，只给审核员一个大概，不需要精确到字符。 */
 const FIELD_LABEL: Record<string, string> = { title: '标题', summary: '摘要', body: '正文', stationSlug: '关联站点', modelSlug: '关联模型' };
@@ -86,6 +136,8 @@ export default function Admin() {
   const [submissions, setSubmissions] = useState<SubmissionRecord[]>();
   const [posts, setPosts] = useState<AdminPostRow[]>();
   const [removed, setRemoved] = useState<RemovedStation[]>();
+  // 已注销账号。管理员在这里能看到「谁走了」，并决定要不要恢复。
+  const [deletedAccounts, setDeletedAccounts] = useState<AdminDeletedAccount[]>();
   const [removedPosts, setRemovedPosts] = useState<RemovedPost[]>();
   const [published, setPublished] = useState<AdminPostRow[]>();
   const [reports, setReports] = useState<AdminReport[]>();
@@ -146,6 +198,10 @@ export default function Admin() {
       if (active === 'removedPosts') {
         const data = (await admin.listRemovedPosts(signal)).items;
         if (!signal?.aborted) setRemovedPosts(data);
+      }
+      if (active === 'accounts') {
+        const data = (await admin.listDeletedAccounts(signal)).items;
+        if (!signal?.aborted) setDeletedAccounts(data);
       }
       if (active === 'reports') {
         const data = await admin.listReports('open', REPORTS_PAGE_SIZE, null, signal);
@@ -512,6 +568,9 @@ export default function Admin() {
         <button type="button" role="tab" aria-selected={tab === 'reports'} className={`btn btn-small ${tab === 'reports' ? 'btn-red' : 'btn-ghost'}`} onClick={() => setTab('reports')}>
           举报 {reports ? `(${reportTotal})` : ''}
         </button>
+        <button type="button" role="tab" aria-selected={tab === 'accounts'} className={`btn btn-small ${tab === 'accounts' ? 'btn-red' : 'btn-ghost'}`} onClick={() => setTab('accounts')}>
+          账号
+        </button>
       </div>
       {/* 退出不是页签：它不切换内容区，放在 tablist 外面，否则读屏会把它
           念成一个「当前未选中」的页签。 */}
@@ -838,6 +897,38 @@ export default function Admin() {
                 </li>
               )}
             </ul>
+          )
+      )}
+
+      {tab === 'accounts' && (
+        deletedAccounts === undefined ? <Skeleton /> : deletedAccounts.length === 0
+          ? <p className="state">没有已注销的账号</p>
+          : (
+            <>
+              <p className="hint">
+                注销是用户自己的决定：账号行保留、用户名永久占用、内容保留但署名变成
+                「已注销用户」。恢复只能由这里做，投票与收藏在注销时已删除，找不回来。
+              </p>
+              <ul className="card-list">
+                {deletedAccounts.map(account => (
+                  <li key={account.handle}>
+                    <p>{account.handle}</p>
+                    <p className="hint">
+                      注销于 {displayTime(account.deletedAt)}，仍在线 {account.postCount} 篇文章
+                    </p>
+                    <div className="tags">
+                      <ConfirmButton
+                        label="恢复账号" tone="red" busy={busy}
+                        description={`恢复 ${account.handle}？昵称会回落为用户名，投票与收藏不会回来。`}
+                        confirmLabel="确认恢复"
+                        onConfirm={async () => { await act(() => admin.restoreAccount(account.handle), '已恢复'); }}
+                      />
+                      <TokenAdjust handle={account.handle} />
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            </>
           )
       )}
 
