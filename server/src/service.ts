@@ -9,7 +9,7 @@ import type {
   User, VendorWithModels, Vote,
 } from '@zhidedeng/shared';
 import { ApiError, isDatabaseBusyError, isUniqueConstraintError } from './errors.ts';
-import { INITIAL_TOKENS, verifyPassword } from './auth.ts';
+import { verifyPassword } from './auth.ts';
 import { Store } from './database.ts';
 import type { PostRecord, StationRecord } from './database.ts';
 // 只借一个纯函数算 hostname，避免和 submissions.ts 之间形成运行时循环依赖：
@@ -220,7 +220,11 @@ export class Service {
   private requireUser(): User {
     const existing = this.store.get('user', this.user);
     if (existing) return existing;
-    const rebuilt: User = { handle: this.user, nickname: this.user, avatar: '', bio: '', tokens: INITIAL_TOKENS };
+    // 余额从账本取，不要塞 INITIAL_TOKENS：那样 /api/me 会显示 120 而 Token 页
+    // 显示 0，同一个数字两个答案。账本里有历史流水的话这里自然就是真实余额。
+    const rebuilt: User = {
+      handle: this.user, nickname: this.user, avatar: '', bio: '', tokens: balanceOf(this.store, this.user),
+    };
     this.store.put('user', this.user, rebuilt);
     return rebuilt;
   }
@@ -618,9 +622,16 @@ export class Service {
     return this.store.transaction(() => {
       const me = this.getMe();
       if (me.checkedInToday) throw new ApiError(409, 'ALREADY_CHECKED_IN', '今天已经签到过了');
+      const date = shanghaiDate.format(this.now());
+      // 账本才是「今天签过没有」的最终判据：注销会删掉 checkins 行、账本留着，
+      // 恢复账号后同一再签到就会撞上已有的 onceKey。先在这里挡住，
+      // 免得走到 appendLedger 才发现「金额对不上」（见 LEDGER_CONFLICT）。
+      const alreadyBooked = this.store.db.prepare(
+        'SELECT 1 FROM token_ledger WHERE handle = ? AND onceKey = ?',
+      ).get(this.user, `checkin:${date}`);
+      if (alreadyBooked) throw new ApiError(409, 'ALREADY_CHECKED_IN', '今天已经签到过了');
       const streak = me.streak + 1;
       const tokensAwarded = 10 + Math.min(streak, 7);
-      const date = shanghaiDate.format(this.now());
       this.store.db.prepare('INSERT INTO checkins (userHandle,date,tokensAwarded,streak) VALUES (?,?,?,?)').run(this.user, date, tokensAwarded, streak);
       // 余额只从流水算：直接把 user.tokens 加一下的话，「签到」和「兑换」两条
       // 路径的并发会互相覆盖，用户的余额和账本对不上。
@@ -744,7 +755,9 @@ export class Service {
         kind: 'flower',
         // 用昵称而不是裸 handle：站内其它地方都只显示昵称，
         // 在通知里露出登录名等于把「谁是谁」对上了号。
-        title: `${this.author(row.handle).nickname} 给你的《${title}》送了一朵花`,
+        // 注销账号不给 handle：站内别处只显示昵称，通知里露登录名等于对上号；
+        // 而且「已注销用户·handle」这种兜底昵称本身就带着登录名。
+        title: `${this.store.get('user', row.handle)?.nickname ?? '已注销用户'} 给你的《${title}》送了一朵花`,
         detail: null,
         // 文章此刻在线才给链接（上面已经按 removedAt 过滤，这里只是再确认一次）。
         href: this.store.get('post', row.targetId) ? `/posts/${row.targetId}` : null,

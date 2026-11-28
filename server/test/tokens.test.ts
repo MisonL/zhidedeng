@@ -381,12 +381,11 @@ describe('Token 账本', () => {
     expect(shopAfter.balance).toBe(expected);
   });
 
-  it('签到流水已存在时，重复入账返回账本上的余额而不是幻影值', async () => {
+  it('账本才是「今天签过没有」的判据：恢复账号后同一天再签到被挡', async () => {
     const alice = await account('alice');
     const first = await (await alice.call('POST', '/api/me/checkin', {})).json() as { tokens: number };
     // 注销会删掉 checkins 行，但账本留着（审计记录）。恢复后同一天再签到，
-    // onceKey 撞上已有的那笔——这时必须回读旧行，不能返回「旧余额 + 本次奖励」
-    // 这个根本没落库的数字（实测响应 782、账本 771）。
+    // 如果只信 checkins 就会再发一次币——账本里的 onceKey 才是最终判据。
     await alice.call('POST', '/api/me/delete', { password: PASSWORD, confirm: '注销' });
     expect((await server.app.request('/api/admin/accounts/alice/restore', { method: 'POST', headers: bearer })).status).toBe(200);
     const login = await server.app.request('/api/auth/login', {
@@ -394,15 +393,44 @@ describe('Token 账本', () => {
     });
     const cookie = (login.headers.get('set-cookie') ?? '').split(';')[0];
     const again = await server.app.request('/api/me/checkin', { method: 'POST', headers: { ...json, cookie }, body: '{}' });
-    expect(again.status).toBe(200);
-    const body = await again.json() as { tokens: number };
-    expect(body.tokens).toBe(first.tokens);
+    expect(again.status).toBe(409);
+    expect(await again.json()).toMatchObject({ error: { code: 'ALREADY_CHECKED_IN' } });
     expect(server.db.prepare("SELECT count(*) AS c FROM token_ledger WHERE handle = 'alice' AND reason = 'checkin'").get()).toEqual({ c: 1 });
-    // /api/me 与 Token 页也要一致。
+    // /api/me 与 Token 页必须一致。
     const me = await (await server.app.request('/api/me', { headers: { cookie } })).json() as { tokens: number };
     const shopAfter = await (await server.app.request('/api/me/tokens', { headers: { cookie } })).json() as GetMyTokensResponse;
     expect(me.tokens).toBe(first.tokens);
     expect(shopAfter.balance).toBe(first.tokens);
+  });
+
+  it('同一来源同一金额重放：只记一次、返回账本上的余额、缓存也拉回来', async () => {
+    const alice = await account('alice');
+    const { appendLedger, balanceOf } = await import('../src/tokens.ts');
+    const store = server.store;
+    const at = clock.toISOString();
+    // 缓存被人为改脏，模拟「有别的写入方绕过账本直接写了 user.tokens」。
+    const dirty = store.get('user', 'alice')!;
+    store.put('user', 'alice', { ...dirty, tokens: 999 });
+    const first = appendLedger(store, { handle: 'alice', delta: 10, reason: 'checkin', onceKey: 'checkin:2026-11-15', at });
+    const replay = appendLedger(store, { handle: 'alice', delta: 10, reason: 'checkin', onceKey: 'checkin:2026-11-15', at });
+    // 不能返回「旧余额 + 本次 delta」这个没落库的幻影值。
+    expect(first.balanceAfter).toBe(130);
+    expect(replay.balanceAfter).toBe(130);
+    expect(server.db.prepare("SELECT count(*) AS c FROM token_ledger WHERE handle = 'alice' AND onceKey LIKE 'checkin:%'").get()).toEqual({ c: 1 });
+    // 冲突分支跳过了缓存写入，必须在这里把缓存拉回账本，否则 /api/me 停在 999。
+    expect(balanceOf(store, 'alice')).toBe(130);
+    expect(store.get('user', 'alice')!.tokens).toBe(130);
+  });
+
+  it('同一来源但金额不同：拒绝入账，不假装发放成功', async () => {
+    const alice = await account('alice');
+    const { appendLedger } = await import('../src/tokens.ts');
+    const at = clock.toISOString();
+    appendLedger(server.store, { handle: 'alice', delta: 13, reason: 'checkin', onceKey: 'checkin:2026-11-15', at });
+    expect(() => appendLedger(server.store, { handle: 'alice', delta: 11, reason: 'checkin', onceKey: 'checkin:2026-11-15', at }))
+      .toThrowError(/拒绝重复入账/);
+    expect(server.db.prepare("SELECT delta FROM token_ledger WHERE handle = 'alice' AND onceKey = 'checkin:2026-11-15'").get())
+      .toEqual({ delta: 13 });
   });
 
   it('同一个请求编号换了文章也算冲突，不能拿旧单假装送到了新文章', async () => {
@@ -434,6 +462,112 @@ describe('Token 账本', () => {
     expect(stored.payload).not.toContain('会被导出的文章');
   });
 
+  it('重启时会自动给老库补期初流水（不靠人工调函数）', async () => {
+    const { openDatabase } = await import('../src/node-app.ts');
+    const { mkdtempSync, rmSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const dir = mkdtempSync(join(tmpdir(), 'zhidedeng-legacy-'));
+    const file = join(dir, 'legacy.db');
+    try {
+      // 造一个「账本上线前」的库：只有 user 行里的 tokens，没有流水。
+      const legacy = openDatabase(file);
+      legacy.prepare("INSERT INTO entities (kind, id, data) VALUES ('user', 'old-timer', ?)")
+        .run(JSON.stringify({ handle: 'old-timer', nickname: '老用户', avatar: '', bio: '', tokens: 375 }));
+      legacy.close();
+
+      // 重新打开 = 服务重启：迁移必须自己跑起来，而不是等谁手动调一下。
+      const reopened = openDatabase(file);
+      expect(reopened.prepare("SELECT delta, balanceAfter FROM token_ledger WHERE handle = 'old-timer'").get())
+        .toEqual({ delta: 375, balanceAfter: 375 });
+      // 再开一次不会翻倍。
+      reopened.close();
+      const again = openDatabase(file);
+      expect(again.prepare("SELECT count(*) AS c FROM token_ledger WHERE handle = 'old-timer'").get()).toEqual({ c: 1 });
+      again.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('老库迁移：user.tokens 里已有的余额补成账本首条流水', async () => {
+    // 账本上线前的库只有 user 行里的 tokens。不补这一条，升级后余额会变成 0，
+    // 第一次签到还会把缓存写成「0 + 奖励」，看着像凭空被清空。
+    const { seedTokenLedger } = await import('../src/tokens.ts');
+    server.store.put('user', 'legacy', { handle: 'legacy', nickname: '老用户', avatar: '', bio: '', tokens: 307 });
+    // 演示账号（seed 出来的）也带 tokens，所以这里可能补不止一条；只关心 legacy。
+    expect(seedTokenLedger(server.store, clock)).toBeGreaterThanOrEqual(1);
+    expect(server.db.prepare("SELECT delta, balanceAfter, reason FROM token_ledger WHERE handle = 'legacy'").get())
+      .toEqual({ delta: 307, balanceAfter: 307, reason: 'admin_grant' });
+    // 幂等：再跑一次什么都不做（否则每次重启余额翻倍）。
+    expect(seedTokenLedger(server.store, clock)).toBe(0);
+    expect(server.db.prepare("SELECT count(*) AS c FROM token_ledger WHERE handle = 'legacy'").get()).toEqual({ c: 1 });
+    // 已经有流水的账号（注册用户）不会被重复补。
+    await account('alice');
+    expect(seedTokenLedger(server.store, clock)).toBe(0);
+  });
+
+  it('收花上限不跨作者串账：另一位作者照常能收到', async () => {
+    const alice = await account('alice');
+    const bob = await account('bob');
+    const carol = await account('carol');
+    server.db.prepare("UPDATE token_ledger SET balanceAfter = 5000 WHERE handle = 'alice'").run();
+    const bobPost = await publishedPost(bob, 'bob 的文章');
+    const carolPost = await publishedPost(carol, 'carol 的文章');
+    expect((await alice.redeem('flower', bobPost)).status).toBe(200);
+    // bob 收到一朵不影响 carol 的额度。
+    expect((await alice.redeem('flower', carolPost)).status).toBe(200);
+    expect(server.db.prepare("SELECT count(*) AS c FROM redemptions WHERE itemKey = 'flower'").get()).toEqual({ c: 2 });
+  });
+
+  it('导出重放不扣钱，并且给的是重新生成的内容而不是摘要', async () => {
+    const alice = await account('alice');
+    server.db.prepare("UPDATE token_ledger SET balanceAfter = 1000 WHERE handle = 'alice'").run();
+    await publishedPost(alice, '重放也要看得到');
+    const first = await alice.redeem('export', undefined, 'export-replay-01');
+    const firstBody = await first.json() as RedeemTokensResponse;
+    const balanceAfterFirst = firstBody.balance;
+
+    // 期间又写了一篇：重放拿到的应该是「现在」的全量，不是上次那份摘要。
+    await publishedPost(alice, '后来又写了一篇');
+    const replay = await alice.redeem('export', undefined, 'export-replay-01');
+    expect(replay.status).toBe(200);
+    const replayBody = await replay.json() as RedeemTokensResponse;
+    expect(replayBody.balance).toBe(balanceAfterFirst);
+    const payload = replayBody.order.payload as { posts: Array<{ title: string }> };
+    expect(payload.posts.map(post => post.title)).toContain('后来又写了一篇');
+    expect(server.db.prepare("SELECT count(*) AS c FROM redemptions WHERE handle = 'alice' AND itemKey = 'export'").get()).toEqual({ c: 1 });
+  });
+
+  it('补签不带目标、重放同一个请求编号：返回原单而不是「串号冲突」', async () => {
+    const alice = await account('alice');
+    server.db.prepare("UPDATE token_ledger SET balanceAfter = 1000 WHERE handle = 'alice'").run();
+    const key = (offset: number) => new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit',
+    }).format(new Date(clock.getTime() - offset * 86_400_000));
+    server.db.prepare('INSERT INTO checkins (userHandle,date,tokensAwarded,streak) VALUES (?,?,?,?)').run('alice', key(2), 13, 3);
+    const first = await alice.redeem('makeup', undefined, 'makeup-replay-01');
+    expect(first.status).toBe(200);
+    const replay = await alice.redeem('makeup', undefined, 'makeup-replay-01');
+    // 不带 targetId 时归一成「昨天」再比幂等键，否则重放会被判成串号。
+    expect(replay.status).toBe(200);
+    expect((await replay.json() as RedeemTokensResponse).order.id).toBe((await first.json() as RedeemTokensResponse).order.id);
+    expect(server.db.prepare("SELECT count(*) AS c FROM redemptions WHERE handle = 'alice' AND itemKey = 'makeup'").get()).toEqual({ c: 1 });
+  });
+
+  it('花通知不露登录名：发送者注销后只显示「已注销用户」', async () => {
+    const alice = await account('alice');
+    const bob = await account('bob');
+    const id = await publishedPost(bob, '被送花的文章');
+    expect((await alice.redeem('flower', id)).status).toBe(200);
+    await alice.call('POST', '/api/me/delete', { password: PASSWORD, confirm: '注销' });
+    const notices = await (await bob.call('GET', '/api/me/notifications?pageSize=20')).json() as
+      { items: Array<{ title: string }> };
+    const flower = notices.items.find(item => item.title.includes('送了一朵花'));
+    expect(flower?.title).toContain('已注销用户');
+    expect(flower?.title).not.toContain('alice');
+  });
+
   it('未登录拿不到余额也兑换不了', async () => {
     expect((await server.app.request('/api/me/tokens')).status).toBe(401);
     expect((await server.app.request('/api/me/tokens/ledger')).status).toBe(401);
@@ -447,6 +581,43 @@ describe('Token 账本', () => {
     const alice = await account('alice');
     const response = await alice.redeem('rank-boost');
     expect(response.status).toBe(400);
+  });
+
+  it('今天已经签到过也能补昨天，并把今天的连续天数接上', async () => {
+    const alice = await account('alice');
+    server.db.prepare("UPDATE token_ledger SET balanceAfter = 1000 WHERE handle = 'alice'").run();
+    // 前天签过（streak 8），昨天漏了，今天签到时 streak 只能从 1 开始。
+    const day = (offset: number) => new Date(clock.getTime() - offset * 86_400_000);
+    const key = (offset: number) => new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit',
+    }).format(day(offset));
+    server.db.prepare('INSERT INTO checkins (userHandle,date,tokensAwarded,streak) VALUES (?,?,?,?)').run('alice', key(2), 13, 8);
+    server.db.prepare('INSERT INTO checkins (userHandle,date,tokensAwarded,streak) VALUES (?,?,?,?)').run('alice', key(0), 11, 1);
+
+    const filled = await alice.redeem('makeup', key(1));
+    expect(filled.status).toBe(200);
+    const rows = server.db.prepare('SELECT date, tokensAwarded, streak FROM checkins WHERE userHandle = ? ORDER BY date').all('alice') as
+      Array<{ date: string; tokensAwarded: number; streak: number }>;
+    // 昨天补在中间，今天从 1 接成 10（8 + 昨天 + 今天）。
+    expect(rows.map(row => row.streak)).toEqual([8, 9, 10]);
+    // 补的那天不发币。
+    expect(rows.find(row => row.date === key(1))?.tokensAwarded).toBe(0);
+  });
+
+  it('今天的连续天数不是 1 时不去动它（不制造脏数据）', async () => {
+    const alice = await account('alice');
+    server.db.prepare("UPDATE token_ledger SET balanceAfter = 1000 WHERE handle = 'alice'").run();
+    const key = (offset: number) => new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit',
+    }).format(new Date(clock.getTime() - offset * 86_400_000));
+    // 前天连续 8，今天记的是 4（历史遗留/手工修过）。
+    // 宽松条件（today <= anchor + 2，即 4 <= 10）会把今天强行改成 10，
+    // 凭空造出一条 8/9/10 的假记录；严格条件只认「今天从 1 重新开始」。
+    server.db.prepare('INSERT INTO checkins (userHandle,date,tokensAwarded,streak) VALUES (?,?,?,?)').run('alice', key(2), 13, 8);
+    server.db.prepare('INSERT INTO checkins (userHandle,date,tokensAwarded,streak) VALUES (?,?,?,?)').run('alice', key(0), 11, 4);
+    expect((await alice.redeem('makeup', key(1))).status).toBe(200);
+    const today = server.db.prepare('SELECT streak FROM checkins WHERE userHandle = ? AND date = ?').get('alice', key(0)) as { streak: number };
+    expect(today.streak).toBe(4);
   });
 
   it('注销后徽章被清掉，同名重注册也继承不到 Token', async () => {

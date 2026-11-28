@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import type { FormEvent } from 'react';
 import { feishuHostnameKey } from '@zhidedeng/shared';
 import type { Station, SubmissionRecord } from '@zhidedeng/shared';
@@ -77,6 +77,12 @@ function TokenAdjust({ handle: fixedHandle = '' }: { handle?: string }) {
   // 从已注销列表进来时 handle 固定；从页面顶部进来时手填（活跃账号也要能补发）。
   const [open, setOpen] = useState(false);
   const [handle, setHandle] = useState(fixedHandle);
+  // 表单 id 必须唯一：页面上会同时有多份这个表单（顶部一份 + 每个已注销账号一份），
+  // 用 handle 拼 id 会在 handle 为空时撞成同一个，label 指到别人家的输入框。
+  const uid = useId();
+  const deltaId = `${uid}-delta`;
+  const memoId = `${uid}-memo`;
+  const handleId = `${uid}-handle`;
   const [delta, setDelta] = useState('');
   const [memo, setMemo] = useState('');
   const [message, setMessage] = useState<{ ok: boolean; text: string }>();
@@ -90,7 +96,9 @@ function TokenAdjust({ handle: fixedHandle = '' }: { handle?: string }) {
     if (!memo.trim()) return setMessage({ ok: false, text: '必须填写理由' });
     setBusy(true);
     try {
-      const result = await admin.adjustTokens(handle.trim().toLowerCase(), value, memo.trim());
+      // 大小写不转：服务端按 usernameKey（小写）查，输入原样传过去就好，
+      // 响应里的 handle 是账号的规范写法，回显用它。
+      const result = await admin.adjustTokens(handle.trim(), value, memo.trim());
       setMessage({ ok: true, text: `已调整，当前余额 ${result.balance}` });
       setDelta(''); setMemo('');
     } catch (error) {
@@ -114,17 +122,17 @@ function TokenAdjust({ handle: fixedHandle = '' }: { handle?: string }) {
       <div className="field-row">
         {fixedHandle === '' && (
           <div className="field">
-            <label className="field-label" htmlFor="token-handle">用户名</label>
-            <input id="token-handle" value={handle} onChange={event => setHandle(event.target.value)} />
+            <label className="field-label" htmlFor={handleId}>用户名</label>
+            <input id={handleId} value={handle} onChange={event => setHandle(event.target.value)} />
           </div>
         )}
         <div className="field">
-          <label className="field-label" htmlFor={`token-delta-${handle || 'any'}`}>增减（负数＝扣回）</label>
-          <input id={`token-delta-${handle || 'any'}`} value={delta} onChange={event => setDelta(event.target.value)} inputMode="numeric" />
+          <label className="field-label" htmlFor={deltaId}>增减（负数＝扣回）</label>
+          <input id={deltaId} value={delta} onChange={event => setDelta(event.target.value)} inputMode="numeric" />
         </div>
         <div className="field">
-          <label className="field-label" htmlFor={`token-memo-${handle || 'any'}`}>理由（必填）</label>
-          <input id={`token-memo-${handle || 'any'}`} value={memo} onChange={event => setMemo(event.target.value)} maxLength={200} />
+          <label className="field-label" htmlFor={memoId}>理由（必填）</label>
+          <input id={memoId} value={memo} onChange={event => setMemo(event.target.value)} maxLength={200} />
         </div>
       </div>
       {message && <p className={message.ok ? 'form-success' : 'form-error'}>{message.text}</p>}

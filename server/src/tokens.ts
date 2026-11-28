@@ -94,6 +94,18 @@ export function appendLedger(store: Store, input: {
         'SELECT * FROM token_ledger WHERE handle = ? AND onceKey = ?',
       ).get(input.handle, input.onceKey ?? '') as SqlRow | undefined;
       if (!existing) throw error;
+      // 同一个来源事件、金额却不同：说明有一处的计算变了（或有人手工补过）。
+      // 静默按旧金额返回会让调用方以为「这次发放成功了」，而库里根本没这笔。
+      if ((existing.delta as number) !== input.delta) {
+        throw new ApiError(409, 'LEDGER_CONFLICT',
+          `这个来源已经记过 ${existing.delta}，本次是 ${input.delta}，拒绝重复入账`);
+      }
+      // 顺手把缓存拉回账本：冲突分支跳过了下面的缓存写入，不补的话
+      // user.tokens 会一直停在旧值上（实测 /api/me 与 Token 页对不上）。
+      const cached = store.get('user', input.handle);
+      if (cached && cached.tokens !== existing.balanceAfter) {
+        store.put('user', input.handle, { ...cached, tokens: existing.balanceAfter as number });
+      }
       return {
         id: existing.id as string, handle: existing.handle as string, delta: existing.delta as number,
         balanceAfter: existing.balanceAfter as number, reason: existing.reason as TokenLedgerEntry['reason'],
@@ -219,6 +231,11 @@ export function redeem(store: Store, handle: string, input: {
 }, now: Date): RedeemOutcome {
   const item = itemOf(input.itemKey);
   const at = now.toISOString();
+  // 补签的目标是「昨天」，缺省时就填上再比幂等键：否则同一个键重放时
+  // input.targetId 是 undefined、原单里是具体日期，会被判成「串号冲突」。
+  const normalizedTarget = item.key === 'makeup' && !input.targetId
+    ? shanghaiDay.format(new Date(now.getTime() - 86_400_000))
+    : input.targetId;
   return store.transaction(() => {
     const replay = store.db.prepare(
       'SELECT * FROM redemptions WHERE handle = ? AND idempotencyKey = ?',
@@ -226,11 +243,17 @@ export function redeem(store: Store, handle: string, input: {
     if (replay) {
       // 项目相同但目标不同也算冲突：同一个键换一篇文章送花，如果按旧单返回，
       // 用户以为花送到了新的那篇，实际上什么都没发生。
-      if (replay.itemKey !== input.itemKey || ((replay.targetId as string | null) ?? null) !== (input.targetId ?? null)) {
+      if (replay.itemKey !== input.itemKey || ((replay.targetId as string | null) ?? null) !== (normalizedTarget ?? null)) {
         throw new ApiError(409, 'IDEMPOTENCY_CONFLICT', '这个请求编号已经用在别的兑换上了，请换一个');
       }
       // 同一张单重放：余额按当前值返回，不再扣钱。
-      return { order: redemptionOf(replay), balance: balanceOf(store, handle), message: replayMessage(replay) };
+      // 导出这一项要**重新生成**内容：库里只存了摘要，把摘要当原包给回去
+      // 等于告诉用户「这是你上次那份」，其实什么都没有。重生成不花钱。
+      const replayed = redemptionOf(replay);
+      const order = replay.itemKey === 'export'
+        ? { ...replayed, payload: exportSnapshot(store, handle) }
+        : replayed;
+      return { order, balance: balanceOf(store, handle), message: replayMessage(replay) };
     }
 
     const used = monthlyUsed(store, handle, item.key, now);
@@ -294,7 +317,7 @@ export function redeem(store: Store, handle: string, input: {
     } else {
       // makeup：只补昨天，且必须是真的漏签了。
       const yesterday = shanghaiDay.format(new Date(now.getTime() - 86_400_000));
-      targetType = 'date'; targetId = input.targetId ?? yesterday;
+      targetType = 'date'; targetId = normalizedTarget ?? yesterday;
       if (targetId !== yesterday) throw new ApiError(400, 'INVALID_INPUT', '补签卡只能补昨天');
       const filled = store.db.prepare('SELECT 1 FROM checkins WHERE userHandle = ? AND date = ?').get(handle, targetId);
       if (filled) throw new ApiError(409, 'ALREADY_CHECKED_IN', '昨天已经签到过了，不需要补签');
@@ -312,7 +335,10 @@ export function redeem(store: Store, handle: string, input: {
       // 一并接上，否则页面上会出现「补签成功，连续还是 1」这种自相矛盾的显示。
       const todayRow = store.db.prepare('SELECT streak FROM checkins WHERE userHandle = ? AND date = ?')
         .get(handle, today) as { streak: number } | undefined;
-      if (todayRow && todayRow.streak <= anchor.streak + 2) {
+      // 只修「今天是从 1 重新开始」这一种：todayRow.streak === 1 说明今天签到时
+      // 前面是断的。其它任何值都不该动——用「<= anchor+2」会把手工修过的、
+      // 或历史遗留的更高连续数强行压低/抬高（实测能造出 3/4/9 这种脏数据）。
+      if (todayRow && todayRow.streak === 1) {
         store.db.prepare('UPDATE checkins SET streak = ? WHERE userHandle = ? AND date = ?')
           .run(anchor.streak + 2, handle, today);
       }
@@ -380,4 +406,35 @@ function exportSnapshot(store: Store, handle: string): { handle: string; posts: 
 export function entitlementsOf(store: Store, handle: string): string[] {
   return (store.db.prepare('SELECT key FROM entitlements WHERE handle = ? ORDER BY grantedAt').all(handle) as Array<{ key: string }>)
     .map(row => row.key);
+}
+
+/**
+ * 老库迁移：把 `user.tokens` 里已有的余额补成账本的首条流水。
+ *
+ * 引入账本之前余额只存在 entities 的 user 行里。升级之后余额一律从流水派生，
+ * 不给老用户补这一条，他们的余额就会变成 0——第一次签到还会把缓存写成「0 + 奖励」，
+ * 看着像凭空被清空。补一条 `admin_grant` 并注明来源，对账时能一眼看出来。
+ *
+ * 幂等：只在该 handle 完全没有流水时补，所以可以每次启动都跑。
+ */
+export function seedTokenLedger(store: Store, now: Date): number {
+  const users = store.db.prepare(
+    "SELECT data FROM entities WHERE kind = 'user' AND removedAt IS NULL",
+  ).all() as Array<{ data: string }>;
+  let seeded = 0;
+  store.transaction(() => {
+    for (const row of users) {
+      const user = JSON.parse(row.data) as { handle?: string; tokens?: number };
+      const handle = user.handle;
+      const tokens = user.tokens ?? 0;
+      if (!handle || !Number.isInteger(tokens) || tokens <= 0) continue;
+      const existing = store.db.prepare('SELECT 1 FROM token_ledger WHERE handle = ? LIMIT 1').get(handle);
+      if (existing) continue;
+      store.db.prepare(
+        'INSERT INTO token_ledger (id,handle,delta,balanceAfter,reason,memo,onceKey,at) VALUES (?,?,?,?,?,?,?,?)',
+      ).run(randomUUID(), handle, tokens, tokens, 'admin_grant', '历史余额迁移（账本上线前）', null, now.toISOString());
+      seeded += 1;
+    }
+  });
+  return seeded;
 }

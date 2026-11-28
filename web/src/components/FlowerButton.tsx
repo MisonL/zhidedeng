@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { api } from '../api';
+import { ApiError, api } from '../api';
 import { useMe, useToast } from '../state';
 
 const COST = 5;
@@ -35,7 +35,8 @@ export default function FlowerButton({ postId }: { postId: string }) {
     } catch (cause) {
       // 409 ALREADY_TIPPED：说明这一篇之前送过（可能换了设备/清了缓存）。
       // 切到「已送花」比留一个点了永远报错的按钮更诚实。
-      if ((cause as Error).message.includes('已经给这篇文章送过花')) setSent(true);
+      // 判断用错误码而不是文案：文案会改，码不会。
+      if (cause instanceof ApiError && cause.code === 'ALREADY_TIPPED') setSent(true);
       else setError((cause as Error).message);
     } finally {
       setBusy(false);
